@@ -11,12 +11,10 @@ services:
       - ../appdata/etc-dnsmasq.d:/etc/dnsmasq.d
     environment:
       - TZ=${TZ:-Europe/Amsterdam}
-      # Pi-hole v6 config
       - FTLCONF_webserver_port=6001
       - FTLCONF_webserver_api_password=${PIHOLE_PASSWORD:-cubeos}
       - FTLCONF_dns_listeningMode=all
       - FTLCONF_dns_upstreams=1.1.1.1;8.8.8.8
-      # DHCP Configuration
       - FTLCONF_dhcp_active=true
       - FTLCONF_dhcp_start=192.168.42.10
       - FTLCONF_dhcp_end=192.168.42.250
@@ -26,6 +24,12 @@ services:
     cap_add:
       - NET_ADMIN
       - NET_RAW
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+        reservations:
+          memory: 128M
     labels:
       - "cubeos.core=true"
       - "cubeos.category=infrastructure"
