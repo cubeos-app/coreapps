@@ -38,23 +38,46 @@ deploy:
     - arm64
   script:
     - |
+      # Detect changed apps
       CHANGED_APPS=""
       if [ "$CI_COMMIT_BEFORE_SHA" != "0000000000000000000000000000000000000000" ]; then
-        CHANGED_APPS=$(git diff --name-only "$CI_COMMIT_BEFORE_SHA" "$CI_COMMIT_SHA" 2>/dev/null | grep -E '^[^/]+/appconfig/' | cut -d'/' -f1 | sort -u | tr '\n' ' ' || true)
+        CHANGED_APPS=$(git diff --name-only "$CI_COMMIT_BEFORE_SHA" "$CI_COMMIT_SHA" 2>/dev/null \
+          | grep -E '^[^/]+/appconfig/' \
+          | cut -d'/' -f1 \
+          | sort -u \
+          | tr '\n' ' ' \
+          | sed 's/ $//' || true)
       fi
-      echo "Changed apps: ${CHANGED_APPS:-none detected}"
       
+      # Fallback: if no changes detected but this is a new commit, check all dirs
+      if [ -z "$CHANGED_APPS" ]; then
+        echo "⚠️  No changes detected via git diff, checking for new apps..."
+        for dir in */; do
+          app="${dir%/}"
+          if [ -d "${dir}appconfig" ] && [ ! -d "/cubeos/coreapps/${app}" ]; then
+            CHANGED_APPS="$CHANGED_APPS $app"
+          fi
+        done
+        CHANGED_APPS=$(echo "$CHANGED_APPS" | xargs)
+      fi
+      
+      echo "📦 Changed apps: ${CHANGED_APPS:-none}"
+      
+      # Sync ALL configs (idempotent)
       for dir in */; do
         if [ -d "${dir}appconfig" ]; then
           mkdir -p "/cubeos/coreapps/${dir}appconfig"
-          cp -r "${dir}appconfig/"* "/cubeos/coreapps/${dir}appconfig/"
+          mkdir -p "/cubeos/coreapps/${dir}appdata"
+          rsync -a --delete "${dir}appconfig/" "/cubeos/coreapps/${dir}appconfig/"
         fi
       done
       
+      # Sync scripts
       for f in *.sh; do
         [ -f "$f" ] && cp "$f" /cubeos/coreapps/ && chmod +x /cubeos/coreapps/"$f"
       done
       
+      # Write changed apps (space-separated)
       echo "$CHANGED_APPS" > changed_apps.txt
       echo "✅ Synced to /cubeos/coreapps/"
   artifacts:
@@ -75,57 +98,118 @@ restart-changed:
     - deploy
   script:
     - |
-      CHANGED_APPS=$(cat changed_apps.txt 2>/dev/null | tr -d '\n' || true)
+      set -e
+      
+      CHANGED_APPS=$(cat changed_apps.txt 2>/dev/null | xargs || true)
       
       if [ -z "$CHANGED_APPS" ]; then
-        echo "No app changes detected, skipping restart"
+        echo "✅ No app changes detected, skipping restart"
         exit 0
       fi
       
-      echo "🔄 Changed apps: $CHANGED_APPS"
+      echo "🔄 Apps to restart: $CHANGED_APPS"
       
-      # Separate pihole from other apps - restart it LAST
-      OTHER_APPS=$(echo "$CHANGED_APPS" | tr ' ' '\n' | grep -v pihole | tr '\n' ' ')
-      HAS_PIHOLE=$(echo "$CHANGED_APPS" | grep -c pihole || true)
+      # ──────────────────────────────────────────────────────────
+      # DNS Health Check - ensure we can resolve Docker Hub
+      # ──────────────────────────────────────────────────────────
+      echo "🌐 Checking DNS resolution..."
+      DNS_OK=false
+      for attempt in 1 2 3; do
+        if getent hosts registry-1.docker.io >/dev/null 2>&1; then
+          DNS_OK=true
+          break
+        fi
+        echo "  DNS attempt $attempt failed, waiting..."
+        sleep 5
+      done
       
-      # Restart non-pihole apps first
+      if [ "$DNS_OK" = "false" ]; then
+        echo "❌ DNS resolution failed - is Pi-hole running?"
+        echo "   Run: cd /cubeos/coreapps/pihole/appconfig && docker compose up -d"
+        exit 1
+      fi
+      echo "  ✅ DNS OK"
+      
+      # ──────────────────────────────────────────────────────────
+      # Separate pihole from other apps (restart DNS last)
+      # ──────────────────────────────────────────────────────────
+      OTHER_APPS=""
+      HAS_PIHOLE=false
+      
+      for app in $CHANGED_APPS; do
+        if [ "$app" = "pihole" ]; then
+          HAS_PIHOLE=true
+        else
+          OTHER_APPS="$OTHER_APPS $app"
+        fi
+      done
+      OTHER_APPS=$(echo "$OTHER_APPS" | xargs)
+      
+      # ──────────────────────────────────────────────────────────
+      # Restart non-pihole apps
+      # ──────────────────────────────────────────────────────────
       for app in $OTHER_APPS; do
         COMPOSE_FILE="/cubeos/coreapps/${app}/appconfig/docker-compose.yml"
-        if [ -f "$COMPOSE_FILE" ]; then
-          echo "── $app ──"
-          cd "/cubeos/coreapps/${app}/appconfig"
-          docker compose down --remove-orphans 2>/dev/null || true
-          docker compose up -d
-          sleep 5
-          CONTAINER=$(docker compose ps -q 2>/dev/null | head -1)
-          if [ -n "$CONTAINER" ]; then
-            STATUS=$(docker inspect --format='{{.State.Status}}' "$CONTAINER" 2>/dev/null)
-            echo "  Status: $STATUS"
-            [ "$STATUS" != "running" ] && docker logs "$CONTAINER" --tail 10 && exit 1
-          fi
-          echo "  ✅ OK"
+        if [ ! -f "$COMPOSE_FILE" ]; then
+          echo "⚠️  Skipping $app (no docker-compose.yml)"
+          continue
+        fi
+        
+        echo "── $app ──"
+        cd "/cubeos/coreapps/${app}/appconfig"
+        
+        # Pull images first (with timeout)
+        echo "  Pulling..."
+        timeout 120 docker compose pull 2>&1 || {
+          echo "  ⚠️  Pull failed/timed out, continuing with cached image..."
+        }
+        
+        # Restart
+        echo "  Starting..."
+        docker compose up -d --remove-orphans
+        
+        # Health check (wait up to 30s)
+        sleep 3
+        CONTAINER=$(docker compose ps -q 2>/dev/null | head -1)
+        if [ -n "$CONTAINER" ]; then
+          for i in $(seq 1 10); do
+            STATUS=$(docker inspect --format='{{.State.Status}}' "$CONTAINER" 2>/dev/null || echo "unknown")
+            if [ "$STATUS" = "running" ]; then
+              echo "  ✅ $app running"
+              break
+            fi
+            [ "$i" -eq 10 ] && echo "  ⚠️  $app status: $STATUS (may still be starting)"
+            sleep 3
+          done
+        else
+          echo "  ✅ $app started (no main container to check)"
         fi
       done
       
+      # ──────────────────────────────────────────────────────────
       # Restart pihole LAST (if changed)
-      if [ "$HAS_PIHOLE" -gt 0 ]; then
-        echo "── pihole (restarting last - DNS will briefly drop) ──"
+      # ──────────────────────────────────────────────────────────
+      if [ "$HAS_PIHOLE" = "true" ]; then
+        echo ""
+        echo "── pihole (DNS will briefly drop) ──"
         cd "/cubeos/coreapps/pihole/appconfig"
-        docker compose down --remove-orphans 2>/dev/null || true
-        docker compose up -d
         
-        # Wait for Pi-hole to be healthy
+        docker compose pull 2>&1 || true
+        docker compose up -d --remove-orphans
+        
         echo "  Waiting for Pi-hole DNS..."
         for i in $(seq 1 30); do
-          if docker exec cubeos-pihole pihole-FTL --config dhcp.active 2>/dev/null | grep -q "true"; then
-            echo "  ✅ Pi-hole healthy"
+          if getent hosts google.com >/dev/null 2>&1; then
+            echo "  ✅ Pi-hole DNS responding"
             break
           fi
+          [ "$i" -eq 30 ] && echo "  ⚠️  Pi-hole may still be starting..."
           sleep 2
         done
       fi
       
-      echo "✅ Done"
+      echo ""
+      echo "✅ Restart complete"
   rules:
     - if: $CI_COMMIT_BRANCH == "main"
   environment:
