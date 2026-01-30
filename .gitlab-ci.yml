@@ -42,7 +42,7 @@ deploy:
       CHANGED_APPS=""
       if [ "$CI_COMMIT_BEFORE_SHA" != "0000000000000000000000000000000000000000" ]; then
         CHANGED_APPS=$(git diff --name-only "$CI_COMMIT_BEFORE_SHA" "$CI_COMMIT_SHA" 2>/dev/null \
-          | grep -E '^[^/]+/appconfig/' \
+          | grep -E '^[^/]+/(appconfig|src)/' \
           | cut -d'/' -f1 \
           | sort -u \
           | tr '\n' ' ' \
@@ -63,12 +63,18 @@ deploy:
       
       echo "📦 Changed apps: ${CHANGED_APPS:-none}"
       
-      # Sync ALL configs (idempotent)
+      # Sync ALL configs and source (idempotent)
       for dir in */; do
         if [ -d "${dir}appconfig" ]; then
           mkdir -p "/cubeos/coreapps/${dir}appconfig"
           mkdir -p "/cubeos/coreapps/${dir}appdata"
           rsync -a --delete "${dir}appconfig/" "/cubeos/coreapps/${dir}appconfig/"
+          
+          # Also sync src/ if it exists (for buildable apps)
+          if [ -d "${dir}src" ]; then
+            mkdir -p "/cubeos/coreapps/${dir}src"
+            rsync -a --delete "${dir}src/" "/cubeos/coreapps/${dir}src/"
+          fi
         fi
       done
       
@@ -158,14 +164,23 @@ restart-changed:
         echo "── $app ──"
         cd "/cubeos/coreapps/${app}/appconfig"
         
-        # Pull images first (with timeout)
-        echo "  Pulling..."
-        timeout 120 docker compose pull 2>&1 || {
-          echo "  ⚠️  Pull failed/timed out, continuing with cached image..."
-        }
+        # Check if this app needs building (has build: section)
+        if grep -q "^\s*build:" "$COMPOSE_FILE"; then
+          echo "  🔨 Building (local Dockerfile)..."
+          docker compose build --no-cache 2>&1 || {
+            echo "  ❌ Build failed!"
+            exit 1
+          }
+        else
+          # Pull images first (with timeout)
+          echo "  📥 Pulling..."
+          timeout 120 docker compose pull 2>&1 || {
+            echo "  ⚠️  Pull failed/timed out, continuing with cached image..."
+          }
+        fi
         
         # Restart
-        echo "  Starting..."
+        echo "  🚀 Starting..."
         docker compose up -d
         
         # Health check (wait up to 30s)
