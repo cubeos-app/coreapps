@@ -62,6 +62,8 @@ services:
   ollama:
     image: ollama/ollama:latest
     container_name: cubeos-ollama
+    ports:
+      - "11434:11434"
     restart: unless-stopped
     volumes:
       - ollama-data:/root/.ollama
