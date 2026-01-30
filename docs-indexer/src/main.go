@@ -438,7 +438,7 @@ func indexDocuments(documents []Document, collectionID string, config *Config) e
 
 		if resp.StatusCode != 200 && resp.StatusCode != 201 {
 			body, _ := io.ReadAll(resp.Body)
-			return fmt.Errorf("ChromaDB add failed: %s", string(body))
+			return fmt.Errorf("ChromaDB add failed (status %d): %s", resp.StatusCode, string(body))
 		}
 
 		log.Printf("  Added batch of %d documents", len(ids))
