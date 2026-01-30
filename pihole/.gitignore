@@ -1,0 +1,4 @@
+appdata/*
+!appdata/etc-pihole/
+appdata/etc-pihole/*
+!appdata/etc-pihole/custom.list
