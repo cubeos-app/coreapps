@@ -1,0 +1,50 @@
+stages:
+  - validate
+  - deploy
+
+validate-compose:
+  stage: validate
+  image: docker:24-cli
+  tags:
+    - multiarch
+  script:
+    - |
+      for dir in */; do
+        if [ -f "${dir}appconfig/docker-compose.yml" ]; then
+          echo "Checking ${dir}..."
+          docker compose -f "${dir}appconfig/docker-compose.yml" config -q || exit 1
+        fi
+      done
+      echo "✅ All compose files valid"
+  rules:
+    - if: $CI_COMMIT_BRANCH
+
+shellcheck:
+  stage: validate
+  image: koalaman/shellcheck-alpine:stable
+  tags:
+    - multiarch
+  script:
+    - find . -name "*.sh" -type f -exec shellcheck -x {} \;
+  rules:
+    - if: $CI_COMMIT_BRANCH
+  allow_failure: true
+
+deploy:
+  stage: deploy
+  tags:
+    - deploy
+    - arm64
+  script:
+    - |
+      for dir in */; do
+        [ -d "${dir}appconfig" ] && mkdir -p "/cubeos/coreapps/${dir}appconfig" && cp -r "${dir}appconfig/"* "/cubeos/coreapps/${dir}appconfig/"
+      done
+      for f in *.sh; do
+        [ -f "$f" ] && cp "$f" /cubeos/coreapps/ && chmod +x /cubeos/coreapps/"$f"
+      done
+      echo "✅ Synced. Run deploy-coreapps.sh to apply."
+  rules:
+    - if: $CI_COMMIT_BRANCH == "main"
+  environment:
+    name: production

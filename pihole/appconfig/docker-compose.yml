@@ -1,0 +1,28 @@
+# Pi-hole - Core App
+# Port: 6001 (Admin UI), 53 (DNS)
+# Network-wide ad blocking and local DNS
+
+services:
+  pihole:
+    image: pihole/pihole:latest
+    container_name: cubeos-pihole
+    restart: unless-stopped
+    network_mode: host
+    volumes:
+      - ../appdata/etc-pihole:/etc/pihole
+      - ../appdata/etc-dnsmasq.d:/etc/dnsmasq.d
+    environment:
+      - TZ=${TZ:-Europe/Amsterdam}
+      - WEBPASSWORD=${PIHOLE_PASSWORD:-cubeos}
+      - DNSMASQ_LISTENING=all
+      - PIHOLE_DNS_=1.1.1.1;8.8.8.8
+      - REV_SERVER=false
+      - FTLCONF_LOCAL_IPV4=192.168.42.1
+      - WEB_PORT=6001
+    cap_add:
+      - NET_ADMIN
+    labels:
+      - "cubeos.core=true"
+      - "cubeos.category=infrastructure"
+      - "cubeos.port=6001"
+      - "cubeos.description=Pi-hole - Network-wide ad blocking"

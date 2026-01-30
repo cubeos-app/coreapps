@@ -1,0 +1,27 @@
+# Backup Service - Core App
+# Port: 6005 (API)
+# MuleCube backup management service
+
+services:
+  backup:
+    image: mulecube/backup-service:latest
+    container_name: cubeos-backup
+    restart: unless-stopped
+    ports:
+      - "192.168.42.1:6005:8080"
+    volumes:
+      - /cubeos:/cubeos:ro
+      - /cubeos/backups:/backups
+      - ../appdata:/app/data
+    environment:
+      - TZ=${TZ:-Europe/Amsterdam}
+    labels:
+      - "cubeos.core=true"
+      - "cubeos.category=system"
+      - "cubeos.port=6005"
+      - "cubeos.description=Backup Service - System backup management"
+
+networks:
+  default:
+    name: cubeos-network
+    external: true

@@ -1,0 +1,28 @@
+# Homarr - Core App
+# Port: 6003 (Web UI)
+# Customizable dashboard for all services
+
+services:
+  homarr:
+    image: ghcr.io/ajnart/homarr:latest
+    container_name: cubeos-homarr
+    restart: unless-stopped
+    ports:
+      - "192.168.42.1:6003:7575"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ../appdata/configs:/app/data/configs
+      - ../appdata/icons:/app/public/icons
+      - ../appdata/data:/data
+    environment:
+      - TZ=${TZ:-Europe/Amsterdam}
+    labels:
+      - "cubeos.core=true"
+      - "cubeos.category=management"
+      - "cubeos.port=6003"
+      - "cubeos.description=Homarr - Service dashboard"
+
+networks:
+  default:
+    name: cubeos-network
+    external: true

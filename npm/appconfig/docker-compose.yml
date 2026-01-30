@@ -1,0 +1,36 @@
+# Nginx Proxy Manager - Core App
+# Port: 6000 (Admin UI), 80/443 (Proxy)
+
+services:
+  npm:
+    image: jc21/nginx-proxy-manager:latest
+    container_name: cubeos-npm
+    restart: unless-stopped
+    ports:
+      - "0.0.0.0:80:80"
+      - "0.0.0.0:443:443"
+      - "192.168.42.1:6000:81"
+    volumes:
+      - ../appdata/data:/data
+      - ../appdata/letsencrypt:/etc/letsencrypt
+    environment:
+      - TZ=${TZ:-Europe/Amsterdam}
+      - DISABLE_IPV6=true
+      # Auto-create admin user on first boot
+      - INITIAL_ADMIN_EMAIL=cubeos@cubeos.app
+      - INITIAL_ADMIN_PASSWORD=cubeos123
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:81/api/"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    labels:
+      - "cubeos.core=true"
+      - "cubeos.category=infrastructure"
+      - "cubeos.port=6000"
+      - "cubeos.description=Nginx Proxy Manager"
+
+networks:
+  default:
+    name: cubeos-network
+    external: true

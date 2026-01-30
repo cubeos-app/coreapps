@@ -1,0 +1,28 @@
+# Watchdog Service - Core App
+# No external port
+# MuleCube system health watchdog
+
+services:
+  watchdog:
+    image: mulecube/watchdog:latest
+    container_name: cubeos-watchdog
+    restart: unless-stopped
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - /proc:/host/proc:ro
+      - /sys:/host/sys:ro
+      - ../appdata:/app/data
+    environment:
+      - TZ=${TZ:-Europe/Amsterdam}
+      - HOST_PROC=/host/proc
+      - HOST_SYS=/host/sys
+    privileged: true
+    labels:
+      - "cubeos.core=true"
+      - "cubeos.category=system"
+      - "cubeos.description=Watchdog - System health monitor"
+
+networks:
+  default:
+    name: cubeos-network
+    external: true

@@ -1,0 +1,27 @@
+# Terminal Read-Only Service - Core App
+# Port: 6010 (Web Terminal)
+# Web-based terminal access (read-only/limited)
+
+services:
+  terminal-ro:
+    image: tsl0922/ttyd:latest
+    container_name: cubeos-terminal-ro
+    restart: unless-stopped
+    ports:
+      - "192.168.42.1:6010:7681"
+    volumes:
+      - /:/host:ro
+    environment:
+      - TZ=${TZ:-Europe/Amsterdam}
+    # Read-only mode - no write access
+    command: ttyd -R -t fontSize=14 -t theme={"background":"#1a1b26"} bash
+    labels:
+      - "cubeos.core=true"
+      - "cubeos.category=system"
+      - "cubeos.port=6010"
+      - "cubeos.description=Terminal RO - Read-only shell access"
+
+networks:
+  default:
+    name: cubeos-network
+    external: true

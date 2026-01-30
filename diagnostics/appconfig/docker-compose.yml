@@ -1,0 +1,31 @@
+# Diagnostics Service - Core App
+# Port: 6006 (API)
+# MuleCube system diagnostics and health checks
+
+services:
+  diagnostics:
+    image: mulecube/diagnostics:latest
+    container_name: cubeos-diagnostics
+    restart: unless-stopped
+    ports:
+      - "192.168.42.1:6006:8080"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - /proc:/host/proc:ro
+      - /sys:/host/sys:ro
+      - ../appdata:/app/data
+    environment:
+      - TZ=${TZ:-Europe/Amsterdam}
+      - HOST_PROC=/host/proc
+      - HOST_SYS=/host/sys
+    privileged: true
+    labels:
+      - "cubeos.core=true"
+      - "cubeos.category=system"
+      - "cubeos.port=6006"
+      - "cubeos.description=Diagnostics - System health monitoring"
+
+networks:
+  default:
+    name: cubeos-network
+    external: true

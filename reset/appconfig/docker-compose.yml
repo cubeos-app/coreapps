@@ -1,0 +1,28 @@
+# Reset Service - Core App
+# Port: 6007 (API)
+# MuleCube factory reset and recovery service
+
+services:
+  reset:
+    image: mulecube/reset-service:latest
+    container_name: cubeos-reset
+    restart: unless-stopped
+    ports:
+      - "192.168.42.1:6007:8080"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - /cubeos:/cubeos
+      - ../appdata:/app/data
+    environment:
+      - TZ=${TZ:-Europe/Amsterdam}
+    privileged: true
+    labels:
+      - "cubeos.core=true"
+      - "cubeos.category=system"
+      - "cubeos.port=6007"
+      - "cubeos.description=Reset Service - Factory reset capability"
+
+networks:
+  default:
+    name: cubeos-network
+    external: true
