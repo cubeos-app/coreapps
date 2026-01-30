@@ -1,7 +1,5 @@
-# Pi-hole - Core App
-# Port: 6001 (Admin UI), 53 (DNS)
-# Network-wide ad blocking and local DNS
-
+# Pi-hole - DNS + DHCP Server
+# Port: 6001 (Admin UI), 53 (DNS), 67 (DHCP)
 services:
   pihole:
     image: pihole/pihole:latest
@@ -13,16 +11,23 @@ services:
       - ../appdata/etc-dnsmasq.d:/etc/dnsmasq.d
     environment:
       - TZ=${TZ:-Europe/Amsterdam}
-      - WEBPASSWORD=${PIHOLE_PASSWORD:-cubeos}
-      - DNSMASQ_LISTENING=all
-      - PIHOLE_DNS_=1.1.1.1;8.8.8.8
-      - REV_SERVER=false
-      - FTLCONF_LOCAL_IPV4=192.168.42.1
-      - WEB_PORT=6001
+      # Pi-hole v6 config
+      - FTLCONF_webserver_port=6001
+      - FTLCONF_webserver_api_password=${PIHOLE_PASSWORD:-cubeos}
+      - FTLCONF_dns_listeningMode=all
+      - FTLCONF_dns_upstreams=1.1.1.1;8.8.8.8
+      # DHCP Configuration
+      - FTLCONF_dhcp_active=true
+      - FTLCONF_dhcp_start=192.168.42.10
+      - FTLCONF_dhcp_end=192.168.42.250
+      - FTLCONF_dhcp_router=192.168.42.1
+      - FTLCONF_dhcp_netmask=255.255.255.0
+      - FTLCONF_dhcp_leaseTime=24h
     cap_add:
       - NET_ADMIN
+      - NET_RAW
     labels:
       - "cubeos.core=true"
       - "cubeos.category=infrastructure"
       - "cubeos.port=6001"
-      - "cubeos.description=Pi-hole - Network-wide ad blocking"
+      - "cubeos.description=Pi-hole DNS + DHCP Server"
