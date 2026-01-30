@@ -23,6 +23,8 @@ services:
           memory: 128M
         reservations:
           memory: 64M
+    devices:
+      - /dev/i2c-1:/dev/i2c-1
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:9009/health"]
       interval: 30s
