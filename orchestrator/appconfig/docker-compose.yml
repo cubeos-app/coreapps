@@ -1,8 +1,8 @@
-# CubeOS API
-# Port: 9009
+# CubeOS API & Dashboard
+# Ports: 9009 (API), 8087 (Dashboard)
 services:
   api:
-    image: registry-gitlab.nuclearlighters.net/products/cubeos/api:latest
+    image: cubeos-api:latest
     container_name: cubeos-api
     restart: unless-stopped
     ports:
@@ -33,3 +33,25 @@ services:
       - "cubeos.category=system"
       - "cubeos.port=9009"
       - "cubeos.description=CubeOS API Server"
+
+  dashboard:
+    image: cubeos-dashboard:latest
+    container_name: cubeos-dashboard
+    restart: unless-stopped
+    network_mode: host
+    deploy:
+      resources:
+        limits:
+          memory: 64M
+        reservations:
+          memory: 32M
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8087/"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    labels:
+      - "cubeos.core=true"
+      - "cubeos.category=system"
+      - "cubeos.port=8087"
+      - "cubeos.description=CubeOS Dashboard"
