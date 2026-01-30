@@ -1,0 +1,76 @@
+# CubeOS Core Services
+services:
+  cubeos-api:
+    build:
+      context: ./api
+      dockerfile: Dockerfile
+    image: cubeos-api:v3
+    container_name: cubeos-api
+    restart: unless-stopped
+    volumes:
+      - /cubeos/data:/cubeos/data
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - /proc:/host/proc:ro
+      - /sys:/host/sys:ro
+      - /:/hostfs:ro
+      - /etc/hostapd:/etc/hostapd:ro
+      - /etc/dnsmasq.d:/etc/dnsmasq.d:ro
+      - /var/lib/misc:/var/lib/misc:ro
+      - /run/log/journal:/run/log/journal:ro
+      - /var/log/journal:/var/log/journal:ro
+      - /var/log:/var/log:ro
+      - /etc:/host/etc:ro
+    devices:
+      - /dev/i2c-1:/dev/i2c-1
+    environment:
+      - API_HOST=0.0.0.0
+      - API_PORT=9009
+      - DATABASE_PATH=/cubeos/data/cubeos.db
+      - JWT_SECRET=${JWT_SECRET:-cubeos-secret-change-in-production}
+      - JWT_EXPIRATION_HOURS=24
+      - HOST_PROC=/host/proc
+      - HOST_SYS=/host/sys
+      - HOST_ETC=/host/etc
+      - AP_INTERFACE=wlan0
+      - WAN_INTERFACE=eth0
+      - AP_IP=192.168.42.1
+      - TZ=${TZ:-Europe/Amsterdam}
+    privileged: true
+    network_mode: host
+    pid: host
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:9009/health"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
+    labels:
+      - "cubeos.service=api"
+      - "cubeos.category=infrastructure"
+      - "cubeos.core=true"
+      - "cubeos.description=CubeOS REST API"
+
+  cubeos-dashboard:
+    build:
+      context: ./dashboard
+      dockerfile: Dockerfile
+    image: cubeos-dashboard:latest
+    container_name: cubeos-dashboard
+    restart: unless-stopped
+    depends_on:
+      cubeos-api:
+        condition: service_healthy
+    environment:
+      - TZ=${TZ:-Europe/Amsterdam}
+    network_mode: host
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8087/"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
+    labels:
+      - "cubeos.service=dashboard"
+      - "cubeos.category=infrastructure"
+      - "cubeos.core=true"
+      - "cubeos.description=CubeOS Web Dashboard"
