@@ -166,7 +166,7 @@ restart-changed:
         
         # Restart
         echo "  Starting..."
-        docker compose up -d --remove-orphans
+        docker compose up -d
         
         # Health check (wait up to 30s)
         sleep 3
@@ -195,7 +195,7 @@ restart-changed:
         cd "/cubeos/coreapps/pihole/appconfig"
         
         docker compose pull 2>&1 || true
-        docker compose up -d --remove-orphans
+        docker compose up -d
         
         echo "  Waiting for Pi-hole DNS..."
         for i in $(seq 1 30); do
