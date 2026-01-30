@@ -5,7 +5,7 @@ stages:
 
 validate-compose:
   stage: validate
-  image: docker:24-cli
+  image: registry-gitlab.nuclearlighters.net/products/cubeos/coreapps/ci-utils:latest
   tags:
     - multiarch
   script:
@@ -22,7 +22,7 @@ validate-compose:
 
 shellcheck:
   stage: validate
-  image: koalaman/shellcheck-alpine:stable
+  image: registry-gitlab.nuclearlighters.net/products/cubeos/coreapps/ci-utils:latest
   tags:
     - multiarch
   script:
@@ -38,14 +38,12 @@ deploy:
     - arm64
   script:
     - |
-      # Detect changed coreapps
       CHANGED_APPS=""
       if [ "$CI_COMMIT_BEFORE_SHA" != "0000000000000000000000000000000000000000" ]; then
-        CHANGED_APPS=$(git diff --name-only $CI_COMMIT_BEFORE_SHA $CI_COMMIT_SHA | grep -E '^[^/]+/appconfig/' | cut -d'/' -f1 | sort -u | tr '\n' ' ')
+        CHANGED_APPS=$(git diff --name-only "$CI_COMMIT_BEFORE_SHA" "$CI_COMMIT_SHA" 2>/dev/null | grep -E '^[^/]+/appconfig/' | cut -d'/' -f1 | sort -u | tr '\n' ' ' || true)
       fi
-      echo "Changed apps: ${CHANGED_APPS:-none detected (full sync)}"
+      echo "Changed apps: ${CHANGED_APPS:-none detected}"
       
-      # Sync all appconfig directories
       for dir in */; do
         if [ -d "${dir}appconfig" ]; then
           mkdir -p "/cubeos/coreapps/${dir}appconfig"
@@ -53,20 +51,16 @@ deploy:
         fi
       done
       
-      # Sync scripts
       for f in *.sh; do
         [ -f "$f" ] && cp "$f" /cubeos/coreapps/ && chmod +x /cubeos/coreapps/"$f"
       done
       
-      # Save changed apps list for restart stage
-      echo "$CHANGED_APPS" > /tmp/changed_apps.txt
-      
+      echo "$CHANGED_APPS" > changed_apps.txt
       echo "✅ Synced to /cubeos/coreapps/"
   artifacts:
     paths:
-      - /tmp/changed_apps.txt
+      - changed_apps.txt
     expire_in: 10 minutes
-    when: always
   rules:
     - if: $CI_COMMIT_BRANCH == "main"
   environment:
@@ -77,59 +71,37 @@ restart-changed:
   tags:
     - deploy
     - arm64
+  needs:
+    - deploy
   script:
     - |
-      # Get changed apps from deploy stage or detect from git
-      if [ -f /tmp/changed_apps.txt ]; then
-        CHANGED_APPS=$(cat /tmp/changed_apps.txt)
-      else
-        CHANGED_APPS=$(git diff --name-only $CI_COMMIT_BEFORE_SHA $CI_COMMIT_SHA 2>/dev/null | grep -E '^[^/]+/appconfig/' | cut -d'/' -f1 | sort -u | tr '\n' ' ')
-      fi
+      CHANGED_APPS=$(cat changed_apps.txt 2>/dev/null | tr -d '\n' || true)
       
       if [ -z "$CHANGED_APPS" ]; then
         echo "No app changes detected, skipping restart"
         exit 0
       fi
       
-      echo "🔄 Restarting changed apps: $CHANGED_APPS"
+      echo "🔄 Restarting: $CHANGED_APPS"
       
       for app in $CHANGED_APPS; do
         COMPOSE_FILE="/cubeos/coreapps/${app}/appconfig/docker-compose.yml"
         if [ -f "$COMPOSE_FILE" ]; then
-          echo "──────────────────────────────────────"
-          echo "Restarting: $app"
+          echo "── $app ──"
           cd "/cubeos/coreapps/${app}/appconfig"
-          
-          # Down and up
           docker compose down --remove-orphans 2>/dev/null || true
           docker compose up -d
-          
-          # Wait for container to start
           sleep 5
-          
-          # Get container name from compose
           CONTAINER=$(docker compose ps -q 2>/dev/null | head -1)
           if [ -n "$CONTAINER" ]; then
-            STATUS=$(docker inspect --format='{{.State.Status}}' "$CONTAINER" 2>/dev/null || echo "unknown")
-            HEALTH=$(docker inspect --format='{{if .State.Health}}{{.State.Health.Status}}{{else}}no-healthcheck{{end}}' "$CONTAINER" 2>/dev/null || echo "unknown")
-            echo "  Container: $CONTAINER"
+            STATUS=$(docker inspect --format='{{.State.Status}}' "$CONTAINER" 2>/dev/null)
             echo "  Status: $STATUS"
-            echo "  Health: $HEALTH"
-            
-            if [ "$STATUS" != "running" ]; then
-              echo "  ❌ FAILED - container not running"
-              docker logs "$CONTAINER" --tail 20
-              exit 1
-            fi
-            echo "  ✅ OK"
-          else
-            echo "  ⚠️ No container found"
+            [ "$STATUS" != "running" ] && docker logs "$CONTAINER" --tail 10 && exit 1
           fi
+          echo "  ✅ OK"
         fi
       done
-      
-      echo "──────────────────────────────────────"
-      echo "✅ All changed apps restarted successfully"
+      echo "✅ Done"
   rules:
     - if: $CI_COMMIT_BRANCH == "main"
   environment:
