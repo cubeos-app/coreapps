@@ -30,4 +30,4 @@ services:
       - "cubeos.core=true"
       - "cubeos.category=infrastructure"
       - "cubeos.port=6001"
-      - "cubeos.description=Pi-hole DNS + DHCP Server"
+      - "cubeos.description=Pi-hole - DNS + DHCP Server"
