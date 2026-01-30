@@ -5,7 +5,7 @@
 #   cd /cubeos/coreapps/chromadb/appconfig
 #   docker compose up -d
 #
-# API: http://192.168.42.1:8100/api/v1
+# API: http://192.168.42.1:8000/api/v1
 
 services:
   chromadb:
@@ -17,7 +17,7 @@ services:
       - "com.centurylinklabs.watchtower.scope=chromadb"
     environment:
       - CHROMA_SERVER_HOST=192.168.42.1
-      - CHROMA_SERVER_HTTP_PORT=8100
+      - CHROMA_SERVER_HTTP_PORT=8000
       - IS_PERSISTENT=TRUE
       - PERSIST_DIRECTORY=/chroma/chroma
       - ANONYMIZED_TELEMETRY=FALSE
@@ -34,7 +34,7 @@ services:
         reservations:
           memory: 256M
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://192.168.42.1:8100/api/v2/heartbeat"]
+      test: ["CMD", "curl", "-f", "http://192.168.42.1:8000/api/v2/heartbeat"]
       interval: 30s
       timeout: 10s
       retries: 3
