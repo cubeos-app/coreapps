@@ -43,3 +43,4 @@ services:
       - "cubeos.core=true"
       - "cubeos.category=ai"
       - "cubeos.description=Documentation Indexer for RAG"
+# deployed vr 30 jan 2026 15:11:56 CET
