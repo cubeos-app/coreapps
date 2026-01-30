@@ -421,7 +421,7 @@ func indexDocuments(documents []Document, collectionID string, config *Config) e
 		}
 
 		// Add to ChromaDB
-		addURL := fmt.Sprintf("%s/collections/%s/add", baseURL, collectionID)
+		addURL := fmt.Sprintf("%s/tenants/default_tenant/databases/default_database/collections/%s/add", baseURL, collectionID)
 		addReq := ChromaAddRequest{
 			IDs:        ids,
 			Embeddings: embeddings,
