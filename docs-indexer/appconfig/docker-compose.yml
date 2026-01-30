@@ -30,7 +30,7 @@ services:
       - CHROMADB_PORT=${CHROMADB_PORT:-8000}
       - COLLECTION_NAME=${COLLECTION_NAME:-cubeos_docs}
       - SYNC_INTERVAL_HOURS=${SYNC_INTERVAL_HOURS:-6}
-      - CHUNK_SIZE=${CHUNK_SIZE:-500}
+      - CHUNK_SIZE=${CHUNK_SIZE:-300}
       - CHUNK_OVERLAP=${CHUNK_OVERLAP:-50}
       - TZ=${TZ:-Europe/Amsterdam}
     deploy:
