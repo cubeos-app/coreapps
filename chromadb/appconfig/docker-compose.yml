@@ -1,0 +1,57 @@
+# ChromaDB Vector Database for CubeOS RAG
+# Purpose: Stores document embeddings for AI-powered documentation search
+#
+# Usage:
+#   cd /cubeos/coreapps/chromadb/appconfig
+#   docker compose up -d
+#
+# API: http://192.168.42.1:8100/api/v1
+
+services:
+  chromadb:
+    image: chromadb/chroma:latest
+    container_name: chromadb
+    network_mode: host
+    labels:
+      - "com.centurylinklabs.watchtower.enable=true"
+      - "com.centurylinklabs.watchtower.scope=chromadb"
+    environment:
+      - CHROMA_SERVER_HOST=192.168.42.1
+      - CHROMA_SERVER_HTTP_PORT=8100
+      - IS_PERSISTENT=TRUE
+      - PERSIST_DIRECTORY=/chroma/chroma
+      - ANONYMIZED_TELEMETRY=FALSE
+      - ALLOW_RESET=TRUE
+      - CHROMA_SERVER_CORS_ALLOW_ORIGINS=["*"]
+      - TZ=${TZ:-Europe/Amsterdam}
+    volumes:
+      - ../appdata:/chroma/chroma
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+        reservations:
+          memory: 256M
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://192.168.42.1:8100/api/v1/heartbeat"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  watchtower:
+    image: containrrr/watchtower
+    container_name: watchtower-chromadb
+    labels:
+      - "com.centurylinklabs.watchtower.scope=chromadb"
+    command:
+      - --scope=chromadb
+    environment:
+      - WATCHTOWER_CLEANUP=true
+      - WATCHTOWER_LABEL_ENABLE=true
+      - WATCHTOWER_POLL_INTERVAL=86400
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    network_mode: host
+    restart: unless-stopped
