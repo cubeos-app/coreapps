@@ -82,9 +82,14 @@ restart-changed:
         exit 0
       fi
       
-      echo "🔄 Restarting: $CHANGED_APPS"
+      echo "🔄 Changed apps: $CHANGED_APPS"
       
-      for app in $CHANGED_APPS; do
+      # Separate pihole from other apps - restart it LAST
+      OTHER_APPS=$(echo "$CHANGED_APPS" | tr ' ' '\n' | grep -v pihole | tr '\n' ' ')
+      HAS_PIHOLE=$(echo "$CHANGED_APPS" | grep -c pihole || true)
+      
+      # Restart non-pihole apps first
+      for app in $OTHER_APPS; do
         COMPOSE_FILE="/cubeos/coreapps/${app}/appconfig/docker-compose.yml"
         if [ -f "$COMPOSE_FILE" ]; then
           echo "── $app ──"
@@ -101,6 +106,25 @@ restart-changed:
           echo "  ✅ OK"
         fi
       done
+      
+      # Restart pihole LAST (if changed)
+      if [ "$HAS_PIHOLE" -gt 0 ]; then
+        echo "── pihole (restarting last - DNS will briefly drop) ──"
+        cd "/cubeos/coreapps/pihole/appconfig"
+        docker compose down --remove-orphans 2>/dev/null || true
+        docker compose up -d
+        
+        # Wait for Pi-hole to be healthy
+        echo "  Waiting for Pi-hole DNS..."
+        for i in $(seq 1 30); do
+          if docker exec cubeos-pihole pihole-FTL --config dhcp.active 2>/dev/null | grep -q "true"; then
+            echo "  ✅ Pi-hole healthy"
+            break
+          fi
+          sleep 2
+        done
+      fi
+      
       echo "✅ Done"
   rules:
     - if: $CI_COMMIT_BRANCH == "main"
