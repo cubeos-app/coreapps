@@ -17,6 +17,10 @@ services:
     environment:
       - TZ=${TZ:-Europe/Amsterdam}
       - CUBEOS_DATA_DIR=/cubeos/data
+      - OLLAMA_HOST=192.168.42.1
+      - OLLAMA_PORT=11434
+      - CHROMADB_HOST=192.168.42.1
+      - CHROMADB_PORT=8100
     deploy:
       resources:
         limits:
