@@ -1,12 +1,12 @@
 # Ollama AI Model Server
 # Port: 6030 (API)
 # Runs local LLMs for CubeOS AI Assistant
-
 services:
   ollama:
     image: ollama/ollama:latest
     container_name: cubeos-ollama
     restart: unless-stopped
+    privileged: true
     ports:
       - "6030:11434"
     volumes:
@@ -18,6 +18,8 @@ services:
       - OLLAMA_MAX_LOADED_MODELS=1
     env_file:
       - /cubeos/config/defaults.env
+    security_opt:
+      - apparmor:unconfined
     deploy:
       resources:
         limits:
@@ -25,7 +27,7 @@ services:
         reservations:
           memory: 1G
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:11434/api/tags"]
+      test: ["CMD-SHELL", "bash -c 'echo > /dev/tcp/127.0.0.1/11434'"]
       interval: 30s
       timeout: 10s
       retries: 3

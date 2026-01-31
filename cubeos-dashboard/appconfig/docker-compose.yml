@@ -1,32 +1,32 @@
 # CubeOS Dashboard
-# Port: 6011
-# Vue.js 3 web frontend
-
+# Port: 6011 (Web UI)
+# Vue.js frontend for CubeOS management
 services:
   dashboard:
     image: ghcr.io/cubeos-app/dashboard:latest
     container_name: cubeos-dashboard
     restart: unless-stopped
+    privileged: true
     ports:
-      - "6011:80"
+      - "6011:8087"
     environment:
       - TZ=${TZ:-UTC}
       - API_URL=http://10.42.24.1:6010
     env_file:
       - /cubeos/config/defaults.env
+    security_opt:
+      - apparmor:unconfined
     deploy:
       resources:
         limits:
           memory: 64M
-        reservations:
-          memory: 32M
     healthcheck:
-      test: ["CMD", "wget", "-q", "--spider", "http://localhost:80/"]
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:8087/"]
       interval: 30s
       timeout: 5s
       retries: 3
     labels:
       - "cubeos.type=platform"
-      - "cubeos.category=system"
+      - "cubeos.category=platform"
       - "cubeos.port=6011"
       - "cubeos.description=CubeOS Dashboard"

@@ -1,7 +1,7 @@
 # Dozzle - Container Log Viewer
 # Port: 6012 (Web UI)
 # Real-time Docker container log viewer
-
+# NOTE: Scratch container - no healthcheck possible (no shell/tools available)
 services:
   dozzle:
     image: amir20/dozzle:latest

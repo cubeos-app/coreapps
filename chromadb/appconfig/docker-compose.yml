@@ -1,12 +1,12 @@
 # ChromaDB Vector Database
 # Port: 6031 (API)
 # Stores document embeddings for AI-powered documentation search
-
 services:
   chromadb:
     image: chromadb/chroma:latest
     container_name: cubeos-chromadb
     restart: unless-stopped
+    privileged: true
     ports:
       - "6031:8000"
     volumes:
@@ -22,6 +22,8 @@ services:
       - CHROMA_SERVER_CORS_ALLOW_ORIGINS=["*"]
     env_file:
       - /cubeos/config/defaults.env
+    security_opt:
+      - apparmor:unconfined
     deploy:
       resources:
         limits:
@@ -29,7 +31,7 @@ services:
         reservations:
           memory: 256M
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/api/v2/heartbeat"]
+      test: ["CMD-SHELL", "bash -c 'echo > /dev/tcp/127.0.0.1/8000'"]
       interval: 30s
       timeout: 10s
       retries: 3

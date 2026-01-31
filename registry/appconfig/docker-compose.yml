@@ -1,7 +1,6 @@
 # Local Docker Registry
-# Port: 5000
-# Offline-first image caching and distribution
-
+# Port: 5000 (Registry API)
+# Caches images for offline operation
 services:
   registry:
     image: registry:2
@@ -13,11 +12,8 @@ services:
       - /cubeos/data/registry:/var/lib/registry
       - ./config.yml:/etc/docker/registry/config.yml:ro
     environment:
-      - TZ=${TZ:-UTC}
       - REGISTRY_HTTP_ADDR=0.0.0.0:5000
       - REGISTRY_STORAGE_DELETE_ENABLED=true
-    env_file:
-      - /cubeos/config/defaults.env
     deploy:
       resources:
         limits:
@@ -25,7 +21,7 @@ services:
         reservations:
           memory: 64M
     healthcheck:
-      test: ["CMD", "wget", "-q", "--spider", "http://localhost:5000/v2/"]
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:5000/v2/"]
       interval: 30s
       timeout: 5s
       retries: 3

@@ -1,7 +1,7 @@
 # Nginx Proxy Manager
-# Port: 6000 (Admin UI), 80 (HTTP), 443 (HTTPS)
+# Port: 81 (Admin UI), 80 (HTTP), 443 (HTTPS)
 # Network: host mode (handles all ingress traffic)
-
+# NOTE: Admin UI is on port 81, NOT 6000!
 services:
   npm:
     image: jc21/nginx-proxy-manager:latest
@@ -29,5 +29,5 @@ services:
     labels:
       - "cubeos.type=system"
       - "cubeos.category=infrastructure"
-      - "cubeos.port=6000"
+      - "cubeos.port=81"
       - "cubeos.description=Nginx Proxy Manager"
