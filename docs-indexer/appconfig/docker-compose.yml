@@ -1,38 +1,34 @@
 # CubeOS Docs Indexer
-# Purpose: Syncs documentation from Git and indexes into ChromaDB for RAG
-#
-# Usage:
-#   cd /cubeos/coreapps/docs-indexer/appconfig
-#   docker compose up -d
-#
-# Environment Variables:
-#   DOCS_REPO_URL       - Git repository URL (default: https://github.com/cubeos-app/docs.git)
-#   SYNC_INTERVAL_HOURS - How often to re-sync (default: 6, set to 0 for one-shot)
+# Port: 6032
+# Syncs documentation from Git and indexes into ChromaDB for RAG
 
 services:
   docs-indexer:
     build:
       context: ../src
       dockerfile: Dockerfile
-    image: cubeos-docs-indexer:latest
+    image: ghcr.io/cubeos-app/docs-indexer:latest
     container_name: cubeos-docs-indexer
-    network_mode: host
     restart: unless-stopped
+    ports:
+      - "6032:8080"
     volumes:
       - /cubeos/docs:/cubeos/docs
     environment:
+      - TZ=${TZ:-UTC}
       - DOCS_REPO_URL=${DOCS_REPO_URL:-https://github.com/cubeos-app/docs.git}
       - DOCS_LOCAL_PATH=/cubeos/docs
-      - OLLAMA_HOST=${OLLAMA_HOST:-192.168.42.1}
-      - OLLAMA_PORT=${OLLAMA_PORT:-11434}
+      - OLLAMA_HOST=10.42.24.1
+      - OLLAMA_PORT=6030
       - EMBEDDING_MODEL=${EMBEDDING_MODEL:-nomic-embed-text}
-      - CHROMADB_HOST=${CHROMADB_HOST:-192.168.42.1}
-      - CHROMADB_PORT=${CHROMADB_PORT:-8000}
+      - CHROMADB_HOST=10.42.24.1
+      - CHROMADB_PORT=6031
       - COLLECTION_NAME=${COLLECTION_NAME:-cubeos_docs}
       - SYNC_INTERVAL_HOURS=${SYNC_INTERVAL_HOURS:-6}
       - CHUNK_SIZE=${CHUNK_SIZE:-300}
       - CHUNK_OVERLAP=${CHUNK_OVERLAP:-50}
-      - TZ=${TZ:-Europe/Amsterdam}
+    env_file:
+      - /cubeos/config/defaults.env
     deploy:
       resources:
         limits:
@@ -40,7 +36,7 @@ services:
         reservations:
           memory: 64M
     labels:
-      - "cubeos.core=true"
+      - "cubeos.type=ai"
       - "cubeos.category=ai"
+      - "cubeos.port=6032"
       - "cubeos.description=Documentation Indexer for RAG"
-# deployed vr 30 jan 2026 15:11:56 CET

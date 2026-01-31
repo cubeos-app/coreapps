@@ -8,14 +8,18 @@ CUSTOM_LIST="/cubeos/coreapps/pihole/appdata/etc-pihole/custom.list"
 if [ ! -f "$CUSTOM_LIST" ]; then
     echo "Creating Pi-hole custom DNS entries..."
     cat > "$CUSTOM_LIST" << 'ENTRIES'
-192.168.42.1 cubeos.cube
-192.168.42.1 api.cubeos.cube
-192.168.42.1 pihole.cubeos.cube
-192.168.42.1 npm.cubeos.cube
-192.168.42.1 dockge.cubeos.cube
-192.168.42.1 homarr.cubeos.cube
-192.168.42.1 logs.cubeos.cube
-192.168.42.1 terminal.cubeos.cube
+# CubeOS DNS entries
+# All services resolve to gateway IP
+
+10.42.24.1 cubeos.cube
+10.42.24.1 api.cubeos.cube
+10.42.24.1 pihole.cubeos.cube
+10.42.24.1 npm.cubeos.cube
+10.42.24.1 logs.cubeos.cube
+10.42.24.1 terminal.cubeos.cube
+10.42.24.1 ollama.cubeos.cube
+10.42.24.1 chromadb.cubeos.cube
+10.42.24.1 registry.cubeos.cube
 ENTRIES
     echo "✅ DNS entries created"
 else

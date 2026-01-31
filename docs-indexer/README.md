@@ -17,11 +17,11 @@ Syncs documentation from a Git repository and indexes it into ChromaDB for RAG (
 |----------|---------|-------------|
 | `DOCS_REPO_URL` | `https://github.com/cubeos-app/docs.git` | Git repository URL |
 | `DOCS_LOCAL_PATH` | `/cubeos/docs` | Local path to store docs |
-| `OLLAMA_HOST` | `192.168.42.1` | Ollama server host |
-| `OLLAMA_PORT` | `11434` | Ollama server port |
+| `OLLAMA_HOST` | `10.42.24.1` | Ollama server host |
+| `OLLAMA_PORT` | `6030` | Ollama server port |
 | `EMBEDDING_MODEL` | `nomic-embed-text` | Model for embeddings |
-| `CHROMADB_HOST` | `192.168.42.1` | ChromaDB server host |
-| `CHROMADB_PORT` | `8000` | ChromaDB server port |
+| `CHROMADB_HOST` | `10.42.24.1` | ChromaDB server host |
+| `CHROMADB_PORT` | `6031` | ChromaDB server port |
 | `COLLECTION_NAME` | `cubeos_docs` | ChromaDB collection name |
 | `SYNC_INTERVAL_HOURS` | `6` | Sync interval (0 = run once) |
 | `CHUNK_SIZE` | `500` | Max characters per chunk |

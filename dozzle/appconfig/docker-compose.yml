@@ -1,28 +1,31 @@
-# Dozzle - Core App
-# Port: 6004 (Web UI)
+# Dozzle - Container Log Viewer
+# Port: 6012 (Web UI)
 # Real-time Docker container log viewer
 
 services:
   dozzle:
     image: amir20/dozzle:latest
-    container_name: cubeos-logs
+    container_name: cubeos-dozzle
     restart: unless-stopped
     ports:
-      - "192.168.42.1:6004:8080"
+      - "6012:8080"
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
     environment:
-      - TZ=${TZ:-Europe/Amsterdam}
+      - TZ=${TZ:-UTC}
       - DOZZLE_LEVEL=info
       - DOZZLE_TAILSIZE=300
       - DOZZLE_NO_ANALYTICS=true
+    env_file:
+      - /cubeos/config/defaults.env
+    deploy:
+      resources:
+        limits:
+          memory: 64M
+        reservations:
+          memory: 32M
     labels:
-      - "cubeos.core=true"
+      - "cubeos.type=platform"
       - "cubeos.category=monitoring"
-      - "cubeos.port=6004"
+      - "cubeos.port=6012"
       - "cubeos.description=Dozzle - Container log viewer"
-
-networks:
-  default:
-    name: cubeos-network
-    external: true

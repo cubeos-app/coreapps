@@ -1,5 +1,7 @@
 # Pi-hole - DNS + DHCP Server
 # Port: 6001 (Admin UI), 53 (DNS), 67 (DHCP)
+# Network: host mode (required for DHCP broadcast)
+
 services:
   pihole:
     image: pihole/pihole:latest
@@ -10,17 +12,20 @@ services:
       - ../appdata/etc-pihole:/etc/pihole
       - ../appdata/etc-dnsmasq.d:/etc/dnsmasq.d
     environment:
-      - TZ=${TZ:-Europe/Amsterdam}
+      - TZ=${TZ:-UTC}
       - FTLCONF_webserver_port=6001
       - FTLCONF_webserver_api_password=${PIHOLE_PASSWORD:-cubeos}
       - FTLCONF_dns_listeningMode=all
       - FTLCONF_dns_upstreams=1.1.1.1;8.8.8.8
       - FTLCONF_dhcp_active=true
-      - FTLCONF_dhcp_start=192.168.42.10
-      - FTLCONF_dhcp_end=192.168.42.250
-      - FTLCONF_dhcp_router=192.168.42.1
+      - FTLCONF_dhcp_start=10.42.24.10
+      - FTLCONF_dhcp_end=10.42.24.250
+      - FTLCONF_dhcp_router=10.42.24.1
       - FTLCONF_dhcp_netmask=255.255.255.0
       - FTLCONF_dhcp_leaseTime=24h
+    env_file:
+      - /cubeos/config/defaults.env
+      - /cubeos/config/secrets.env
     cap_add:
       - NET_ADMIN
       - NET_RAW
@@ -30,8 +35,13 @@ services:
           memory: 256M
         reservations:
           memory: 128M
+    healthcheck:
+      test: ["CMD", "dig", "+short", "@127.0.0.1", "pi.hole"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
     labels:
-      - "cubeos.core=true"
+      - "cubeos.type=system"
       - "cubeos.category=infrastructure"
       - "cubeos.port=6001"
       - "cubeos.description=Pi-hole - DNS + DHCP Server"

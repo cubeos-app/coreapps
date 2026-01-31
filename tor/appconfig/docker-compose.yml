@@ -1,0 +1,27 @@
+# Tor Privacy Proxy
+# Ports: 6022 (SOCKS), 6023 (Control)
+# Privacy routing with per-app toggle
+
+services:
+  tor:
+    image: dperson/torproxy:latest
+    container_name: cubeos-tor
+    restart: unless-stopped
+    ports:
+      - "6022:9050"   # SOCKS proxy
+      - "6023:9051"   # Control port
+    environment:
+      - TZ=${TZ:-UTC}
+    env_file:
+      - /cubeos/config/defaults.env
+    deploy:
+      resources:
+        limits:
+          memory: 128M
+        reservations:
+          memory: 32M
+    labels:
+      - "cubeos.type=network"
+      - "cubeos.category=privacy"
+      - "cubeos.port=6022"
+      - "cubeos.description=Tor Privacy Proxy"

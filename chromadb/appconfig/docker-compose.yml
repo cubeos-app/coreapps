@@ -1,58 +1,41 @@
-# ChromaDB Vector Database for CubeOS RAG
-# Purpose: Stores document embeddings for AI-powered documentation search
-#
-# Usage:
-#   cd /cubeos/coreapps/chromadb/appconfig
-#   docker compose up -d
-#
-# API: http://192.168.42.1:8000/api/v1
+# ChromaDB Vector Database
+# Port: 6031 (API)
+# Stores document embeddings for AI-powered documentation search
 
 services:
   chromadb:
     image: chromadb/chroma:latest
-    container_name: chromadb
-    network_mode: host
-    labels:
-      - "com.centurylinklabs.watchtower.enable=true"
-      - "com.centurylinklabs.watchtower.scope=chromadb"
+    container_name: cubeos-chromadb
+    restart: unless-stopped
+    ports:
+      - "6031:8000"
+    volumes:
+      - ../appdata:/chroma/chroma
     environment:
-      - CHROMA_SERVER_HOST=192.168.42.1
+      - TZ=${TZ:-UTC}
+      - CHROMA_SERVER_HOST=0.0.0.0
       - CHROMA_SERVER_HTTP_PORT=8000
       - IS_PERSISTENT=TRUE
       - PERSIST_DIRECTORY=/chroma/chroma
       - ANONYMIZED_TELEMETRY=FALSE
       - ALLOW_RESET=TRUE
       - CHROMA_SERVER_CORS_ALLOW_ORIGINS=["*"]
-      - TZ=${TZ:-Europe/Amsterdam}
-    volumes:
-      - ../appdata:/chroma/chroma
-    restart: unless-stopped
+    env_file:
+      - /cubeos/config/defaults.env
     deploy:
       resources:
         limits:
-          memory: 1G
+          memory: 512M
         reservations:
           memory: 256M
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://192.168.42.1:8000/api/v2/heartbeat"]
+      test: ["CMD", "curl", "-f", "http://localhost:8000/api/v2/heartbeat"]
       interval: 30s
       timeout: 10s
       retries: 3
       start_period: 30s
-
-  watchtower:
-    image: containrrr/watchtower
-    container_name: watchtower-chromadb
     labels:
-      - "com.centurylinklabs.watchtower.scope=chromadb"
-    command:
-      - --scope=chromadb
-    environment:
-      - WATCHTOWER_CLEANUP=true
-      - WATCHTOWER_LABEL_ENABLE=true
-      - WATCHTOWER_POLL_INTERVAL=86400
-    volumes:
-      - /var/run/docker.sock:/var/run/docker.sock
-    network_mode: host
-    restart: unless-stopped
-# deployed vr 30 jan 2026 14:06:56 CET
+      - "cubeos.type=ai"
+      - "cubeos.category=ai"
+      - "cubeos.port=6031"
+      - "cubeos.description=ChromaDB Vector Database"

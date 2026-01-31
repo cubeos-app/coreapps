@@ -1,19 +1,20 @@
 # Nginx Proxy Manager
 # Port: 6000 (Admin UI), 80 (HTTP), 443 (HTTPS)
+# Network: host mode (handles all ingress traffic)
+
 services:
   npm:
     image: jc21/nginx-proxy-manager:latest
     container_name: cubeos-npm
     restart: unless-stopped
-    ports:
-      - "80:80"
-      - "443:443"
-      - "6000:81"
+    network_mode: host
     volumes:
       - ../appdata/data:/data
       - ../appdata/letsencrypt:/etc/letsencrypt
     environment:
-      - TZ=${TZ:-Europe/Amsterdam}
+      - TZ=${TZ:-UTC}
+    env_file:
+      - /cubeos/config/defaults.env
     deploy:
       resources:
         limits:
@@ -26,7 +27,7 @@ services:
       timeout: 10s
       retries: 3
     labels:
-      - "cubeos.core=true"
+      - "cubeos.type=system"
       - "cubeos.category=infrastructure"
       - "cubeos.port=6000"
       - "cubeos.description=Nginx Proxy Manager"

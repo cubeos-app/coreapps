@@ -1,27 +1,24 @@
-# Backup Service - Core App
-# Port: 6005 (API)
-# MuleCube backup management service
+# Backup Service
+# Manages system backups to SMB/NFS targets
 
 services:
   backup:
-    image: mulecube/backup-service:latest
+    image: ghcr.io/cubeos-app/backup:latest
     container_name: cubeos-backup
     restart: unless-stopped
-    ports:
-      - "192.168.42.1:6005:8080"
     volumes:
       - /cubeos:/cubeos:ro
-      - /cubeos/backups:/backups
+      - /cubeos/mounts:/mounts
       - ../appdata:/app/data
     environment:
-      - TZ=${TZ:-Europe/Amsterdam}
+      - TZ=${TZ:-UTC}
+    env_file:
+      - /cubeos/config/defaults.env
+    deploy:
+      resources:
+        limits:
+          memory: 128M
     labels:
-      - "cubeos.core=true"
+      - "cubeos.type=platform"
       - "cubeos.category=system"
-      - "cubeos.port=6005"
-      - "cubeos.description=Backup Service - System backup management"
-
-networks:
-  default:
-    name: cubeos-network
-    external: true
+      - "cubeos.description=Backup Service"

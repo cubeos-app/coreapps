@@ -1,0 +1,35 @@
+# WireGuard VPN Client
+# Port: 6020 (UDP)
+# VPN client for secure connectivity
+
+services:
+  wireguard:
+    image: linuxserver/wireguard:latest
+    container_name: cubeos-wireguard
+    restart: unless-stopped
+    ports:
+      - "6020:51820/udp"
+    volumes:
+      - /cubeos/config/vpn/wireguard:/config
+    environment:
+      - TZ=${TZ:-UTC}
+      - PUID=1000
+      - PGID=1000
+    env_file:
+      - /cubeos/config/defaults.env
+    cap_add:
+      - NET_ADMIN
+      - SYS_MODULE
+    sysctls:
+      - net.ipv4.conf.all.src_valid_mark=1
+    deploy:
+      resources:
+        limits:
+          memory: 128M
+        reservations:
+          memory: 32M
+    labels:
+      - "cubeos.type=network"
+      - "cubeos.category=vpn"
+      - "cubeos.port=6020"
+      - "cubeos.description=WireGuard VPN Client"

@@ -1,6 +1,6 @@
-# Terminal Service - Core App
-# Port: 6009 (Web Terminal)
-# Web-based terminal access (full access)
+# Terminal Service
+# Port: 6042
+# Web-based terminal access
 
 services:
   terminal:
@@ -10,13 +10,17 @@ services:
     volumes:
       - /:/host
     environment:
-      - TZ=${TZ:-Europe/Amsterdam}
-    command: ttyd -p 6009 -W -t fontSize=14 -t theme={"background":"#1a1b26"} bash
+      - TZ=${TZ:-UTC}
+    command: ttyd -p 6042 -W -t fontSize=14 -t theme={"background":"#1a1b26"} bash
     privileged: true
     pid: host
     network_mode: host
+    deploy:
+      resources:
+        limits:
+          memory: 64M
     labels:
-      - "cubeos.core=true"
+      - "cubeos.type=platform"
       - "cubeos.category=system"
-      - "cubeos.port=6009"
-      - "cubeos.description=Terminal - Web-based shell access"
+      - "cubeos.port=6042"
+      - "cubeos.description=Web Terminal"

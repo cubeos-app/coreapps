@@ -1,28 +1,27 @@
-# Reset Service - Core App
-# Port: 6007 (API)
-# MuleCube factory reset and recovery service
+# Reset Service
+# Port: 6041
+# Factory reset and recovery
 
 services:
   reset:
-    image: mulecube/reset-service:latest
+    image: ghcr.io/cubeos-app/reset:latest
     container_name: cubeos-reset
     restart: unless-stopped
     ports:
-      - "192.168.42.1:6007:8080"
+      - "6041:8080"
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - /cubeos:/cubeos
-      - ../appdata:/app/data
     environment:
-      - TZ=${TZ:-Europe/Amsterdam}
-    privileged: true
+      - TZ=${TZ:-UTC}
+    env_file:
+      - /cubeos/config/defaults.env
+    deploy:
+      resources:
+        limits:
+          memory: 64M
     labels:
-      - "cubeos.core=true"
+      - "cubeos.type=platform"
       - "cubeos.category=system"
-      - "cubeos.port=6007"
-      - "cubeos.description=Reset Service - Factory reset capability"
-
-networks:
-  default:
-    name: cubeos-network
-    external: true
+      - "cubeos.port=6041"
+      - "cubeos.description=Factory Reset Service"

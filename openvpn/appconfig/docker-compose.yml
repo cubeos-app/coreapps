@@ -1,0 +1,32 @@
+# OpenVPN Client
+# Port: 6021 (UDP)
+# VPN client for legacy VPN connections
+
+services:
+  openvpn:
+    image: dperson/openvpn-client:latest
+    container_name: cubeos-openvpn
+    restart: unless-stopped
+    ports:
+      - "6021:1194/udp"
+    volumes:
+      - /cubeos/config/vpn/openvpn:/vpn
+    environment:
+      - TZ=${TZ:-UTC}
+    env_file:
+      - /cubeos/config/defaults.env
+    cap_add:
+      - NET_ADMIN
+    devices:
+      - /dev/net/tun
+    deploy:
+      resources:
+        limits:
+          memory: 128M
+        reservations:
+          memory: 32M
+    labels:
+      - "cubeos.type=network"
+      - "cubeos.category=vpn"
+      - "cubeos.port=6021"
+      - "cubeos.description=OpenVPN Client"

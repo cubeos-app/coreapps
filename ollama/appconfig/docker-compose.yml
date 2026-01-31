@@ -1,25 +1,23 @@
 # Ollama AI Model Server
-# Purpose: Runs local LLMs for CubeOS AI Assistant
-#
-# Usage:
-#   cd /cubeos/coreapps/ollama/appconfig
-#   docker compose up -d
-#
-# API: http://192.168.42.1:11434
+# Port: 6030 (API)
+# Runs local LLMs for CubeOS AI Assistant
 
 services:
   ollama:
     image: ollama/ollama:latest
     container_name: cubeos-ollama
-    network_mode: host
     restart: unless-stopped
+    ports:
+      - "6030:11434"
     volumes:
       - ../appdata:/root/.ollama
     environment:
-      - OLLAMA_HOST=0.0.0.0:11434
+      - TZ=${TZ:-UTC}
+      - OLLAMA_HOST=0.0.0.0
       - OLLAMA_NUM_PARALLEL=1
       - OLLAMA_MAX_LOADED_MODELS=1
-      - TZ=${TZ:-Europe/Amsterdam}
+    env_file:
+      - /cubeos/config/defaults.env
     deploy:
       resources:
         limits:
@@ -33,25 +31,7 @@ services:
       retries: 3
       start_period: 60s
     labels:
-      - "cubeos.core=true"
+      - "cubeos.type=ai"
       - "cubeos.category=ai"
-      - "cubeos.port=11434"
+      - "cubeos.port=6030"
       - "cubeos.description=Ollama AI Model Server"
-      - "com.centurylinklabs.watchtower.enable=true"
-      - "com.centurylinklabs.watchtower.scope=ollama"
-
-  watchtower:
-    image: containrrr/watchtower
-    container_name: watchtower-ollama
-    labels:
-      - "com.centurylinklabs.watchtower.scope=ollama"
-    command:
-      - --scope=ollama
-    environment:
-      - WATCHTOWER_CLEANUP=true
-      - WATCHTOWER_LABEL_ENABLE=true
-      - WATCHTOWER_POLL_INTERVAL=86400
-    volumes:
-      - /var/run/docker.sock:/var/run/docker.sock
-    network_mode: host
-    restart: unless-stopped

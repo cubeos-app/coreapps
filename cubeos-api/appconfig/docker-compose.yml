@@ -1,0 +1,48 @@
+# CubeOS API Server
+# Port: 6010
+# Central backend for all CubeOS operations
+
+services:
+  api:
+    image: ghcr.io/cubeos-app/api:latest
+    container_name: cubeos-api
+    restart: unless-stopped
+    ports:
+      - "6010:6010"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - /cubeos:/cubeos
+      - ../appdata:/app/data
+      - /etc/hostapd:/etc/hostapd:ro
+      - /sys:/sys:ro
+      - /proc:/proc:ro
+    environment:
+      - TZ=${TZ:-UTC}
+      - CUBEOS_PORT=6010
+      - CUBEOS_DATA_DIR=/cubeos/data
+      - CUBEOS_DB_PATH=/cubeos/data/cubeos.db
+      - OLLAMA_HOST=10.42.24.1
+      - OLLAMA_PORT=6030
+      - CHROMADB_HOST=10.42.24.1
+      - CHROMADB_PORT=6031
+    env_file:
+      - /cubeos/config/defaults.env
+      - /cubeos/config/secrets.env
+    devices:
+      - /dev/i2c-1:/dev/i2c-1
+    deploy:
+      resources:
+        limits:
+          memory: 128M
+        reservations:
+          memory: 64M
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:6010/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    labels:
+      - "cubeos.type=platform"
+      - "cubeos.category=system"
+      - "cubeos.port=6010"
+      - "cubeos.description=CubeOS API Server"
