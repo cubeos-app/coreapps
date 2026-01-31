@@ -197,6 +197,10 @@ restart-changed:
         echo "── $app ──"
         cd "/cubeos/coreapps/${app}/appconfig"
         
+        # Stop and remove existing container first
+        echo "  🛑 Stopping existing..."
+        docker compose down --remove-orphans 2>/dev/null || true
+        
         # Check if this app needs building (has build: section)
         if grep -q "^\s*build:" "$COMPOSE_FILE"; then
           echo "  🔨 Building (local Dockerfile)..."
@@ -212,7 +216,7 @@ restart-changed:
           }
         fi
         
-        # Restart
+        # Start fresh
         echo "  🚀 Starting..."
         docker compose up -d
         
@@ -241,6 +245,9 @@ restart-changed:
         echo ""
         echo "── pihole (DNS will briefly drop) ──"
         cd "/cubeos/coreapps/pihole/appconfig"
+        
+        echo "  🛑 Stopping existing..."
+        docker compose down --remove-orphans 2>/dev/null || true
         
         docker compose pull 2>&1 || true
         docker compose up -d
