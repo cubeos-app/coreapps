@@ -3,6 +3,11 @@ stages:
   - deploy
   - restart
 
+variables:
+  CUBEOS_SUBNET: "10.42.24.0/24"
+  CUBEOS_GATEWAY: "10.42.24.1"
+  CUBEOS_DOMAIN: "cubeos.cube"
+
 validate-compose:
   stage: validate
   image: registry-gitlab.nuclearlighters.net/products/cubeos/coreapps/ci-utils:latest
@@ -10,6 +15,11 @@ validate-compose:
     - multiarch
   script:
     - |
+      # Create dummy env files for validation (real files are on Pi)
+      mkdir -p /cubeos/config
+      touch /cubeos/config/defaults.env
+      touch /cubeos/config/secrets.env
+      
       for dir in */; do
         if [ -f "${dir}appconfig/docker-compose.yml" ]; then
           echo "Checking ${dir}..."
@@ -75,8 +85,31 @@ deploy:
             mkdir -p "/cubeos/coreapps/${dir}src"
             rsync -a --delete "${dir}src/" "/cubeos/coreapps/${dir}src/"
           fi
+          
+          # Sync appdata if it exists (for DNS configs, etc)
+          if [ -d "${dir}appdata" ]; then
+            rsync -a "${dir}appdata/" "/cubeos/coreapps/${dir}appdata/"
+          fi
         fi
       done
+      
+      # Sync defaults.env
+      [ -f defaults.env ] && cp defaults.env /cubeos/coreapps/
+      
+      # Ensure config directory structure
+      mkdir -p /cubeos/config/vpn/{wireguard,openvpn}
+      mkdir -p /cubeos/data/registry
+      
+      # Copy defaults.env to config if not exists
+      if [ ! -f /cubeos/config/defaults.env ]; then
+        cp defaults.env /cubeos/config/defaults.env
+      fi
+      
+      # Create empty secrets.env if not exists
+      if [ ! -f /cubeos/config/secrets.env ]; then
+        touch /cubeos/config/secrets.env
+        chmod 600 /cubeos/config/secrets.env
+      fi
       
       # Sync scripts
       for f in *.sh; do
