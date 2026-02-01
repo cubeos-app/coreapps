@@ -319,7 +319,7 @@ restart-changed:
         
         echo "  🛑 Stopping existing..."
         docker rm -f "cubeos-${app}" 2>/dev/null || true
-        docker compose down --remove-orphans 2>/dev/null || true
+        docker compose down 2>/dev/null || true
         
         # Pull latest image (HAL image was just pushed by package-hal)
         echo "  📥 Pulling..."
