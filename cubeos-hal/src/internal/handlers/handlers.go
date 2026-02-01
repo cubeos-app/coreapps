@@ -1134,38 +1134,52 @@ func (h *HALHandler) ServiceStatus(w http.ResponseWriter, r *http.Request) {
 	ctx := context.Background()
 	conn, err := dbus.NewSystemConnectionContext(ctx)
 	if err != nil {
-		errorResponse(w, http.StatusInternalServerError, "dbus connection failed: "+err.Error())
+		jsonResponse(w, http.StatusOK, map[string]interface{}{
+			"name":       name,
+			"active":     false,
+			"enabled":    false,
+			"debug_error": "dbus_connect: " + err.Error(),
+		})
 		return
 	}
 	defer conn.Close()
 
 	unitName := name + ".service"
+	result := map[string]interface{}{
+		"name":    name,
+		"active":  false,
+		"enabled": false,
+	}
 
 	// Get ActiveState property
 	prop, err := conn.GetUnitPropertyContext(ctx, unitName, "ActiveState")
-	active := false
-	if err == nil {
+	if err != nil {
+		result["debug_active_error"] = err.Error()
+	} else {
 		activeState, ok := prop.Value.Value().(string)
 		if ok {
-			active = activeState == "active"
+			result["active"] = activeState == "active"
+			result["debug_active_state"] = activeState
+		} else {
+			result["debug_active_error"] = "type assertion failed"
 		}
 	}
 
 	// Get UnitFileState property for enabled status
 	prop, err = conn.GetUnitPropertyContext(ctx, unitName, "UnitFileState")
-	enabled := false
-	if err == nil {
+	if err != nil {
+		result["debug_enabled_error"] = err.Error()
+	} else {
 		enabledState, ok := prop.Value.Value().(string)
 		if ok {
-			enabled = enabledState == "enabled"
+			result["enabled"] = enabledState == "enabled"
+			result["debug_enabled_state"] = enabledState
+		} else {
+			result["debug_enabled_error"] = "type assertion failed"
 		}
 	}
 
-	jsonResponse(w, http.StatusOK, map[string]interface{}{
-		"name":    name,
-		"active":  active,
-		"enabled": enabled,
-	})
+	jsonResponse(w, http.StatusOK, result)
 }
 
 // ============================================================================
