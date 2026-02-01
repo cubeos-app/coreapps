@@ -32,6 +32,7 @@ services:
       - CUBEOS_DB_PATH=/cubeos/data/cubeos.db
     env_file:
       - /cubeos/config/defaults.env
+    pid: "host"
     cap_add:
       - SYS_ADMIN
       - NET_ADMIN
