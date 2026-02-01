@@ -3,7 +3,7 @@
 # Runs every minute via systemd timer
 # 
 # Services:
-#   COMPOSE (host network): pihole, npm
+#   COMPOSE (host network): pihole, npm, cubeos-hal
 #   SWARM (overlay): registry, cubeos-api, cubeos-dashboard, dozzle, ollama, chromadb
 #
 set -o pipefail
@@ -129,29 +129,32 @@ fi
 # 2. NPM (compose, CRITICAL - reverse proxy)
 ensure_compose "cubeos-npm" "/cubeos/coreapps/npm/appconfig"
 
-# 3. Registry (swarm)
+# 3. HAL (compose, CRITICAL - hardware abstraction)
+ensure_compose "cubeos-hal" "/cubeos/coreapps/cubeos-hal/appconfig"
+
+# 4. Registry (swarm)
 ensure_stack "registry" "/cubeos/coreapps/registry/appconfig"
 
-# 4. API (swarm)
+# 5. API (swarm)
 ensure_stack "cubeos-api" "/cubeos/coreapps/cubeos-api/appconfig"
 
-# 5. Dashboard (swarm)
+# 6. Dashboard (swarm)
 ensure_stack "cubeos-dashboard" "/cubeos/coreapps/cubeos-dashboard/appconfig"
 
-# 6. Dozzle (swarm)
+# 7. Dozzle (swarm)
 ensure_stack "dozzle" "/cubeos/coreapps/dozzle/appconfig"
 
-# 7. Ollama (swarm)
+# 8. Ollama (swarm)
 ensure_stack "ollama" "/cubeos/coreapps/ollama/appconfig"
 
-# 8. ChromaDB (swarm)
+# 9. ChromaDB (swarm)
 ensure_stack "chromadb" "/cubeos/coreapps/chromadb/appconfig"
 
 # ─────────────────────────────────────────────────────────────
 # SYSTEM SERVICES
 # ─────────────────────────────────────────────────────────────
 
-# 9. hostapd (WiFi AP)
+# 10. hostapd (WiFi AP)
 if ! systemctl is-active --quiet hostapd; then
     log "hostapd down, restarting..."
     systemctl restart hostapd 2>&1 | while read line; do log "  $line"; done
@@ -161,14 +164,14 @@ fi
 # MAINTENANCE
 # ─────────────────────────────────────────────────────────────
 
-# 10. Disk space cleanup
+# 11. Disk space cleanup
 DISK_USED=$(df / | tail -1 | awk '{print $5}' | tr -d '%')
 if [ "$DISK_USED" -gt 90 ]; then
     log "Disk usage ${DISK_USED}%, cleaning..."
     docker system prune -f >> "$LOG" 2>&1
 fi
 
-# 11. Clear old Swarm tasks (memory optimization)
+# 12. Clear old Swarm tasks (memory optimization)
 # Swarm keeps failed task history which can consume memory
 docker system prune -f --filter "until=24h" >/dev/null 2>&1 || true
 
