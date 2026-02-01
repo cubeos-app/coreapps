@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -13,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/coreos/go-systemd/v22/dbus"
 	"github.com/go-chi/chi/v5"
 )
 
@@ -1041,12 +1043,23 @@ func (h *HALHandler) RestartService(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Use nsenter to run systemctl in host namespace
-	cmd := exec.Command("nsenter", "-t", "1", "-m", "-u", "-i", "-n", "-p", "--", "systemctl", "restart", name)
-	if output, err := cmd.CombinedOutput(); err != nil {
-		errorResponse(w, http.StatusInternalServerError, fmt.Sprintf("failed to restart %s: %s - %s", name, err, string(output)))
+	// Use D-Bus to communicate with host systemd
+	ctx := context.Background()
+	conn, err := dbus.NewSystemConnectionContext(ctx)
+	if err != nil {
+		errorResponse(w, http.StatusInternalServerError, "dbus connection failed: "+err.Error())
 		return
 	}
+	defer conn.Close()
+
+	unitName := name + ".service"
+	ch := make(chan string)
+	_, err = conn.RestartUnitContext(ctx, unitName, "replace", ch)
+	if err != nil {
+		errorResponse(w, http.StatusInternalServerError, fmt.Sprintf("failed to restart %s: %s", name, err))
+		return
+	}
+	<-ch // Wait for job completion
 
 	successResponse(w, fmt.Sprintf("service %s restarted", name))
 }
@@ -1059,12 +1072,23 @@ func (h *HALHandler) StartService(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Use nsenter to run systemctl in host namespace
-	cmd := exec.Command("nsenter", "-t", "1", "-m", "-u", "-i", "-n", "-p", "--", "systemctl", "start", name)
-	if output, err := cmd.CombinedOutput(); err != nil {
-		errorResponse(w, http.StatusInternalServerError, fmt.Sprintf("failed to start %s: %s - %s", name, err, string(output)))
+	// Use D-Bus to communicate with host systemd
+	ctx := context.Background()
+	conn, err := dbus.NewSystemConnectionContext(ctx)
+	if err != nil {
+		errorResponse(w, http.StatusInternalServerError, "dbus connection failed: "+err.Error())
 		return
 	}
+	defer conn.Close()
+
+	unitName := name + ".service"
+	ch := make(chan string)
+	_, err = conn.StartUnitContext(ctx, unitName, "replace", ch)
+	if err != nil {
+		errorResponse(w, http.StatusInternalServerError, fmt.Sprintf("failed to start %s: %s", name, err))
+		return
+	}
+	<-ch // Wait for job completion
 
 	successResponse(w, fmt.Sprintf("service %s started", name))
 }
@@ -1077,12 +1101,23 @@ func (h *HALHandler) StopService(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Use nsenter to run systemctl in host namespace
-	cmd := exec.Command("nsenter", "-t", "1", "-m", "-u", "-i", "-n", "-p", "--", "systemctl", "stop", name)
-	if output, err := cmd.CombinedOutput(); err != nil {
-		errorResponse(w, http.StatusInternalServerError, fmt.Sprintf("failed to stop %s: %s - %s", name, err, string(output)))
+	// Use D-Bus to communicate with host systemd
+	ctx := context.Background()
+	conn, err := dbus.NewSystemConnectionContext(ctx)
+	if err != nil {
+		errorResponse(w, http.StatusInternalServerError, "dbus connection failed: "+err.Error())
 		return
 	}
+	defer conn.Close()
+
+	unitName := name + ".service"
+	ch := make(chan string)
+	_, err = conn.StopUnitContext(ctx, unitName, "replace", ch)
+	if err != nil {
+		errorResponse(w, http.StatusInternalServerError, fmt.Sprintf("failed to stop %s: %s", name, err))
+		return
+	}
+	<-ch // Wait for job completion
 
 	successResponse(w, fmt.Sprintf("service %s stopped", name))
 }
@@ -1095,36 +1130,42 @@ func (h *HALHandler) ServiceStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Use nsenter to run systemctl in host namespace
-	// Using CombinedOutput to capture both stdout and stderr for debugging
-	cmd := exec.Command("nsenter", "-t", "1", "-m", "-u", "-i", "-n", "-p", "--", "systemctl", "is-active", name)
-	activeOutput, activeErr := cmd.CombinedOutput()
-	activeStr := strings.TrimSpace(string(activeOutput))
-	active := activeStr == "active"
-
-	cmd = exec.Command("nsenter", "-t", "1", "-m", "-u", "-i", "-n", "-p", "--", "systemctl", "is-enabled", name)
-	enabledOutput, enabledErr := cmd.CombinedOutput()
-	enabledStr := strings.TrimSpace(string(enabledOutput))
-	enabled := enabledStr == "enabled"
-
-	// Include debug info in response
-	result := map[string]interface{}{
-		"name":    name,
-		"active":  active,
-		"enabled": enabled,
+	// Use D-Bus to communicate with host systemd
+	ctx := context.Background()
+	conn, err := dbus.NewSystemConnectionContext(ctx)
+	if err != nil {
+		errorResponse(w, http.StatusInternalServerError, "dbus connection failed: "+err.Error())
+		return
 	}
+	defer conn.Close()
 
-	// Add debug info if there were errors or unexpected output
-	if activeErr != nil || enabledErr != nil || (!active && activeStr != "inactive" && activeStr != "unknown") {
-		result["debug"] = map[string]interface{}{
-			"active_output":  activeStr,
-			"active_error":   fmt.Sprintf("%v", activeErr),
-			"enabled_output": enabledStr,
-			"enabled_error":  fmt.Sprintf("%v", enabledErr),
+	unitName := name + ".service"
+
+	// Get ActiveState property
+	prop, err := conn.GetUnitPropertyContext(ctx, unitName, "ActiveState")
+	active := false
+	if err == nil {
+		activeState, ok := prop.Value.Value().(string)
+		if ok {
+			active = activeState == "active"
 		}
 	}
 
-	jsonResponse(w, http.StatusOK, result)
+	// Get UnitFileState property for enabled status
+	prop, err = conn.GetUnitPropertyContext(ctx, unitName, "UnitFileState")
+	enabled := false
+	if err == nil {
+		enabledState, ok := prop.Value.Value().(string)
+		if ok {
+			enabled = enabledState == "enabled"
+		}
+	}
+
+	jsonResponse(w, http.StatusOK, map[string]interface{}{
+		"name":    name,
+		"active":  active,
+		"enabled": enabled,
+	})
 }
 
 // ============================================================================
