@@ -11,6 +11,7 @@ storage:
       enabled: true
       age: 168h
       interval: 24h
+      dryrun: false
 http:
   addr: :5000
   headers:
