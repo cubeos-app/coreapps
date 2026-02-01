@@ -8,7 +8,7 @@ variables:
   CUBEOS_GATEWAY: "10.42.24.1"
   CUBEOS_DOMAIN: "cubeos.cube"
   # Service classification
-  COMPOSE_SERVICES: "pihole npm"
+  COMPOSE_SERVICES: "pihole npm cubeos-hal"
   STACK_SERVICES: "registry cubeos-api cubeos-dashboard dozzle ollama chromadb"
 
 validate-compose:
@@ -217,7 +217,7 @@ restart-changed:
           pihole)
             HAS_PIHOLE=true
             ;;
-          npm)
+          npm|cubeos-hal)
             COMPOSE_APPS="$COMPOSE_APPS npm"
             ;;
           registry|cubeos-api|cubeos-dashboard|dozzle|ollama|chromadb)
