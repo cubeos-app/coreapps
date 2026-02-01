@@ -1096,19 +1096,35 @@ func (h *HALHandler) ServiceStatus(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Use nsenter to run systemctl in host namespace
+	// Using CombinedOutput to capture both stdout and stderr for debugging
 	cmd := exec.Command("nsenter", "-t", "1", "-m", "-u", "-i", "-n", "-p", "--", "systemctl", "is-active", name)
-	output, _ := cmd.Output()
-	active := strings.TrimSpace(string(output)) == "active"
+	activeOutput, activeErr := cmd.CombinedOutput()
+	activeStr := strings.TrimSpace(string(activeOutput))
+	active := activeStr == "active"
 
 	cmd = exec.Command("nsenter", "-t", "1", "-m", "-u", "-i", "-n", "-p", "--", "systemctl", "is-enabled", name)
-	output, _ = cmd.Output()
-	enabled := strings.TrimSpace(string(output)) == "enabled"
+	enabledOutput, enabledErr := cmd.CombinedOutput()
+	enabledStr := strings.TrimSpace(string(enabledOutput))
+	enabled := enabledStr == "enabled"
 
-	jsonResponse(w, http.StatusOK, map[string]interface{}{
+	// Include debug info in response
+	result := map[string]interface{}{
 		"name":    name,
 		"active":  active,
 		"enabled": enabled,
-	})
+	}
+
+	// Add debug info if there were errors or unexpected output
+	if activeErr != nil || enabledErr != nil || (!active && activeStr != "inactive" && activeStr != "unknown") {
+		result["debug"] = map[string]interface{}{
+			"active_output":  activeStr,
+			"active_error":   fmt.Sprintf("%v", activeErr),
+			"enabled_output": enabledStr,
+			"enabled_error":  fmt.Sprintf("%v", enabledErr),
+		}
+	}
+
+	jsonResponse(w, http.StatusOK, result)
 }
 
 // ============================================================================
