@@ -50,3 +50,4 @@ services:
       - "cubeos.fqdn=pihole.cubeos.cube"
       - "cubeos.deployment=compose"
       - "cubeos.description=Pi-hole DNS + DHCP Server"
+# Swarm deploy zo  1 feb 2026  1:52:10 CET

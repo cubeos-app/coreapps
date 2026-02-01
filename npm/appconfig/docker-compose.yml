@@ -39,3 +39,4 @@ services:
       - "cubeos.fqdn=npm.cubeos.cube"
       - "cubeos.deployment=compose"
       - "cubeos.description=Nginx Proxy Manager"
+# Swarm deploy zo  1 feb 2026  1:52:10 CET
