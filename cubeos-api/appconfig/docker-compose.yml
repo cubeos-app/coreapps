@@ -11,7 +11,7 @@
 # ═══════════════════════════════════════════════════════════════════════════════
 
 services:
-  api:
+  cubeos-api:
     image: ghcr.io/cubeos-app/api:latest
     hostname: cubeos-api
     ports:

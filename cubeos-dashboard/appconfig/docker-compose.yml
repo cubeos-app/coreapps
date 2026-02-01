@@ -8,7 +8,7 @@
 # ═══════════════════════════════════════════════════════════════════════════════
 
 services:
-  dashboard:
+  cubeos-dashboard:
     image: ghcr.io/cubeos-app/dashboard:latest
     hostname: cubeos-dashboard
     ports:
