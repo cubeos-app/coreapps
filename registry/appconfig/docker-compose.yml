@@ -61,3 +61,4 @@ networks:
     external: true
     name: cubeos-network
 # Swarm deploy zo  1 feb 2026  1:52:10 CET
+# redeploy zo  1 feb 2026  2:02:35 CET
