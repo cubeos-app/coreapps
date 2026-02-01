@@ -7,6 +7,9 @@ variables:
   CUBEOS_SUBNET: "10.42.24.0/24"
   CUBEOS_GATEWAY: "10.42.24.1"
   CUBEOS_DOMAIN: "cubeos.cube"
+  # Service classification
+  COMPOSE_SERVICES: "pihole npm"
+  STACK_SERVICES: "registry cubeos-api cubeos-dashboard dozzle ollama chromadb"
 
 validate-compose:
   stage: validate
@@ -111,7 +114,14 @@ deploy:
         chmod 600 /cubeos/config/secrets.env
       fi
       
-      # Sync scripts
+      # Sync scripts directory
+      if [ -d "scripts" ]; then
+        mkdir -p /cubeos/coreapps/scripts
+        rsync -a --delete scripts/ /cubeos/coreapps/scripts/
+        chmod +x /cubeos/coreapps/scripts/*.sh 2>/dev/null || true
+      fi
+      
+      # Sync root-level scripts
       for f in *.sh; do
         [ -f "$f" ] && cp "$f" /cubeos/coreapps/ && chmod +x /cubeos/coreapps/"$f"
       done
@@ -170,57 +180,82 @@ restart-changed:
       echo "  ✅ DNS OK"
       
       # ──────────────────────────────────────────────────────────
-      # Separate pihole from other apps (restart DNS last)
+      # Ensure Swarm is initialized
       # ──────────────────────────────────────────────────────────
-      OTHER_APPS=""
+      if ! docker info 2>/dev/null | grep -q "Swarm: active"; then
+        echo "🐝 Initializing Docker Swarm..."
+        docker swarm init --advertise-addr 10.42.24.1 --task-history-limit 1 2>/dev/null || true
+      fi
+      
+      # Ensure overlay network exists
+      if ! docker network ls | grep -q "cubeos-network"; then
+        echo "🌐 Creating cubeos-network overlay..."
+        docker network create --driver overlay --attachable --subnet 10.42.25.0/24 cubeos-network 2>/dev/null || true
+      fi
+      
+      # ──────────────────────────────────────────────────────────
+      # Classify apps by deployment type
+      # ──────────────────────────────────────────────────────────
+      COMPOSE_APPS=""
+      STACK_APPS=""
       HAS_PIHOLE=false
       
       for app in $CHANGED_APPS; do
-        if [ "$app" = "pihole" ]; then
-          HAS_PIHOLE=true
-        else
-          OTHER_APPS="$OTHER_APPS $app"
-        fi
+        case "$app" in
+          pihole)
+            HAS_PIHOLE=true
+            ;;
+          npm)
+            COMPOSE_APPS="$COMPOSE_APPS npm"
+            ;;
+          registry|cubeos-api|cubeos-dashboard|dozzle|ollama|chromadb)
+            STACK_APPS="$STACK_APPS $app"
+            ;;
+          *)
+            # Unknown apps - try compose first
+            COMPOSE_APPS="$COMPOSE_APPS $app"
+            ;;
+        esac
       done
-      OTHER_APPS=$(echo "$OTHER_APPS" | xargs)
+      COMPOSE_APPS=$(echo "$COMPOSE_APPS" | xargs)
+      STACK_APPS=$(echo "$STACK_APPS" | xargs)
+      
+      echo "📦 Compose apps: ${COMPOSE_APPS:-none}"
+      echo "🐝 Swarm stacks: ${STACK_APPS:-none}"
+      echo "🔌 Pi-hole: $HAS_PIHOLE"
       
       # ──────────────────────────────────────────────────────────
-      # Restart non-pihole apps
+      # Deploy COMPOSE apps (npm and unknown apps)
       # ──────────────────────────────────────────────────────────
-      for app in $OTHER_APPS; do
+      for app in $COMPOSE_APPS; do
         COMPOSE_FILE="/cubeos/coreapps/${app}/appconfig/docker-compose.yml"
         if [ ! -f "$COMPOSE_FILE" ]; then
           echo "⚠️  Skipping $app (no docker-compose.yml)"
           continue
         fi
         
-        echo "── $app ──"
+        echo "── $app (compose) ──"
         cd "/cubeos/coreapps/${app}/appconfig"
         
-        # Stop and remove existing container first
         echo "  🛑 Stopping existing..."
         docker compose down --remove-orphans 2>/dev/null || true
         
-        # Check if this app needs building (has build: section)
+        # Check if this app needs building
         if grep -q "^\s*build:" "$COMPOSE_FILE"; then
-          echo "  🔨 Building (local Dockerfile)..."
+          echo "  🔨 Building..."
           docker compose build --no-cache 2>&1 || {
             echo "  ❌ Build failed!"
             exit 1
           }
         else
-          # Pull images first (with timeout)
           echo "  📥 Pulling..."
-          timeout 120 docker compose pull 2>&1 || {
-            echo "  ⚠️  Pull failed/timed out, continuing with cached image..."
-          }
+          timeout 120 docker compose pull 2>&1 || echo "  ⚠️  Pull failed, using cached..."
         fi
         
-        # Start fresh
         echo "  🚀 Starting..."
         docker compose up -d
         
-        # Health check (wait up to 30s)
+        # Health check
         sleep 3
         CONTAINER=$(docker compose ps -q 2>/dev/null | head -1)
         if [ -n "$CONTAINER" ]; then
@@ -230,26 +265,76 @@ restart-changed:
               echo "  ✅ $app running"
               break
             fi
-            [ "$i" -eq 10 ] && echo "  ⚠️  $app status: $STATUS (may still be starting)"
+            [ "$i" -eq 10 ] && echo "  ⚠️  $app status: $STATUS"
             sleep 3
           done
         else
-          echo "  ✅ $app started (no main container to check)"
+          echo "  ✅ $app started"
         fi
       done
       
       # ──────────────────────────────────────────────────────────
-      # Restart pihole LAST (if changed)
+      # Deploy SWARM stacks
+      # ──────────────────────────────────────────────────────────
+      for app in $STACK_APPS; do
+        COMPOSE_FILE="/cubeos/coreapps/${app}/appconfig/docker-compose.yml"
+        if [ ! -f "$COMPOSE_FILE" ]; then
+          echo "⚠️  Skipping $app (no docker-compose.yml)"
+          continue
+        fi
+        
+        echo "── $app (swarm) ──"
+        
+        # Remove existing stack
+        echo "  🛑 Removing existing stack..."
+        docker stack rm "$app" 2>/dev/null || true
+        
+        # Wait for cleanup
+        sleep 3
+        
+        # Deploy stack with ARM64 workaround
+        echo "  🚀 Deploying stack..."
+        docker stack deploy \
+          -c "$COMPOSE_FILE" \
+          --resolve-image=never \
+          "$app"
+        
+        # Wait and check replicas
+        sleep 5
+        REPLICAS=$(docker stack services "$app" --format "{{.Replicas}}" 2>/dev/null | head -1 || echo "0/0")
+        echo "  📊 Replicas: $REPLICAS"
+        
+        # Wait for service to be ready
+        for i in $(seq 1 12); do
+          REPLICAS=$(docker stack services "$app" --format "{{.Replicas}}" 2>/dev/null | head -1 || echo "0/0")
+          if echo "$REPLICAS" | grep -qE "^1/1$|^[0-9]+/[0-9]+$" && [ "$REPLICAS" != "0/1" ]; then
+            RUNNING=$(echo "$REPLICAS" | cut -d'/' -f1)
+            DESIRED=$(echo "$REPLICAS" | cut -d'/' -f2)
+            if [ "$RUNNING" = "$DESIRED" ] && [ "$RUNNING" != "0" ]; then
+              echo "  ✅ $app running ($REPLICAS)"
+              break
+            fi
+          fi
+          [ "$i" -eq 12 ] && echo "  ⚠️  $app may still be starting ($REPLICAS)"
+          sleep 5
+        done
+      done
+      
+      # ──────────────────────────────────────────────────────────
+      # Restart pihole LAST (if changed) - DNS will briefly drop
       # ──────────────────────────────────────────────────────────
       if [ "$HAS_PIHOLE" = "true" ]; then
         echo ""
-        echo "── pihole (DNS will briefly drop) ──"
+        echo "── pihole (compose - DNS will briefly drop) ──"
         cd "/cubeos/coreapps/pihole/appconfig"
         
         echo "  🛑 Stopping existing..."
         docker compose down --remove-orphans 2>/dev/null || true
         
+        echo "  📥 Pulling..."
         docker compose pull 2>&1 || true
+        
+        echo "  🚀 Starting..."
         docker compose up -d
         
         echo "  Waiting for Pi-hole DNS..."
@@ -263,6 +348,19 @@ restart-changed:
         done
       fi
       
+      # ──────────────────────────────────────────────────────────
+      # Final status
+      # ──────────────────────────────────────────────────────────
+      echo ""
+      echo "═══════════════════════════════════════════════════════════════"
+      echo "📊 Final Status"
+      echo "═══════════════════════════════════════════════════════════════"
+      echo ""
+      echo "COMPOSE CONTAINERS:"
+      docker ps --format "table {{.Names}}\t{{.Status}}" 2>/dev/null | grep -E "cubeos-|NAME" || echo "  None"
+      echo ""
+      echo "SWARM STACKS:"
+      docker stack ls 2>/dev/null || echo "  None"
       echo ""
       echo "✅ Restart complete"
   rules:
