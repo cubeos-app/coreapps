@@ -412,6 +412,235 @@ func (h *HALHandler) GetNetworkStatus(w http.ResponseWriter, r *http.Request) {
 }
 
 // ============================================================================
+// AP Client Operations
+// ============================================================================
+
+// APClient represents a connected AP client
+type APClient struct {
+	MACAddress    string `json:"mac_address"`
+	IPAddress     string `json:"ip_address,omitempty"`
+	Hostname      string `json:"hostname,omitempty"`
+	ConnectedTime int    `json:"connected_time,omitempty"` // seconds
+	Signal        int    `json:"signal,omitempty"`         // dBm
+	TxBytes       int64  `json:"tx_bytes,omitempty"`
+	RxBytes       int64  `json:"rx_bytes,omitempty"`
+}
+
+// GetAPClients returns connected Access Point clients
+func (h *HALHandler) GetAPClients(w http.ResponseWriter, r *http.Request) {
+	var clients []APClient
+
+	// Try hostapd_cli first (most accurate for WiFi clients)
+	cmd := exec.Command("hostapd_cli", "all_sta")
+	output, err := cmd.Output()
+	if err == nil {
+		clients = parseHostapdClients(string(output))
+	}
+
+	// If hostapd_cli failed or returned no clients, try with specific interface
+	if len(clients) == 0 {
+		// Try common AP interface
+		cmd = exec.Command("hostapd_cli", "-i", "wlan0", "all_sta")
+		output, err = cmd.Output()
+		if err == nil {
+			clients = parseHostapdClients(string(output))
+		}
+	}
+
+	// Enrich with DHCP lease information for IP addresses and hostnames
+	leases := parseDHCPLeases()
+	for i := range clients {
+		mac := strings.ToLower(clients[i].MACAddress)
+		if lease, ok := leases[mac]; ok {
+			clients[i].IPAddress = lease.IP
+			clients[i].Hostname = lease.Hostname
+		}
+	}
+
+	// If still no clients from hostapd, fall back to ARP + DHCP leases
+	if len(clients) == 0 {
+		clients = getClientsFromARP(leases)
+	}
+
+	jsonResponse(w, http.StatusOK, map[string]interface{}{
+		"clients": clients,
+		"count":   len(clients),
+	})
+}
+
+// parseHostapdClients parses hostapd_cli all_sta output
+func parseHostapdClients(output string) []APClient {
+	var clients []APClient
+	var current *APClient
+
+	scanner := bufio.NewScanner(strings.NewReader(output))
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+
+		// New station starts with MAC address
+		if isMACAddress(line) {
+			if current != nil {
+				clients = append(clients, *current)
+			}
+			current = &APClient{
+				MACAddress: strings.ToLower(line),
+			}
+			continue
+		}
+
+		if current == nil {
+			continue
+		}
+
+		// Parse key=value pairs
+		if strings.Contains(line, "=") {
+			parts := strings.SplitN(line, "=", 2)
+			if len(parts) != 2 {
+				continue
+			}
+			key := strings.TrimSpace(parts[0])
+			value := strings.TrimSpace(parts[1])
+
+			switch key {
+			case "connected_time":
+				if v, err := strconv.Atoi(value); err == nil {
+					current.ConnectedTime = v
+				}
+			case "signal":
+				if v, err := strconv.Atoi(value); err == nil {
+					current.Signal = v
+				}
+			case "tx_bytes":
+				if v, err := strconv.ParseInt(value, 10, 64); err == nil {
+					current.TxBytes = v
+				}
+			case "rx_bytes":
+				if v, err := strconv.ParseInt(value, 10, 64); err == nil {
+					current.RxBytes = v
+				}
+			}
+		}
+	}
+
+	// Don't forget the last client
+	if current != nil {
+		clients = append(clients, *current)
+	}
+
+	return clients
+}
+
+// isMACAddress checks if a string is a MAC address
+func isMACAddress(s string) bool {
+	// MAC format: xx:xx:xx:xx:xx:xx or xx-xx-xx-xx-xx-xx
+	s = strings.ToLower(s)
+	macRegex := regexp.MustCompile(`^([0-9a-f]{2}[:-]){5}([0-9a-f]{2})$`)
+	return macRegex.MatchString(s)
+}
+
+// DHCPLease represents a DHCP lease entry
+type DHCPLease struct {
+	MAC      string
+	IP       string
+	Hostname string
+	Expires  string
+}
+
+// parseDHCPLeases reads DHCP leases from Pi-hole or dnsmasq
+func parseDHCPLeases() map[string]DHCPLease {
+	leases := make(map[string]DHCPLease)
+
+	// Try Pi-hole DHCP leases first
+	leasePaths := []string{
+		"/etc/pihole/dhcp.leases",
+		"/var/lib/misc/dnsmasq.leases",
+		"/var/lib/dhcp/dhcpd.leases",
+	}
+
+	for _, path := range leasePaths {
+		file, err := os.Open(path)
+		if err != nil {
+			continue
+		}
+		defer file.Close()
+
+		scanner := bufio.NewScanner(file)
+		for scanner.Scan() {
+			line := scanner.Text()
+			fields := strings.Fields(line)
+
+			// dnsmasq format: timestamp mac ip hostname clientid
+			if len(fields) >= 4 {
+				mac := strings.ToLower(fields[1])
+				leases[mac] = DHCPLease{
+					MAC:      mac,
+					IP:       fields[2],
+					Hostname: fields[3],
+					Expires:  fields[0],
+				}
+			}
+		}
+		break // Use first successful file
+	}
+
+	return leases
+}
+
+// getClientsFromARP gets clients from ARP table (fallback)
+func getClientsFromARP(leases map[string]DHCPLease) []APClient {
+	var clients []APClient
+
+	// Read ARP table
+	file, err := os.Open("/proc/net/arp")
+	if err != nil {
+		return clients
+	}
+	defer file.Close()
+
+	scanner := bufio.NewScanner(file)
+	first := true
+	for scanner.Scan() {
+		if first {
+			first = false // Skip header
+			continue
+		}
+
+		line := scanner.Text()
+		fields := strings.Fields(line)
+		if len(fields) < 4 {
+			continue
+		}
+
+		ip := fields[0]
+		mac := strings.ToLower(fields[3])
+
+		// Skip incomplete entries and localhost
+		if mac == "00:00:00:00:00:00" || ip == "10.42.24.1" {
+			continue
+		}
+
+		// Filter to only CubeOS subnet
+		if !strings.HasPrefix(ip, "10.42.24.") {
+			continue
+		}
+
+		client := APClient{
+			MACAddress: mac,
+			IPAddress:  ip,
+		}
+
+		// Add hostname from DHCP leases if available
+		if lease, ok := leases[mac]; ok {
+			client.Hostname = lease.Hostname
+		}
+
+		clients = append(clients, client)
+	}
+
+	return clients
+}
+
+// ============================================================================
 // Firewall Operations
 // ============================================================================
 
@@ -795,16 +1024,16 @@ func (h *HALHandler) RestartService(w http.ResponseWriter, r *http.Request) {
 
 	// Whitelist allowed services
 	allowed := map[string]bool{
-		"hostapd":            true,
-		"dnsmasq":            true,
-		"wpa_supplicant":     true,
-		"NetworkManager":     true,
-		"docker":             true,
-		"cubeos-watchdog":    true,
-		"systemd-resolved":   true,
-		"systemd-networkd":   true,
-		"ssh":                true,
-		"sshd":               true,
+		"hostapd":          true,
+		"dnsmasq":          true,
+		"wpa_supplicant":   true,
+		"NetworkManager":   true,
+		"docker":           true,
+		"cubeos-watchdog":  true,
+		"systemd-resolved": true,
+		"systemd-networkd": true,
+		"ssh":              true,
+		"sshd":             true,
 	}
 
 	if !allowed[name] {
@@ -875,5 +1104,285 @@ func (h *HALHandler) ServiceStatus(w http.ResponseWriter, r *http.Request) {
 		"name":    name,
 		"active":  active,
 		"enabled": enabled,
+	})
+}
+
+// ============================================================================
+// Mount Operations
+// ============================================================================
+
+// MountRequest represents a mount request
+type MountRequest struct {
+	Name       string `json:"name"`
+	Type       string `json:"type"`
+	RemotePath string `json:"remote_path"`
+	LocalPath  string `json:"local_path"`
+	Username   string `json:"username,omitempty"`
+	Password   string `json:"password,omitempty"`
+	Options    string `json:"options,omitempty"`
+}
+
+// MountSMB handles SMB/CIFS mount requests
+func (h *HALHandler) MountSMB(w http.ResponseWriter, r *http.Request) {
+	var req MountRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		errorResponse(w, http.StatusBadRequest, "Invalid request body")
+		return
+	}
+
+	// Validate
+	if req.RemotePath == "" || req.LocalPath == "" {
+		errorResponse(w, http.StatusBadRequest, "remote_path and local_path are required")
+		return
+	}
+
+	// Ensure local path exists
+	if err := os.MkdirAll(req.LocalPath, 0755); err != nil {
+		errorResponse(w, http.StatusInternalServerError, fmt.Sprintf("Failed to create mount point: %v", err))
+		return
+	}
+
+	// Build mount command
+	mountOpts := []string{"vers=3.0"}
+
+	if req.Username != "" && req.Password != "" {
+		// Create temporary credentials file
+		credsFile := filepath.Join("/tmp", fmt.Sprintf(".mount_creds_%d", os.Getpid()))
+		content := fmt.Sprintf("username=%s\npassword=%s\n", req.Username, req.Password)
+		if err := os.WriteFile(credsFile, []byte(content), 0600); err != nil {
+			errorResponse(w, http.StatusInternalServerError, fmt.Sprintf("Failed to create credentials: %v", err))
+			return
+		}
+		defer os.Remove(credsFile)
+		mountOpts = append(mountOpts, fmt.Sprintf("credentials=%s", credsFile))
+	} else {
+		mountOpts = append(mountOpts, "guest")
+	}
+
+	if req.Options != "" {
+		mountOpts = append(mountOpts, req.Options)
+	}
+
+	// Execute mount
+	args := []string{"-t", "cifs", "-o", strings.Join(mountOpts, ","), req.RemotePath, req.LocalPath}
+	cmd := exec.Command("mount", args...)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		errorResponse(w, http.StatusInternalServerError, fmt.Sprintf("Mount failed: %s: %v", string(output), err))
+		return
+	}
+
+	jsonResponse(w, http.StatusOK, map[string]interface{}{
+		"success":    true,
+		"mount_path": req.LocalPath,
+		"message":    "SMB share mounted successfully",
+	})
+}
+
+// MountNFS handles NFS mount requests
+func (h *HALHandler) MountNFS(w http.ResponseWriter, r *http.Request) {
+	var req MountRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		errorResponse(w, http.StatusBadRequest, "Invalid request body")
+		return
+	}
+
+	// Validate
+	if req.RemotePath == "" || req.LocalPath == "" {
+		errorResponse(w, http.StatusBadRequest, "remote_path and local_path are required")
+		return
+	}
+
+	// Ensure local path exists
+	if err := os.MkdirAll(req.LocalPath, 0755); err != nil {
+		errorResponse(w, http.StatusInternalServerError, fmt.Sprintf("Failed to create mount point: %v", err))
+		return
+	}
+
+	// Build mount options
+	mountOpts := []string{"rw", "soft", "intr"}
+	if req.Options != "" {
+		mountOpts = append(mountOpts, req.Options)
+	}
+
+	// Execute mount
+	args := []string{"-t", "nfs", "-o", strings.Join(mountOpts, ","), req.RemotePath, req.LocalPath}
+	cmd := exec.Command("mount", args...)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		errorResponse(w, http.StatusInternalServerError, fmt.Sprintf("Mount failed: %s: %v", string(output), err))
+		return
+	}
+
+	jsonResponse(w, http.StatusOK, map[string]interface{}{
+		"success":    true,
+		"mount_path": req.LocalPath,
+		"message":    "NFS share mounted successfully",
+	})
+}
+
+// UnmountPath handles unmount requests
+func (h *HALHandler) UnmountPath(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Path string `json:"path"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		errorResponse(w, http.StatusBadRequest, "Invalid request body")
+		return
+	}
+
+	if req.Path == "" {
+		errorResponse(w, http.StatusBadRequest, "path is required")
+		return
+	}
+
+	// Try normal unmount first
+	cmd := exec.Command("umount", req.Path)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		// Try lazy unmount
+		cmd = exec.Command("umount", "-l", req.Path)
+		output, err = cmd.CombinedOutput()
+		if err != nil {
+			errorResponse(w, http.StatusInternalServerError, fmt.Sprintf("Unmount failed: %s: %v", string(output), err))
+			return
+		}
+	}
+
+	jsonResponse(w, http.StatusOK, map[string]interface{}{
+		"success": true,
+		"message": "Unmounted successfully",
+	})
+}
+
+// TestMountConnection tests connectivity to a remote share
+func (h *HALHandler) TestMountConnection(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Type       string `json:"type"`
+		RemotePath string `json:"remote_path"`
+		Username   string `json:"username"`
+		Password   string `json:"password"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		errorResponse(w, http.StatusBadRequest, "Invalid request body")
+		return
+	}
+
+	switch req.Type {
+	case "smb":
+		// Use smbclient to test - extract server from //server/share
+		parts := strings.Split(strings.TrimPrefix(req.RemotePath, "//"), "/")
+		if len(parts) < 1 {
+			errorResponse(w, http.StatusBadRequest, "Invalid SMB path")
+			return
+		}
+		server := parts[0]
+
+		var args []string
+		if req.Username != "" {
+			args = []string{"-L", server, "-U", fmt.Sprintf("%s%%%s", req.Username, req.Password)}
+		} else {
+			args = []string{"-L", server, "-N"}
+		}
+
+		cmd := exec.Command("smbclient", args...)
+		output, err := cmd.CombinedOutput()
+		if err != nil {
+			errorResponse(w, http.StatusBadRequest, fmt.Sprintf("SMB connection test failed: %s", string(output)))
+			return
+		}
+
+	case "nfs":
+		// Use showmount to test
+		parts := strings.SplitN(req.RemotePath, ":", 2)
+		if len(parts) != 2 {
+			errorResponse(w, http.StatusBadRequest, "Invalid NFS path format (expected server:/path)")
+			return
+		}
+		server := parts[0]
+
+		cmd := exec.Command("showmount", "-e", server)
+		output, err := cmd.CombinedOutput()
+		if err != nil {
+			errorResponse(w, http.StatusBadRequest, fmt.Sprintf("NFS connection test failed: %s", string(output)))
+			return
+		}
+
+	default:
+		errorResponse(w, http.StatusBadRequest, "Invalid mount type (use 'smb' or 'nfs')")
+		return
+	}
+
+	jsonResponse(w, http.StatusOK, map[string]interface{}{
+		"success": true,
+		"message": "Connection test successful",
+	})
+}
+
+// ListMounts returns all active mounts
+func (h *HALHandler) ListMounts(w http.ResponseWriter, r *http.Request) {
+	var mounts []map[string]interface{}
+
+	file, err := os.Open("/proc/mounts")
+	if err != nil {
+		errorResponse(w, http.StatusInternalServerError, "Failed to read mounts")
+		return
+	}
+	defer file.Close()
+
+	scanner := bufio.NewScanner(file)
+	for scanner.Scan() {
+		fields := strings.Fields(scanner.Text())
+		if len(fields) < 4 {
+			continue
+		}
+
+		device := fields[0]
+		mountPoint := fields[1]
+		fsType := fields[2]
+		options := fields[3]
+
+		// Filter to only show relevant mounts (cifs, nfs, ext4 on /cubeos)
+		if fsType == "cifs" || fsType == "nfs" || fsType == "nfs4" ||
+			(strings.HasPrefix(mountPoint, "/cubeos") && fsType == "ext4") {
+			mounts = append(mounts, map[string]interface{}{
+				"device":      device,
+				"mount_point": mountPoint,
+				"fs_type":     fsType,
+				"options":     options,
+			})
+		}
+	}
+
+	jsonResponse(w, http.StatusOK, map[string]interface{}{
+		"mounts": mounts,
+	})
+}
+
+// CheckMounted checks if a path is mounted
+func (h *HALHandler) CheckMounted(w http.ResponseWriter, r *http.Request) {
+	path := r.URL.Query().Get("path")
+	if path == "" {
+		errorResponse(w, http.StatusBadRequest, "path query parameter is required")
+		return
+	}
+
+	mounted := false
+	file, err := os.Open("/proc/mounts")
+	if err == nil {
+		defer file.Close()
+		scanner := bufio.NewScanner(file)
+		for scanner.Scan() {
+			fields := strings.Fields(scanner.Text())
+			if len(fields) >= 2 && fields[1] == path {
+				mounted = true
+				break
+			}
+		}
+	}
+
+	jsonResponse(w, http.StatusOK, map[string]interface{}{
+		"mounted": mounted,
+		"path":    path,
 	})
 }
