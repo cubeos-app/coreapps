@@ -1041,7 +1041,8 @@ func (h *HALHandler) RestartService(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	cmd := exec.Command("systemctl", "restart", name)
+	// Use nsenter to run systemctl in host namespace
+	cmd := exec.Command("nsenter", "-t", "1", "-m", "-u", "-i", "-n", "-p", "--", "systemctl", "restart", name)
 	if output, err := cmd.CombinedOutput(); err != nil {
 		errorResponse(w, http.StatusInternalServerError, fmt.Sprintf("failed to restart %s: %s - %s", name, err, string(output)))
 		return
@@ -1058,7 +1059,8 @@ func (h *HALHandler) StartService(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	cmd := exec.Command("systemctl", "start", name)
+	// Use nsenter to run systemctl in host namespace
+	cmd := exec.Command("nsenter", "-t", "1", "-m", "-u", "-i", "-n", "-p", "--", "systemctl", "start", name)
 	if output, err := cmd.CombinedOutput(); err != nil {
 		errorResponse(w, http.StatusInternalServerError, fmt.Sprintf("failed to start %s: %s - %s", name, err, string(output)))
 		return
@@ -1075,7 +1077,8 @@ func (h *HALHandler) StopService(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	cmd := exec.Command("systemctl", "stop", name)
+	// Use nsenter to run systemctl in host namespace
+	cmd := exec.Command("nsenter", "-t", "1", "-m", "-u", "-i", "-n", "-p", "--", "systemctl", "stop", name)
 	if output, err := cmd.CombinedOutput(); err != nil {
 		errorResponse(w, http.StatusInternalServerError, fmt.Sprintf("failed to stop %s: %s - %s", name, err, string(output)))
 		return
@@ -1092,11 +1095,12 @@ func (h *HALHandler) ServiceStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	cmd := exec.Command("systemctl", "is-active", name)
+	// Use nsenter to run systemctl in host namespace
+	cmd := exec.Command("nsenter", "-t", "1", "-m", "-u", "-i", "-n", "-p", "--", "systemctl", "is-active", name)
 	output, _ := cmd.Output()
 	active := strings.TrimSpace(string(output)) == "active"
 
-	cmd = exec.Command("systemctl", "is-enabled", name)
+	cmd = exec.Command("nsenter", "-t", "1", "-m", "-u", "-i", "-n", "-p", "--", "systemctl", "is-enabled", name)
 	output, _ = cmd.Output()
 	enabled := strings.TrimSpace(string(output)) == "enabled"
 
