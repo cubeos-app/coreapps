@@ -1,5 +1,10 @@
+# =============================================================================
+# CubeOS Coreapps Pipeline - Validate, Build, Deploy
+# =============================================================================
 stages:
   - validate
+  - build
+  - package
   - deploy
   - restart
 
@@ -10,6 +15,9 @@ variables:
   # Service classification
   COMPOSE_SERVICES: "pihole npm cubeos-hal"
   STACK_SERVICES: "registry cubeos-api cubeos-dashboard dozzle ollama chromadb"
+  # HAL image
+  HAL_IMAGE: "ghcr.io/cubeos-app/hal"
+  BUILDER_IMAGE: "ghcr.io/cubeos-app/api-builder:latest"
 
 validate-compose:
   stage: validate
@@ -43,6 +51,62 @@ shellcheck:
   rules:
     - if: $CI_COMMIT_BRANCH
   allow_failure: true
+
+# -----------------------------------------------------------------------------
+# BUILD HAL - Compile Go binary for both architectures
+# -----------------------------------------------------------------------------
+build-hal:
+  stage: build
+  tags: [multiarch]
+  image: ${BUILDER_IMAGE}
+  script:
+    - cp -r cubeos-hal/src/. /app/
+    - cd /app
+    - go mod download
+    - GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -ldflags="-s -w" -o cubeos-hal-arm64 ./cmd/cubeos-hal/
+    - GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -ldflags="-s -w" -o cubeos-hal-amd64 ./cmd/cubeos-hal/
+    - cp cubeos-hal-arm64 cubeos-hal-amd64 ${CI_PROJECT_DIR}/
+    - ls -lh ${CI_PROJECT_DIR}/cubeos-hal-*
+  artifacts:
+    paths:
+      - cubeos-hal-arm64
+      - cubeos-hal-amd64
+    expire_in: 1 week
+  rules:
+    - if: $CI_COMMIT_BRANCH == "main"
+      changes:
+        - cubeos-hal/**/*
+
+# -----------------------------------------------------------------------------
+# PACKAGE HAL - Build multi-arch Docker image and push to ghcr.io
+# -----------------------------------------------------------------------------
+package-hal:
+  stage: package
+  tags: [multiarch]
+  image: docker:24
+  needs:
+    - job: build-hal
+      optional: true
+  before_script:
+    - echo "$GHCR_TOKEN" | docker login ghcr.io -u "$GHCR_USER" --password-stdin
+    - docker buildx create --name halbuilder --driver docker-container --use
+    - docker buildx inspect --bootstrap
+  script:
+    - |
+      cd cubeos-hal/src
+      docker buildx build --no-cache \
+        --platform linux/amd64,linux/arm64 \
+        --push \
+        -t ${HAL_IMAGE}:${CI_COMMIT_SHORT_SHA} \
+        -t ${HAL_IMAGE}:latest \
+        .
+    - echo "✅ Pushed multi-arch ${HAL_IMAGE}:${CI_COMMIT_SHORT_SHA}"
+  after_script:
+    - docker buildx rm halbuilder || true
+  rules:
+    - if: $CI_COMMIT_BRANCH == "main"
+      changes:
+        - cubeos-hal/**/*
 
 deploy:
   stage: deploy
@@ -151,6 +215,10 @@ restart-changed:
     - arm64
   needs:
     - deploy
+    - job: package-hal
+      optional: true
+  before_script:
+    - echo "$GHCR_TOKEN" | docker login ghcr.io -u "$GHCR_USER" --password-stdin
   script:
     - |
       set -e
@@ -218,7 +286,7 @@ restart-changed:
             HAS_PIHOLE=true
             ;;
           npm|cubeos-hal)
-            COMPOSE_APPS="$COMPOSE_APPS npm"
+            COMPOSE_APPS="$COMPOSE_APPS $app"
             ;;
           registry|cubeos-api|cubeos-dashboard|dozzle|ollama|chromadb)
             STACK_APPS="$STACK_APPS $app"
@@ -237,7 +305,7 @@ restart-changed:
       echo "🔌 Pi-hole: $HAS_PIHOLE"
       
       # ──────────────────────────────────────────────────────────
-      # Deploy COMPOSE apps (npm and unknown apps)
+      # Deploy COMPOSE apps (npm, cubeos-hal, and unknown apps)
       # ──────────────────────────────────────────────────────────
       for app in $COMPOSE_APPS; do
         COMPOSE_FILE="/cubeos/coreapps/${app}/appconfig/docker-compose.yml"
@@ -253,17 +321,9 @@ restart-changed:
         docker rm -f "cubeos-${app}" 2>/dev/null || true
         docker compose down --remove-orphans 2>/dev/null || true
         
-        # Check if this app needs building
-        if grep -q "^\s*build:" "$COMPOSE_FILE"; then
-          echo "  🔨 Building..."
-          docker compose build --no-cache 2>&1 || {
-            echo "  ❌ Build failed!"
-            exit 1
-          }
-        else
-          echo "  📥 Pulling..."
-          timeout 120 docker compose pull 2>&1 || echo "  ⚠️  Pull failed, using cached..."
-        fi
+        # Pull latest image (HAL image was just pushed by package-hal)
+        echo "  📥 Pulling..."
+        timeout 120 docker compose pull 2>&1 || echo "  ⚠️  Pull failed, using cached..."
         
         echo "  🚀 Starting..."
         docker compose up -d
