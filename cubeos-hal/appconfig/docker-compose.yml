@@ -1,0 +1,71 @@
+# CubeOS Hardware Abstraction Layer (HAL)
+# Privileged service providing hardware access to unprivileged containers
+#
+# This service runs in Docker Compose mode (not Swarm) because it requires:
+# - network_mode: host (direct access to host network interfaces)
+# - pid: host (for nsenter access if needed)
+# - Full privileged access for iptables, iw, wpa_supplicant, etc.
+
+services:
+  cubeos-hal:
+    image: ghcr.io/cubeos-app/hal:latest
+    container_name: cubeos-hal
+    restart: unless-stopped
+    
+    # CRITICAL: Host network mode for direct interface access
+    network_mode: host
+    
+    # CRITICAL: Host PID namespace for process control
+    pid: "host"
+    
+    # Full privileges required for hardware control
+    privileged: true
+    
+    security_opt:
+      - apparmor:unconfined
+    
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+      - SYS_ADMIN
+      - SYS_PTRACE
+    
+    environment:
+      - HAL_PORT=6005
+      - HAL_HOST=0.0.0.0
+      - TZ=${TZ:-UTC}
+    
+    env_file:
+      - /cubeos/config/defaults.env
+    
+    volumes:
+      # System access
+      - /sys:/sys
+      - /proc:/proc
+      - /dev:/dev
+      
+      # Network configuration
+      - /etc/hostapd:/etc/hostapd
+      - /etc/wpa_supplicant:/etc/wpa_supplicant
+      - /var/run/wpa_supplicant:/var/run/wpa_supplicant
+      
+      # VPN configurations
+      - /cubeos/config/vpn:/cubeos/config/vpn
+      
+      # Mount points
+      - /cubeos/mounts:/cubeos/mounts
+      
+      # For systemctl access
+      - /run/systemd/system:/run/systemd/system:ro
+      - /var/run/dbus:/var/run/dbus
+    
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:6005/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    
+    labels:
+      - "cubeos.type=system"
+      - "cubeos.port=6005"
+      - "cubeos.description=Hardware Abstraction Layer"
