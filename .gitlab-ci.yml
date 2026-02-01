@@ -119,6 +119,12 @@ deploy:
         mkdir -p /cubeos/coreapps/scripts
         rsync -a --delete scripts/ /cubeos/coreapps/scripts/
         chmod +x /cubeos/coreapps/scripts/*.sh 2>/dev/null || true
+        
+        # Install watchdog systemd files if install script exists
+        if [ -f "/cubeos/coreapps/scripts/install-watchdog.sh" ]; then
+          echo "📦 Installing watchdog systemd files..."
+          /cubeos/coreapps/scripts/install-watchdog.sh
+        fi
       fi
       
       # Sync root-level scripts

@@ -1,0 +1,14 @@
+[Unit]
+Description=CubeOS Watchdog Timer
+After=docker.service
+
+[Timer]
+# Wait 2 minutes after boot for services to stabilize
+OnBootSec=2min
+# Run every minute
+OnUnitActiveSec=1min
+# Randomize slightly to avoid thundering herd
+RandomizedDelaySec=5s
+
+[Install]
+WantedBy=timers.target
