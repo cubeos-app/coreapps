@@ -187,10 +187,16 @@ restart-changed:
         docker swarm init --advertise-addr 10.42.24.1 --task-history-limit 1 2>/dev/null || true
       fi
       
-      # Ensure overlay network exists
-      if ! docker network ls | grep -q "cubeos-network"; then
-        echo "🌐 Creating cubeos-network overlay..."
-        docker network create --driver overlay --attachable --subnet 10.42.25.0/24 cubeos-network 2>/dev/null || true
+      # Ensure overlay network exists with SWARM scope (not local)
+      NETWORK_SCOPE=$(docker network inspect cubeos-network --format '{{.Scope}}' 2>/dev/null || echo "none")
+      if [ "$NETWORK_SCOPE" = "local" ]; then
+        echo "🌐 Removing local cubeos-network (wrong scope)..."
+        docker network rm cubeos-network 2>/dev/null || true
+        NETWORK_SCOPE="none"
+      fi
+      if [ "$NETWORK_SCOPE" = "none" ]; then
+        echo "🌐 Creating cubeos-network overlay (swarm scope)..."
+        docker network create --driver overlay --attachable --subnet 10.42.25.0/24 cubeos-network
       fi
       
       # ──────────────────────────────────────────────────────────
@@ -286,9 +292,10 @@ restart-changed:
         
         echo "── $app (swarm) ──"
         
-        # Remove existing stack
+        # Remove existing stack and stale networks
         echo "  🛑 Removing existing stack..."
         docker stack rm "$app" 2>/dev/null || true
+        docker network rm "${app}_default" 2>/dev/null || true
         
         # Wait for cleanup
         sleep 3

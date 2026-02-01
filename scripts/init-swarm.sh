@@ -48,8 +48,14 @@ else
     echo -e "${GREEN}✓ Swarm initialized${NC}"
 fi
 
-# Create overlay network if not exists
-if ! docker network ls | grep -q "cubeos-network"; then
+# Create overlay network if not exists OR if wrong scope
+NETWORK_SCOPE=$(docker network inspect cubeos-network --format '{{.Scope}}' 2>/dev/null || echo "none")
+if [ "$NETWORK_SCOPE" = "local" ]; then
+    echo -e "${YELLOW}Removing local cubeos-network (wrong scope)...${NC}"
+    docker network rm cubeos-network 2>/dev/null || true
+    NETWORK_SCOPE="none"
+fi
+if [ "$NETWORK_SCOPE" = "none" ]; then
     echo "Creating cubeos-network overlay..."
     docker network create \
         --driver overlay \
@@ -58,7 +64,7 @@ if ! docker network ls | grep -q "cubeos-network"; then
         cubeos-network
     echo -e "${GREEN}✓ Network created: cubeos-network ($OVERLAY_SUBNET)${NC}"
 else
-    echo -e "${YELLOW}Network cubeos-network already exists${NC}"
+    echo -e "${YELLOW}Network cubeos-network already exists (scope: $NETWORK_SCOPE)${NC}"
 fi
 
 # Verify
