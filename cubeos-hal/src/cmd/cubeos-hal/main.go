@@ -1,41 +1,31 @@
-// CubeOS Hardware Abstraction Layer (HAL)
-// Tiny privileged service providing hardware access to unprivileged containers
 package main
 
 import (
-	"context"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
-	"os/signal"
-	"syscall"
 	"time"
+
+	"cubeos-hal/internal/handlers"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
-
-	"cubeos-hal/internal/handlers"
-)
-
-const (
-	defaultPort = "6005"
-	defaultHost = "0.0.0.0"
 )
 
 func main() {
-	log.SetFlags(log.LstdFlags | log.Lshortfile)
-	log.Println("CubeOS HAL starting...")
-
-	// Get port from environment or use default
+	// Get configuration from environment
 	port := os.Getenv("HAL_PORT")
 	if port == "" {
-		port = defaultPort
+		port = "6005"
 	}
-
 	host := os.Getenv("HAL_HOST")
 	if host == "" {
-		host = defaultHost
+		host = "0.0.0.0"
 	}
+
+	// Create handler
+	h := handlers.NewHALHandler()
 
 	// Create router
 	r := chi.NewRouter()
@@ -43,112 +33,83 @@ func main() {
 	// Middleware
 	r.Use(middleware.Logger)
 	r.Use(middleware.Recoverer)
-	r.Use(middleware.Timeout(30 * time.Second))
+	r.Use(middleware.Timeout(60 * time.Second))
 
-	// Health check
+	// Health endpoint
 	r.Get("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		w.Write([]byte(`{"status":"ok","service":"cubeos-hal"}`))
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"status":"ok","service":"cubeos-hal","version":"1.0.0"}`))
 	})
 
-	// HAL handlers
-	h := handlers.NewHALHandler()
-
-	// Network endpoints
-	r.Route("/hal/network", func(r chi.Router) {
-		// Interface control
-		r.Get("/interfaces", h.ListInterfaces)
-		r.Get("/interface/{name}", h.GetInterface)
-		r.Post("/interface/{name}/up", h.BringInterfaceUp)
-		r.Post("/interface/{name}/down", h.BringInterfaceDown)
+	// HAL routes
+	r.Route("/hal", func(r chi.Router) {
+		// Network interfaces
+		r.Get("/network/interfaces", h.ListInterfaces)
+		r.Get("/network/interface/{name}", h.GetInterface)
+		r.Post("/network/interface/{name}/up", h.BringInterfaceUp)
+		r.Post("/network/interface/{name}/down", h.BringInterfaceDown)
+		r.Get("/network/status", h.GetNetworkStatus)
 
 		// WiFi operations
-		r.Get("/wifi/scan/{iface}", h.ScanWiFi)
-		r.Post("/wifi/connect", h.ConnectWiFi)
-		r.Post("/wifi/disconnect/{iface}", h.DisconnectWiFi)
+		r.Get("/network/wifi/scan/{iface}", h.ScanWiFi)
+		r.Post("/network/wifi/connect", h.ConnectWiFi)
+		r.Post("/network/wifi/disconnect/{iface}", h.DisconnectWiFi)
 
-		// Status
-		r.Get("/status", h.GetNetworkStatus)
+		// AP (Access Point) operations
+		r.Get("/network/ap/clients", h.GetAPClients)
+
+		// Firewall operations
+		r.Get("/firewall/rules", h.GetFirewallRules)
+		r.Post("/firewall/nat/enable", h.EnableNAT)
+		r.Post("/firewall/nat/disable", h.DisableNAT)
+		r.Post("/firewall/forward/enable", h.EnableIPForward)
+		r.Post("/firewall/forward/disable", h.DisableIPForward)
+		r.Post("/firewall/rule", h.AddFirewallRule)
+		r.Delete("/firewall/rule", h.DeleteFirewallRule)
+
+		// VPN operations
+		r.Get("/vpn/status", h.GetVPNStatus)
+		r.Post("/vpn/wireguard/up/{name}", h.WireGuardUp)
+		r.Post("/vpn/wireguard/down/{name}", h.WireGuardDown)
+		r.Post("/vpn/openvpn/up/{name}", h.OpenVPNUp)
+		r.Post("/vpn/openvpn/down/{name}", h.OpenVPNDown)
+
+		// USB operations
+		r.Get("/usb/devices", h.ListUSBDevices)
+		r.Post("/usb/mount/{device}", h.MountUSB)
+		r.Post("/usb/unmount/{device}", h.UnmountUSB)
+
+		// Bluetooth operations (stubs)
+		r.Get("/bluetooth/status", h.GetBluetoothStatus)
+		r.Get("/bluetooth/devices", h.ListBluetoothDevices)
+		r.Post("/bluetooth/scan", h.ScanBluetooth)
+		r.Post("/bluetooth/pair", h.PairBluetooth)
+
+		// System operations
+		r.Post("/system/reboot", h.Reboot)
+		r.Post("/system/shutdown", h.Shutdown)
+		r.Post("/system/service/{name}/restart", h.RestartService)
+		r.Post("/system/service/{name}/start", h.StartService)
+		r.Post("/system/service/{name}/stop", h.StopService)
+		r.Get("/system/service/{name}/status", h.ServiceStatus)
+
+		// Mount operations
+		r.Post("/mounts/smb", h.MountSMB)
+		r.Post("/mounts/nfs", h.MountNFS)
+		r.Post("/mounts/unmount", h.UnmountPath)
+		r.Post("/mounts/test", h.TestMountConnection)
+		r.Get("/mounts/list", h.ListMounts)
+		r.Get("/mounts/check", h.CheckMounted)
 	})
 
-	// Firewall endpoints
-	r.Route("/hal/firewall", func(r chi.Router) {
-		r.Get("/rules", h.GetFirewallRules)
-		r.Post("/nat/enable", h.EnableNAT)
-		r.Post("/nat/disable", h.DisableNAT)
-		r.Post("/rule", h.AddFirewallRule)
-		r.Delete("/rule", h.DeleteFirewallRule)
-		r.Post("/forward/enable", h.EnableIPForward)
-		r.Post("/forward/disable", h.DisableIPForward)
-	})
+	// Start server
+	addr := fmt.Sprintf("%s:%s", host, port)
+	log.Printf("Starting CubeOS HAL service on %s", addr)
+	log.Printf("Health: http://%s/health", addr)
+	log.Printf("API: http://%s/hal/...", addr)
 
-	// VPN endpoints
-	r.Route("/hal/vpn", func(r chi.Router) {
-		r.Get("/status", h.GetVPNStatus)
-		r.Post("/wireguard/up/{name}", h.WireGuardUp)
-		r.Post("/wireguard/down/{name}", h.WireGuardDown)
-		r.Post("/openvpn/up/{name}", h.OpenVPNUp)
-		r.Post("/openvpn/down/{name}", h.OpenVPNDown)
-	})
-
-	// USB endpoints
-	r.Route("/hal/usb", func(r chi.Router) {
-		r.Get("/devices", h.ListUSBDevices)
-		r.Post("/mount/{device}", h.MountUSB)
-		r.Post("/unmount/{device}", h.UnmountUSB)
-	})
-
-	// Bluetooth endpoints (future)
-	r.Route("/hal/bluetooth", func(r chi.Router) {
-		r.Get("/status", h.GetBluetoothStatus)
-		r.Get("/devices", h.ListBluetoothDevices)
-		r.Post("/scan", h.ScanBluetooth)
-		r.Post("/pair/{mac}", h.PairBluetooth)
-	})
-
-	// System endpoints
-	r.Route("/hal/system", func(r chi.Router) {
-		r.Post("/reboot", h.Reboot)
-		r.Post("/shutdown", h.Shutdown)
-		r.Post("/service/{name}/restart", h.RestartService)
-		r.Post("/service/{name}/start", h.StartService)
-		r.Post("/service/{name}/stop", h.StopService)
-		r.Get("/service/{name}/status", h.ServiceStatus)
-	})
-
-	// Create server
-	addr := host + ":" + port
-	srv := &http.Server{
-		Addr:         addr,
-		Handler:      r,
-		ReadTimeout:  15 * time.Second,
-		WriteTimeout: 30 * time.Second,
-		IdleTimeout:  60 * time.Second,
+	if err := http.ListenAndServe(addr, r); err != nil {
+		log.Fatalf("Failed to start server: %v", err)
 	}
-
-	// Start server in goroutine
-	go func() {
-		log.Printf("HAL listening on %s", addr)
-		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			log.Fatalf("Server failed: %v", err)
-		}
-	}()
-
-	// Wait for interrupt signal
-	quit := make(chan os.Signal, 1)
-	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
-	<-quit
-
-	log.Println("Shutting down HAL...")
-
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	if err := srv.Shutdown(ctx); err != nil {
-		log.Fatalf("Server shutdown failed: %v", err)
-	}
-
-	log.Println("HAL stopped")
 }
-
-// Build trigger zo  1 feb 2026 11:06:12 CET
