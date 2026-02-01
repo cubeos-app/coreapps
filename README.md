@@ -115,3 +115,4 @@ This repository uses GitLab CI/CD. On push to main:
 ## License
 
 Apache 2.0
+# Trigger Swarm deployment zo  1 feb 2026  1:50:38 CET
