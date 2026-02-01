@@ -326,7 +326,7 @@ restart-changed:
         timeout 120 docker compose pull 2>&1 || echo "  ⚠️  Pull failed, using cached..."
         
         echo "  🚀 Starting..."
-        docker compose up -d
+        docker compose up -d --pull always
         
         # Health check
         sleep 3
@@ -410,7 +410,7 @@ restart-changed:
         docker compose pull 2>&1 || true
         
         echo "  🚀 Starting..."
-        docker compose up -d
+        docker compose up -d --pull always
         
         echo "  Waiting for Pi-hole DNS..."
         for i in $(seq 1 30); do
