@@ -238,6 +238,7 @@ restart-changed:
         cd "/cubeos/coreapps/${app}/appconfig"
         
         echo "  🛑 Stopping existing..."
+        docker rm -f "cubeos-${app}" 2>/dev/null || true
         docker compose down --remove-orphans 2>/dev/null || true
         
         # Check if this app needs building
@@ -329,6 +330,7 @@ restart-changed:
         cd "/cubeos/coreapps/pihole/appconfig"
         
         echo "  🛑 Stopping existing..."
+        docker rm -f cubeos-pihole 2>/dev/null || true
         docker compose down --remove-orphans 2>/dev/null || true
         
         echo "  📥 Pulling..."
