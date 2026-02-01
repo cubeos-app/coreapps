@@ -1,14 +1,24 @@
 # CubeOS API Server
+# ═══════════════════════════════════════════════════════════════════════════════
+# DEPLOYMENT: Docker Swarm stack
 # Port: 6010 (API)
-# Backend API for CubeOS management
+#
+# NOTE: I2C device access (/dev/i2c-1) not available in Swarm mode.
+#       Hardware monitoring features will be disabled.
+#       For full I2C support, deploy via docker-compose instead.
+#
+# Deploy: docker stack deploy -c docker-compose.yml --resolve-image=never cubeos-api
+# ═══════════════════════════════════════════════════════════════════════════════
+
 services:
   api:
     image: ghcr.io/cubeos-app/api:latest
-    container_name: cubeos-api
-    restart: unless-stopped
-    privileged: true
+    hostname: cubeos-api
     ports:
-      - "6010:6010"
+      - target: 6010
+        published: 6010
+        protocol: tcp
+        mode: host
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
       - /cubeos:/cubeos
@@ -17,23 +27,49 @@ services:
       - /proc:/proc:ro
     environment:
       - TZ=${TZ:-UTC}
+      - CUBEOS_PORT=6010
+      - CUBEOS_DATA_DIR=/cubeos/data
+      - CUBEOS_DB_PATH=/cubeos/data/cubeos.db
     env_file:
       - /cubeos/config/defaults.env
-    devices:
-      - /dev/i2c-1:/dev/i2c-1
-    security_opt:
-      - apparmor:unconfined
+    cap_add:
+      - SYS_ADMIN
+      - NET_ADMIN
     deploy:
+      mode: replicated
+      replicas: 1
+      placement:
+        constraints:
+          - node.role == manager
       resources:
         limits:
-          memory: 128M
+          memory: 256M
+        reservations:
+          memory: 64M
+      restart_policy:
+        condition: any
+        delay: 5s
+        max_attempts: 3
+        window: 120s
+      update_config:
+        parallelism: 1
+        delay: 10s
+        failure_action: rollback
+      labels:
+        - "cubeos.type=platform"
+        - "cubeos.category=platform"
+        - "cubeos.port=6010"
+        - "cubeos.fqdn=api.cubeos.cube"
+        - "cubeos.deployment=swarm"
+        - "cubeos.description=CubeOS API Server"
     healthcheck:
       test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:6010/health"]
       interval: 30s
       timeout: 5s
       retries: 3
-    labels:
-      - "cubeos.type=platform"
-      - "cubeos.category=platform"
-      - "cubeos.port=6010"
-      - "cubeos.description=CubeOS API Server"
+      start_period: 30s
+
+networks:
+  default:
+    external: true
+    name: cubeos-network

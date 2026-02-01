@@ -1,14 +1,21 @@
 # ChromaDB Vector Database
-# Port: 6031 (API)
+# ═══════════════════════════════════════════════════════════════════════════════
+# DEPLOYMENT: Docker Swarm stack
+# Port: 6031 (API, maps from internal 8000)
 # Stores document embeddings for AI-powered documentation search
+#
+# Deploy: docker stack deploy -c docker-compose.yml --resolve-image=never chromadb
+# ═══════════════════════════════════════════════════════════════════════════════
+
 services:
   chromadb:
     image: chromadb/chroma:latest
-    container_name: cubeos-chromadb
-    restart: unless-stopped
-    privileged: true
+    hostname: cubeos-chromadb
     ports:
-      - "6031:8000"
+      - target: 8000
+        published: 6031
+        protocol: tcp
+        mode: host
     volumes:
       - ../appdata:/chroma/chroma
     environment:
@@ -22,22 +29,41 @@ services:
       - CHROMA_SERVER_CORS_ALLOW_ORIGINS=["*"]
     env_file:
       - /cubeos/config/defaults.env
-    security_opt:
-      - apparmor:unconfined
     deploy:
+      mode: replicated
+      replicas: 1
+      placement:
+        constraints:
+          - node.role == manager
       resources:
         limits:
           memory: 512M
         reservations:
           memory: 256M
+      restart_policy:
+        condition: any
+        delay: 5s
+        max_attempts: 3
+        window: 120s
+      update_config:
+        parallelism: 1
+        delay: 10s
+        failure_action: rollback
+      labels:
+        - "cubeos.type=ai"
+        - "cubeos.category=ai"
+        - "cubeos.port=6031"
+        - "cubeos.fqdn=chromadb.cubeos.cube"
+        - "cubeos.deployment=swarm"
+        - "cubeos.description=ChromaDB Vector Database"
     healthcheck:
       test: ["CMD-SHELL", "bash -c 'echo > /dev/tcp/127.0.0.1/8000'"]
       interval: 30s
       timeout: 10s
       retries: 3
       start_period: 30s
-    labels:
-      - "cubeos.type=ai"
-      - "cubeos.category=ai"
-      - "cubeos.port=6031"
-      - "cubeos.description=ChromaDB Vector Database"
+
+networks:
+  default:
+    external: true
+    name: cubeos-network

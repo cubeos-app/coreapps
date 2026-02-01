@@ -1,11 +1,16 @@
 # Nginx Proxy Manager
+# ═══════════════════════════════════════════════════════════════════════════════
+# DEPLOYMENT: docker-compose (NOT Swarm stack)
+# REASON: Host network mode required for ports 80/443 ingress
 # Port: 81 (Admin UI), 80 (HTTP), 443 (HTTPS)
-# Network: host mode (handles all ingress traffic)
 # NOTE: Admin UI is on port 81, NOT 6000!
+# ═══════════════════════════════════════════════════════════════════════════════
+
 services:
   npm:
     image: jc21/nginx-proxy-manager:latest
     container_name: cubeos-npm
+    hostname: cubeos-npm
     restart: unless-stopped
     network_mode: host
     volumes:
@@ -22,12 +27,15 @@ services:
         reservations:
           memory: 64M
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:81/api/"]
+      test: ["CMD", "curl", "-sf", "http://127.0.0.1:81/api/"]
       interval: 30s
       timeout: 10s
       retries: 3
+      start_period: 30s
     labels:
       - "cubeos.type=system"
       - "cubeos.category=infrastructure"
       - "cubeos.port=81"
+      - "cubeos.fqdn=npm.cubeos.cube"
+      - "cubeos.deployment=compose"
       - "cubeos.description=Nginx Proxy Manager"

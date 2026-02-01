@@ -1,14 +1,21 @@
 # Ollama AI Model Server
-# Port: 6030 (API)
+# ═══════════════════════════════════════════════════════════════════════════════
+# DEPLOYMENT: Docker Swarm stack
+# Port: 6030 (API, maps from internal 11434)
 # Runs local LLMs for CubeOS AI Assistant
+#
+# Deploy: docker stack deploy -c docker-compose.yml --resolve-image=never ollama
+# ═══════════════════════════════════════════════════════════════════════════════
+
 services:
   ollama:
     image: ollama/ollama:latest
-    container_name: cubeos-ollama
-    restart: unless-stopped
-    privileged: true
+    hostname: cubeos-ollama
     ports:
-      - "6030:11434"
+      - target: 11434
+        published: 6030
+        protocol: tcp
+        mode: host
     volumes:
       - ../appdata:/root/.ollama
     environment:
@@ -18,22 +25,41 @@ services:
       - OLLAMA_MAX_LOADED_MODELS=1
     env_file:
       - /cubeos/config/defaults.env
-    security_opt:
-      - apparmor:unconfined
     deploy:
+      mode: replicated
+      replicas: 1
+      placement:
+        constraints:
+          - node.role == manager
       resources:
         limits:
           memory: 4G
         reservations:
           memory: 1G
+      restart_policy:
+        condition: any
+        delay: 5s
+        max_attempts: 3
+        window: 120s
+      update_config:
+        parallelism: 1
+        delay: 10s
+        failure_action: rollback
+      labels:
+        - "cubeos.type=ai"
+        - "cubeos.category=ai"
+        - "cubeos.port=6030"
+        - "cubeos.fqdn=ollama.cubeos.cube"
+        - "cubeos.deployment=swarm"
+        - "cubeos.description=Ollama AI Model Server"
     healthcheck:
       test: ["CMD-SHELL", "bash -c 'echo > /dev/tcp/127.0.0.1/11434'"]
       interval: 30s
       timeout: 10s
       retries: 3
       start_period: 60s
-    labels:
-      - "cubeos.type=ai"
-      - "cubeos.category=ai"
-      - "cubeos.port=6030"
-      - "cubeos.description=Ollama AI Model Server"
+
+networks:
+  default:
+    external: true
+    name: cubeos-network

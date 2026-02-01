@@ -1,14 +1,21 @@
 # Dozzle - Container Log Viewer
+# ═══════════════════════════════════════════════════════════════════════════════
+# DEPLOYMENT: Docker Swarm stack
 # Port: 6012 (Web UI)
-# Real-time Docker container log viewer
-# NOTE: Scratch container - no healthcheck possible (no shell/tools available)
+# NOTE: Scratch container - limited healthcheck options
+#
+# Deploy: docker stack deploy -c docker-compose.yml --resolve-image=never dozzle
+# ═══════════════════════════════════════════════════════════════════════════════
+
 services:
   dozzle:
     image: amir20/dozzle:latest
-    container_name: cubeos-dozzle
-    restart: unless-stopped
+    hostname: cubeos-dozzle
     ports:
-      - "6012:8080"
+      - target: 8080
+        published: 6012
+        protocol: tcp
+        mode: host
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
     environment:
@@ -19,13 +26,34 @@ services:
     env_file:
       - /cubeos/config/defaults.env
     deploy:
+      mode: replicated
+      replicas: 1
+      placement:
+        constraints:
+          - node.role == manager
       resources:
         limits:
           memory: 64M
         reservations:
           memory: 32M
-    labels:
-      - "cubeos.type=platform"
-      - "cubeos.category=monitoring"
-      - "cubeos.port=6012"
-      - "cubeos.description=Dozzle - Container log viewer"
+      restart_policy:
+        condition: any
+        delay: 5s
+        max_attempts: 3
+        window: 120s
+      update_config:
+        parallelism: 1
+        delay: 10s
+        failure_action: rollback
+      labels:
+        - "cubeos.type=platform"
+        - "cubeos.category=monitoring"
+        - "cubeos.port=6012"
+        - "cubeos.fqdn=logs.cubeos.cube"
+        - "cubeos.deployment=swarm"
+        - "cubeos.description=Dozzle - Container log viewer"
+
+networks:
+  default:
+    external: true
+    name: cubeos-network

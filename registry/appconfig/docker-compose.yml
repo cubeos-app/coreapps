@@ -1,13 +1,21 @@
 # Local Docker Registry
+# ═══════════════════════════════════════════════════════════════════════════════
+# DEPLOYMENT: Docker Swarm stack
+# PURPOSE: Offline image caching and distribution
 # Port: 5000 (Registry API)
-# Caches images for offline operation
+#
+# Deploy: docker stack deploy -c docker-compose.yml --resolve-image=never registry
+# ═══════════════════════════════════════════════════════════════════════════════
+
 services:
   registry:
     image: registry:2
-    container_name: cubeos-registry
-    restart: unless-stopped
+    hostname: cubeos-registry
     ports:
-      - "5000:5000"
+      - target: 5000
+        published: 5000
+        protocol: tcp
+        mode: host
     volumes:
       - /cubeos/data/registry:/var/lib/registry
       - ./config.yml:/etc/docker/registry/config.yml:ro
@@ -15,18 +23,40 @@ services:
       - REGISTRY_HTTP_ADDR=0.0.0.0:5000
       - REGISTRY_STORAGE_DELETE_ENABLED=true
     deploy:
+      mode: replicated
+      replicas: 1
+      placement:
+        constraints:
+          - node.role == manager
       resources:
         limits:
           memory: 256M
         reservations:
           memory: 64M
+      restart_policy:
+        condition: any
+        delay: 5s
+        max_attempts: 3
+        window: 120s
+      update_config:
+        parallelism: 1
+        delay: 10s
+        failure_action: rollback
+      labels:
+        - "cubeos.type=system"
+        - "cubeos.category=infrastructure"
+        - "cubeos.port=5000"
+        - "cubeos.fqdn=registry.cubeos.cube"
+        - "cubeos.deployment=swarm"
+        - "cubeos.description=Local Docker Registry"
     healthcheck:
       test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:5000/v2/"]
       interval: 30s
       timeout: 5s
       retries: 3
-    labels:
-      - "cubeos.type=system"
-      - "cubeos.category=infrastructure"
-      - "cubeos.port=5000"
-      - "cubeos.description=Local Docker Registry"
+      start_period: 30s
+
+networks:
+  default:
+    external: true
+    name: cubeos-network

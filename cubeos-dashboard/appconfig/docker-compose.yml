@@ -1,32 +1,61 @@
 # CubeOS Dashboard
+# ═══════════════════════════════════════════════════════════════════════════════
+# DEPLOYMENT: Docker Swarm stack
 # Port: 6011 (Web UI)
-# Vue.js frontend for CubeOS management
+# CRITICAL: Internal port is 8087, NOT 80!
+#
+# Deploy: docker stack deploy -c docker-compose.yml --resolve-image=never cubeos-dashboard
+# ═══════════════════════════════════════════════════════════════════════════════
+
 services:
   dashboard:
     image: ghcr.io/cubeos-app/dashboard:latest
-    container_name: cubeos-dashboard
-    restart: unless-stopped
-    privileged: true
+    hostname: cubeos-dashboard
     ports:
-      - "6011:8087"
+      - target: 8087
+        published: 6011
+        protocol: tcp
+        mode: host
     environment:
       - TZ=${TZ:-UTC}
       - API_URL=http://10.42.24.1:6010
     env_file:
       - /cubeos/config/defaults.env
-    security_opt:
-      - apparmor:unconfined
     deploy:
+      mode: replicated
+      replicas: 1
+      placement:
+        constraints:
+          - node.role == manager
       resources:
         limits:
           memory: 64M
+        reservations:
+          memory: 32M
+      restart_policy:
+        condition: any
+        delay: 5s
+        max_attempts: 3
+        window: 120s
+      update_config:
+        parallelism: 1
+        delay: 10s
+        failure_action: rollback
+      labels:
+        - "cubeos.type=platform"
+        - "cubeos.category=platform"
+        - "cubeos.port=6011"
+        - "cubeos.fqdn=cubeos.cube"
+        - "cubeos.deployment=swarm"
+        - "cubeos.description=CubeOS Dashboard"
     healthcheck:
       test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:8087/"]
       interval: 30s
       timeout: 5s
       retries: 3
-    labels:
-      - "cubeos.type=platform"
-      - "cubeos.category=platform"
-      - "cubeos.port=6011"
-      - "cubeos.description=CubeOS Dashboard"
+      start_period: 30s
+
+networks:
+  default:
+    external: true
+    name: cubeos-network

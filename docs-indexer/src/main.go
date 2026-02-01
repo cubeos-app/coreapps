@@ -18,17 +18,17 @@ import (
 
 // Config holds all configuration from environment variables
 type Config struct {
-	DocsRepoURL     string // Git repo URL for documentation
-	DocsLocalPath   string // Local path to store docs
-	OllamaHost      string // Ollama host for embeddings
-	OllamaPort      string // Ollama port
-	EmbeddingModel  string // Model for embeddings (nomic-embed-text)
-	ChromaHost      string // ChromaDB host
-	ChromaPort      string // ChromaDB port
-	CollectionName  string // ChromaDB collection name
-	SyncInterval    int    // Sync interval in hours (0 = once and exit)
-	ChunkSize       int    // Max characters per chunk
-	ChunkOverlap    int    // Overlap between chunks
+	DocsRepoURL    string // Git repo URL for documentation
+	DocsLocalPath  string // Local path to store docs
+	OllamaHost     string // Ollama host for embeddings
+	OllamaPort     string // Ollama port
+	EmbeddingModel string // Model for embeddings (nomic-embed-text)
+	ChromaHost     string // ChromaDB host
+	ChromaPort     string // ChromaDB port
+	CollectionName string // ChromaDB collection name
+	SyncInterval   int    // Sync interval in hours (0 = once and exit)
+	ChunkSize      int    // Max characters per chunk
+	ChunkOverlap   int    // Overlap between chunks
 }
 
 func loadConfig() *Config {
@@ -91,10 +91,10 @@ type ChromaQueryRequest struct {
 }
 
 type ChromaQueryResponse struct {
-	IDs        [][]string            `json:"ids"`
-	Documents  [][]string            `json:"documents"`
-	Metadatas  [][]map[string]string `json:"metadatas"`
-	Distances  [][]float32           `json:"distances"`
+	IDs       [][]string            `json:"ids"`
+	Documents [][]string            `json:"documents"`
+	Metadatas [][]map[string]string `json:"metadatas"`
+	Distances [][]float32           `json:"distances"`
 }
 
 type OllamaEmbeddingRequest struct {
@@ -241,7 +241,7 @@ func parseAndChunkDocuments(files []string, config *Config) ([]Document, error) 
 
 		// Get relative path for metadata
 		relPath, _ := filepath.Rel(config.DocsLocalPath, file)
-		
+
 		// Extract title from first heading or filename
 		title := extractTitle(string(content), filepath.Base(file))
 
@@ -257,10 +257,10 @@ func parseAndChunkDocuments(files []string, config *Config) ([]Document, error) 
 				ID:      id,
 				Content: chunk,
 				Metadata: map[string]string{
-					"source":    relPath,
-					"title":     title,
-					"chunk":     fmt.Sprintf("%d", i),
-					"total":     fmt.Sprintf("%d", len(chunks)),
+					"source": relPath,
+					"title":  title,
+					"chunk":  fmt.Sprintf("%d", i),
+					"total":  fmt.Sprintf("%d", len(chunks)),
 				},
 			})
 		}
@@ -284,10 +284,10 @@ func extractTitle(content, filename string) string {
 func chunkText(text string, chunkSize, overlap int) []string {
 	// Clean up the text
 	text = strings.ReplaceAll(text, "\r\n", "\n")
-	
+
 	// Split by paragraphs first
 	paragraphs := strings.Split(text, "\n\n")
-	
+
 	var chunks []string
 	var currentChunk strings.Builder
 
@@ -300,7 +300,7 @@ func chunkText(text string, chunkSize, overlap int) []string {
 		// If adding this paragraph would exceed chunk size, save current and start new
 		if currentChunk.Len()+len(para) > chunkSize && currentChunk.Len() > 0 {
 			chunks = append(chunks, strings.TrimSpace(currentChunk.String()))
-			
+
 			// Start new chunk with overlap from end of previous
 			prevContent := currentChunk.String()
 			currentChunk.Reset()
