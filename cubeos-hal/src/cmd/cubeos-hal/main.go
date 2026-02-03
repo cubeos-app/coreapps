@@ -111,7 +111,7 @@ func main() {
 		r.Get("/logs/kernel", h.GetKernelLogs)
 		r.Get("/logs/journal", h.GetJournalLogs)
 		r.Get("/logs/hardware", h.GetHardwareLogs)
-		r.Get("/support/bundle", h.GetSupportBundle)
+		r.Get("/support/bundle.zip", h.GetSupportBundle)
 
 		// Mount operations
 		r.Post("/mounts/smb", h.MountSMB)
