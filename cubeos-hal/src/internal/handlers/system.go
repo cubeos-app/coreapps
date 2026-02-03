@@ -1,0 +1,485 @@
+package handlers
+
+import (
+	"context"
+	"fmt"
+	"net/http"
+	"os/exec"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/coreos/go-systemd/v22/dbus"
+	"github.com/go-chi/chi/v5"
+)
+
+// ============================================================================
+// System Types
+// ============================================================================
+
+// TemperatureResponse represents CPU temperature.
+// @Description CPU temperature reading
+type TemperatureResponse struct {
+	Temperature float64 `json:"temperature" example:"56.5"`
+	Unit        string  `json:"unit" example:"celsius"`
+	Source      string  `json:"source" example:"vcgencmd"`
+}
+
+// ThrottleStatus represents throttling status.
+// @Description CPU throttling status flags
+type ThrottleStatus struct {
+	UnderVoltageOccurred         bool   `json:"under_voltage_occurred" example:"false"`
+	ArmFrequencyCappedOccurred   bool   `json:"arm_frequency_capped_occurred" example:"false"`
+	CurrentlyThrottled           bool   `json:"currently_throttled" example:"false"`
+	SoftTemperatureLimitOccurred bool   `json:"soft_temperature_limit_occurred" example:"false"`
+	UnderVoltageNow              bool   `json:"under_voltage_now" example:"false"`
+	ArmFrequencyCappedNow        bool   `json:"arm_frequency_capped_now" example:"false"`
+	ThrottledNow                 bool   `json:"throttled_now" example:"false"`
+	SoftTemperatureLimitNow      bool   `json:"soft_temperature_limit_now" example:"false"`
+	RawHex                       string `json:"raw_hex" example:"0x0"`
+}
+
+// EEPROMInfo represents Raspberry Pi EEPROM information.
+// @Description Raspberry Pi EEPROM/firmware information
+type EEPROMInfo struct {
+	Version    string `json:"version" example:"2024-01-15"`
+	Bootloader string `json:"bootloader,omitempty"`
+	VL805      string `json:"vl805,omitempty"`
+	Model      string `json:"model,omitempty" example:"Raspberry Pi 5 Model B Rev 1.0"`
+	Serial     string `json:"serial,omitempty" example:"10000000abcd1234"`
+	Revision   string `json:"revision,omitempty"`
+}
+
+// BootConfig represents boot configuration.
+// @Description Boot configuration from config.txt
+type BootConfig struct {
+	Config map[string]string `json:"config"`
+	Raw    string            `json:"raw,omitempty"`
+}
+
+// ServiceStatus represents a systemd service status.
+// @Description Systemd service status
+type ServiceStatus struct {
+	Name        string `json:"name" example:"cubeos-hal"`
+	Active      bool   `json:"active" example:"true"`
+	Running     bool   `json:"running" example:"true"`
+	Enabled     bool   `json:"enabled" example:"true"`
+	Description string `json:"description,omitempty"`
+	LoadState   string `json:"load_state" example:"loaded"`
+	ActiveState string `json:"active_state" example:"active"`
+	SubState    string `json:"sub_state" example:"running"`
+	MainPID     int    `json:"main_pid,omitempty" example:"1234"`
+}
+
+// ============================================================================
+// System Control Handlers
+// ============================================================================
+
+// Reboot reboots the system.
+// @Summary Reboot system
+// @Description Initiates a system reboot
+// @Tags System
+// @Accept json
+// @Produce json
+// @Success 200 {object} SuccessResponse
+// @Failure 500 {object} ErrorResponse
+// @Router /system/reboot [post]
+func (h *HALHandler) Reboot(w http.ResponseWriter, r *http.Request) {
+	successResponse(w, "system rebooting...")
+	go func() {
+		time.Sleep(1 * time.Second)
+		exec.Command("systemctl", "reboot").Run()
+	}()
+}
+
+// Shutdown shuts down the system.
+// @Summary Shutdown system
+// @Description Initiates a system shutdown
+// @Tags System
+// @Accept json
+// @Produce json
+// @Success 200 {object} SuccessResponse
+// @Failure 500 {object} ErrorResponse
+// @Router /system/shutdown [post]
+func (h *HALHandler) Shutdown(w http.ResponseWriter, r *http.Request) {
+	successResponse(w, "system shutting down...")
+	go func() {
+		time.Sleep(1 * time.Second)
+		exec.Command("systemctl", "poweroff").Run()
+	}()
+}
+
+// ============================================================================
+// System Information Handlers
+// ============================================================================
+
+// GetCPUTemp returns CPU temperature.
+// @Summary Get CPU temperature
+// @Description Returns current CPU temperature from vcgencmd
+// @Tags System
+// @Accept json
+// @Produce json
+// @Success 200 {object} TemperatureResponse
+// @Failure 500 {object} ErrorResponse
+// @Router /system/temperature [get]
+func (h *HALHandler) GetCPUTemp(w http.ResponseWriter, r *http.Request) {
+	cmd := exec.Command("vcgencmd", "measure_temp")
+	output, err := cmd.Output()
+	if err != nil {
+		errorResponse(w, http.StatusInternalServerError, "failed to get temperature: "+err.Error())
+		return
+	}
+
+	// Parse "temp=45.0'C"
+	tempStr := strings.TrimSpace(string(output))
+	tempStr = strings.TrimPrefix(tempStr, "temp=")
+	tempStr = strings.TrimSuffix(tempStr, "'C")
+	temp, _ := strconv.ParseFloat(tempStr, 64)
+
+	jsonResponse(w, http.StatusOK, TemperatureResponse{
+		Temperature: temp,
+		Unit:        "celsius",
+		Source:      "vcgencmd",
+	})
+}
+
+// GetThrottleStatus returns throttling status.
+// @Summary Get throttle status
+// @Description Returns CPU throttling status flags from vcgencmd
+// @Tags System
+// @Accept json
+// @Produce json
+// @Success 200 {object} ThrottleStatus
+// @Failure 500 {object} ErrorResponse
+// @Router /system/throttle [get]
+func (h *HALHandler) GetThrottleStatus(w http.ResponseWriter, r *http.Request) {
+	cmd := exec.Command("vcgencmd", "get_throttled")
+	output, err := cmd.Output()
+	if err != nil {
+		errorResponse(w, http.StatusInternalServerError, "failed to get throttle status: "+err.Error())
+		return
+	}
+
+	// Parse "throttled=0x0"
+	line := strings.TrimSpace(string(output))
+	parts := strings.Split(line, "=")
+	hexVal := "0x0"
+	if len(parts) == 2 {
+		hexVal = parts[1]
+	}
+
+	val, _ := strconv.ParseInt(strings.TrimPrefix(hexVal, "0x"), 16, 64)
+
+	status := ThrottleStatus{
+		UnderVoltageOccurred:         val&(1<<16) != 0,
+		ArmFrequencyCappedOccurred:   val&(1<<17) != 0,
+		CurrentlyThrottled:           val&(1<<18) != 0,
+		SoftTemperatureLimitOccurred: val&(1<<19) != 0,
+		UnderVoltageNow:              val&(1<<0) != 0,
+		ArmFrequencyCappedNow:        val&(1<<1) != 0,
+		ThrottledNow:                 val&(1<<2) != 0,
+		SoftTemperatureLimitNow:      val&(1<<3) != 0,
+		RawHex:                       hexVal,
+	}
+
+	jsonResponse(w, http.StatusOK, status)
+}
+
+// GetEEPROMInfo returns Raspberry Pi EEPROM/firmware information.
+// @Summary Get EEPROM info
+// @Description Returns Raspberry Pi EEPROM/firmware version and hardware info
+// @Tags System
+// @Accept json
+// @Produce json
+// @Success 200 {object} EEPROMInfo
+// @Failure 500 {object} ErrorResponse
+// @Router /system/eeprom [get]
+func (h *HALHandler) GetEEPROMInfo(w http.ResponseWriter, r *http.Request) {
+	info := EEPROMInfo{}
+
+	// Get EEPROM version
+	cmd := exec.Command("vcgencmd", "bootloader_version")
+	if output, err := cmd.Output(); err == nil {
+		lines := strings.Split(string(output), "\n")
+		if len(lines) > 0 {
+			info.Version = strings.TrimSpace(lines[0])
+		}
+	}
+
+	// Get model info from /proc/cpuinfo
+	if output, err := exec.Command("cat", "/proc/cpuinfo").Output(); err == nil {
+		lines := strings.Split(string(output), "\n")
+		for _, line := range lines {
+			if strings.HasPrefix(line, "Model") {
+				parts := strings.SplitN(line, ":", 2)
+				if len(parts) == 2 {
+					info.Model = strings.TrimSpace(parts[1])
+				}
+			}
+			if strings.HasPrefix(line, "Serial") {
+				parts := strings.SplitN(line, ":", 2)
+				if len(parts) == 2 {
+					info.Serial = strings.TrimSpace(parts[1])
+				}
+			}
+			if strings.HasPrefix(line, "Revision") {
+				parts := strings.SplitN(line, ":", 2)
+				if len(parts) == 2 {
+					info.Revision = strings.TrimSpace(parts[1])
+				}
+			}
+		}
+	}
+
+	jsonResponse(w, http.StatusOK, info)
+}
+
+// GetBootConfig returns boot configuration.
+// @Summary Get boot configuration
+// @Description Returns boot configuration from config.txt
+// @Tags System
+// @Accept json
+// @Produce json
+// @Success 200 {object} BootConfig
+// @Failure 500 {object} ErrorResponse
+// @Router /system/bootconfig [get]
+func (h *HALHandler) GetBootConfig(w http.ResponseWriter, r *http.Request) {
+	config := BootConfig{
+		Config: make(map[string]string),
+	}
+
+	// Try common config.txt locations
+	configPaths := []string{
+		"/boot/firmware/config.txt",
+		"/boot/config.txt",
+	}
+
+	for _, path := range configPaths {
+		if output, err := exec.Command("cat", path).Output(); err == nil {
+			config.Raw = string(output)
+			lines := strings.Split(string(output), "\n")
+			for _, line := range lines {
+				line = strings.TrimSpace(line)
+				if line == "" || strings.HasPrefix(line, "#") {
+					continue
+				}
+				parts := strings.SplitN(line, "=", 2)
+				if len(parts) == 2 {
+					config.Config[parts[0]] = parts[1]
+				}
+			}
+			break
+		}
+	}
+
+	jsonResponse(w, http.StatusOK, config)
+}
+
+// ============================================================================
+// Service Management Handlers
+// ============================================================================
+
+// ServiceStatus returns the status of a systemd service.
+// @Summary Get service status
+// @Description Returns the status of a systemd service
+// @Tags System
+// @Accept json
+// @Produce json
+// @Param name path string true "Service name" example(cubeos-hal)
+// @Success 200 {object} ServiceStatus
+// @Failure 400 {object} ErrorResponse
+// @Failure 500 {object} ErrorResponse
+// @Router /system/service/{name}/status [get]
+func (h *HALHandler) ServiceStatus(w http.ResponseWriter, r *http.Request) {
+	name := chi.URLParam(r, "name")
+	if name == "" {
+		errorResponse(w, http.StatusBadRequest, "service name required")
+		return
+	}
+
+	// Ensure .service suffix
+	if !strings.HasSuffix(name, ".service") {
+		name = name + ".service"
+	}
+
+	ctx := context.Background()
+	conn, err := dbus.NewWithContext(ctx)
+	if err != nil {
+		errorResponse(w, http.StatusInternalServerError, "failed to connect to systemd: "+err.Error())
+		return
+	}
+	defer conn.Close()
+
+	status := ServiceStatus{Name: name}
+
+	// Get unit properties
+	props, err := conn.GetUnitPropertiesContext(ctx, name)
+	if err != nil {
+		errorResponse(w, http.StatusInternalServerError, "failed to get service status: "+err.Error())
+		return
+	}
+
+	if v, ok := props["ActiveState"].(string); ok {
+		status.ActiveState = v
+		status.Active = v == "active"
+	}
+	if v, ok := props["SubState"].(string); ok {
+		status.SubState = v
+		status.Running = v == "running"
+	}
+	if v, ok := props["LoadState"].(string); ok {
+		status.LoadState = v
+	}
+	if v, ok := props["Description"].(string); ok {
+		status.Description = v
+	}
+	if v, ok := props["MainPID"].(uint32); ok {
+		status.MainPID = int(v)
+	}
+
+	// Check if enabled using systemctl
+	cmdEnabled := exec.Command("systemctl", "is-enabled", name)
+	if enabledOutput, err := cmdEnabled.Output(); err == nil {
+		status.Enabled = strings.TrimSpace(string(enabledOutput)) == "enabled"
+	}
+
+	jsonResponse(w, http.StatusOK, status)
+}
+
+// RestartService restarts a systemd service.
+// @Summary Restart service
+// @Description Restarts a systemd service
+// @Tags System
+// @Accept json
+// @Produce json
+// @Param name path string true "Service name" example(cubeos-hal)
+// @Success 200 {object} SuccessResponse
+// @Failure 400 {object} ErrorResponse
+// @Failure 500 {object} ErrorResponse
+// @Router /system/service/{name}/restart [post]
+func (h *HALHandler) RestartService(w http.ResponseWriter, r *http.Request) {
+	name := chi.URLParam(r, "name")
+	if name == "" {
+		errorResponse(w, http.StatusBadRequest, "service name required")
+		return
+	}
+
+	if !strings.HasSuffix(name, ".service") {
+		name = name + ".service"
+	}
+
+	ctx := context.Background()
+	conn, err := dbus.NewWithContext(ctx)
+	if err != nil {
+		errorResponse(w, http.StatusInternalServerError, "failed to connect to systemd: "+err.Error())
+		return
+	}
+	defer conn.Close()
+
+	resultChan := make(chan string, 1)
+	_, err = conn.RestartUnitContext(ctx, name, "replace", resultChan)
+	if err != nil {
+		errorResponse(w, http.StatusInternalServerError, "failed to restart service: "+err.Error())
+		return
+	}
+
+	result := <-resultChan
+	if result != "done" {
+		errorResponse(w, http.StatusInternalServerError, "service restart failed: "+result)
+		return
+	}
+
+	successResponse(w, fmt.Sprintf("service %s restarted", name))
+}
+
+// StartService starts a systemd service.
+// @Summary Start service
+// @Description Starts a systemd service
+// @Tags System
+// @Accept json
+// @Produce json
+// @Param name path string true "Service name" example(cubeos-hal)
+// @Success 200 {object} SuccessResponse
+// @Failure 400 {object} ErrorResponse
+// @Failure 500 {object} ErrorResponse
+// @Router /system/service/{name}/start [post]
+func (h *HALHandler) StartService(w http.ResponseWriter, r *http.Request) {
+	name := chi.URLParam(r, "name")
+	if name == "" {
+		errorResponse(w, http.StatusBadRequest, "service name required")
+		return
+	}
+
+	if !strings.HasSuffix(name, ".service") {
+		name = name + ".service"
+	}
+
+	ctx := context.Background()
+	conn, err := dbus.NewWithContext(ctx)
+	if err != nil {
+		errorResponse(w, http.StatusInternalServerError, "failed to connect to systemd: "+err.Error())
+		return
+	}
+	defer conn.Close()
+
+	resultChan := make(chan string, 1)
+	_, err = conn.StartUnitContext(ctx, name, "replace", resultChan)
+	if err != nil {
+		errorResponse(w, http.StatusInternalServerError, "failed to start service: "+err.Error())
+		return
+	}
+
+	result := <-resultChan
+	if result != "done" {
+		errorResponse(w, http.StatusInternalServerError, "service start failed: "+result)
+		return
+	}
+
+	successResponse(w, fmt.Sprintf("service %s started", name))
+}
+
+// StopService stops a systemd service.
+// @Summary Stop service
+// @Description Stops a systemd service
+// @Tags System
+// @Accept json
+// @Produce json
+// @Param name path string true "Service name" example(cubeos-hal)
+// @Success 200 {object} SuccessResponse
+// @Failure 400 {object} ErrorResponse
+// @Failure 500 {object} ErrorResponse
+// @Router /system/service/{name}/stop [post]
+func (h *HALHandler) StopService(w http.ResponseWriter, r *http.Request) {
+	name := chi.URLParam(r, "name")
+	if name == "" {
+		errorResponse(w, http.StatusBadRequest, "service name required")
+		return
+	}
+
+	if !strings.HasSuffix(name, ".service") {
+		name = name + ".service"
+	}
+
+	ctx := context.Background()
+	conn, err := dbus.NewWithContext(ctx)
+	if err != nil {
+		errorResponse(w, http.StatusInternalServerError, "failed to connect to systemd: "+err.Error())
+		return
+	}
+	defer conn.Close()
+
+	resultChan := make(chan string, 1)
+	_, err = conn.StopUnitContext(ctx, name, "replace", resultChan)
+	if err != nil {
+		errorResponse(w, http.StatusInternalServerError, "failed to stop service: "+err.Error())
+		return
+	}
+
+	result := <-resultChan
+	if result != "done" {
+		errorResponse(w, http.StatusInternalServerError, "service stop failed: "+result)
+		return
+	}
+
+	successResponse(w, fmt.Sprintf("service %s stopped", name))
+}
