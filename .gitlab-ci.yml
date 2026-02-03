@@ -367,7 +367,7 @@ restart-changed:
           npm|cubeos-hal)
             COMPOSE_APPS="$COMPOSE_APPS $app"
             ;;
-          registry|cubeos-api|cubeos-dashboard|dozzle|ollama|chromadb)
+          registry|cubeos-api|cubeos-dashboard|cubeos-filebrowser|dozzle|ollama|chromadb)
             STACK_APPS="$STACK_APPS $app"
             ;;
           *)
