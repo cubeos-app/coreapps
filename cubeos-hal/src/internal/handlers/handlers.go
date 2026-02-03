@@ -2235,6 +2235,415 @@ func formatNMEATime(t string) string {
 }
 
 // ============================================================================
+// Cellular Modem Support (ModemManager via mmcli)
+// ============================================================================
+
+// CellularModem represents a detected modem
+type CellularModem struct {
+	Index         int    `json:"index"`
+	Path          string `json:"path"`
+	Manufacturer  string `json:"manufacturer,omitempty"`
+	Model         string `json:"model,omitempty"`
+	IMEI          string `json:"imei,omitempty"`
+	State         string `json:"state"`
+	PowerState    string `json:"power_state,omitempty"`
+	SignalQuality int    `json:"signal_quality"`
+	AccessTech    string `json:"access_tech,omitempty"`
+	Operator      string `json:"operator,omitempty"`
+	OperatorCode  string `json:"operator_code,omitempty"`
+}
+
+// CellularStatus represents cellular connection status
+type CellularStatus struct {
+	Available  bool            `json:"available"`
+	ModemCount int             `json:"modem_count"`
+	Modems     []CellularModem `json:"modems,omitempty"`
+	Connected  bool            `json:"connected"`
+	IPAddress  string          `json:"ip_address,omitempty"`
+	Interface  string          `json:"interface,omitempty"`
+}
+
+// CellularSignal represents detailed signal info
+type CellularSignal struct {
+	Quality    int     `json:"quality"`              // 0-100%
+	RSSI       float64 `json:"rssi,omitempty"`       // dBm
+	RSRP       float64 `json:"rsrp,omitempty"`       // LTE Reference Signal Received Power
+	RSRQ       float64 `json:"rsrq,omitempty"`       // LTE Reference Signal Received Quality
+	SINR       float64 `json:"sinr,omitempty"`       // Signal to Interference+Noise Ratio
+	Technology string  `json:"technology,omitempty"` // GSM, UMTS, LTE, 5GNR
+}
+
+// GetCellularStatus returns cellular modem status
+func (h *HALHandler) GetCellularStatus(w http.ResponseWriter, r *http.Request) {
+	status := CellularStatus{}
+
+	// Check if ModemManager is running
+	cmd := exec.Command("nsenter", "-t", "1", "-m", "-u", "-n", "-i", "/usr/bin/systemctl", "is-active", "ModemManager")
+	if output, err := cmd.Output(); err != nil || strings.TrimSpace(string(output)) != "active" {
+		// ModemManager not running, check for Android tethering
+		status.Available = h.checkAndroidTethering(&status)
+		jsonResponse(w, http.StatusOK, status)
+		return
+	}
+
+	// List modems
+	modems := h.listModems()
+	status.ModemCount = len(modems)
+	status.Modems = modems
+	status.Available = len(modems) > 0
+
+	// Check if any modem is connected
+	for _, m := range modems {
+		if m.State == "connected" {
+			status.Connected = true
+			// Get bearer info for IP
+			h.getModemBearerInfo(m.Index, &status)
+			break
+		}
+	}
+
+	jsonResponse(w, http.StatusOK, status)
+}
+
+// GetCellularModems lists all modems
+func (h *HALHandler) GetCellularModems(w http.ResponseWriter, r *http.Request) {
+	modems := h.listModems()
+	jsonResponse(w, http.StatusOK, map[string]interface{}{
+		"modems": modems,
+		"count":  len(modems),
+	})
+}
+
+// GetCellularSignal returns signal strength details
+func (h *HALHandler) GetCellularSignal(w http.ResponseWriter, r *http.Request) {
+	modemIdx := r.URL.Query().Get("modem")
+	if modemIdx == "" {
+		modemIdx = "0"
+	}
+
+	signal := h.getModemSignal(modemIdx)
+	jsonResponse(w, http.StatusOK, signal)
+}
+
+// ConnectCellular connects a modem
+func (h *HALHandler) ConnectCellular(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Modem int    `json:"modem"`
+		APN   string `json:"apn"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		errorResponse(w, http.StatusBadRequest, "invalid request")
+		return
+	}
+
+	if req.APN == "" {
+		req.APN = "internet" // Default APN
+	}
+
+	// Use mmcli simple-connect
+	cmd := exec.Command("nsenter", "-t", "1", "-m", "-u", "-n", "-i",
+		"/usr/bin/mmcli", "-m", strconv.Itoa(req.Modem), "--simple-connect=apn="+req.APN)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		errorResponse(w, http.StatusInternalServerError, "connect failed: "+string(output))
+		return
+	}
+
+	successResponse(w, "connected")
+}
+
+// DisconnectCellular disconnects a modem
+func (h *HALHandler) DisconnectCellular(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Modem int `json:"modem"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		errorResponse(w, http.StatusBadRequest, "invalid request")
+		return
+	}
+
+	cmd := exec.Command("nsenter", "-t", "1", "-m", "-u", "-n", "-i",
+		"/usr/bin/mmcli", "-m", strconv.Itoa(req.Modem), "--simple-disconnect")
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		errorResponse(w, http.StatusInternalServerError, "disconnect failed: "+string(output))
+		return
+	}
+
+	successResponse(w, "disconnected")
+}
+
+// listModems returns list of detected modems via mmcli
+func (h *HALHandler) listModems() []CellularModem {
+	var modems []CellularModem
+
+	// Get modem list
+	cmd := exec.Command("nsenter", "-t", "1", "-m", "-u", "-n", "-i", "/usr/bin/mmcli", "-L")
+	output, err := cmd.Output()
+	if err != nil {
+		return modems
+	}
+
+	// Parse output: /org/freedesktop/ModemManager1/Modem/0 [Quectel] EC25
+	lines := strings.Split(string(output), "\n")
+	for _, line := range lines {
+		if !strings.Contains(line, "/Modem/") {
+			continue
+		}
+
+		// Extract modem index
+		re := regexp.MustCompile(`/Modem/(\d+)`)
+		matches := re.FindStringSubmatch(line)
+		if len(matches) < 2 {
+			continue
+		}
+
+		idx, _ := strconv.Atoi(matches[1])
+		modem := h.getModemDetails(idx)
+		modems = append(modems, modem)
+	}
+
+	return modems
+}
+
+// getModemDetails gets detailed info for a modem
+func (h *HALHandler) getModemDetails(idx int) CellularModem {
+	modem := CellularModem{
+		Index: idx,
+		Path:  fmt.Sprintf("/org/freedesktop/ModemManager1/Modem/%d", idx),
+	}
+
+	// Get modem info as JSON
+	cmd := exec.Command("nsenter", "-t", "1", "-m", "-u", "-n", "-i",
+		"/usr/bin/mmcli", "-m", strconv.Itoa(idx), "-J")
+	output, err := cmd.Output()
+	if err != nil {
+		return modem
+	}
+
+	// Parse JSON
+	var mmOutput struct {
+		Modem struct {
+			Generic struct {
+				Manufacturer  string   `json:"manufacturer"`
+				Model         string   `json:"model"`
+				EquipmentID   string   `json:"equipment-identifier"`
+				State         string   `json:"state"`
+				PowerState    string   `json:"power-state"`
+				AccessTech    []string `json:"access-technologies"`
+				SignalQuality struct {
+					Value int `json:"value"`
+				} `json:"signal-quality"`
+			} `json:"generic"`
+			ThreeGPP struct {
+				OperatorName string `json:"operator-name"`
+				OperatorCode string `json:"operator-code"`
+			} `json:"3gpp"`
+		} `json:"modem"`
+	}
+
+	if err := json.Unmarshal(output, &mmOutput); err == nil {
+		modem.Manufacturer = mmOutput.Modem.Generic.Manufacturer
+		modem.Model = mmOutput.Modem.Generic.Model
+		modem.IMEI = mmOutput.Modem.Generic.EquipmentID
+		modem.State = mmOutput.Modem.Generic.State
+		modem.PowerState = mmOutput.Modem.Generic.PowerState
+		modem.SignalQuality = mmOutput.Modem.Generic.SignalQuality.Value
+		modem.Operator = mmOutput.Modem.ThreeGPP.OperatorName
+		modem.OperatorCode = mmOutput.Modem.ThreeGPP.OperatorCode
+		if len(mmOutput.Modem.Generic.AccessTech) > 0 {
+			modem.AccessTech = mmOutput.Modem.Generic.AccessTech[0]
+		}
+	}
+
+	return modem
+}
+
+// getModemSignal gets detailed signal info
+func (h *HALHandler) getModemSignal(modemIdx string) CellularSignal {
+	signal := CellularSignal{}
+
+	// Setup signal polling first
+	exec.Command("nsenter", "-t", "1", "-m", "-u", "-n", "-i",
+		"/usr/bin/mmcli", "-m", modemIdx, "--signal-setup=5").Run()
+
+	// Get signal info
+	cmd := exec.Command("nsenter", "-t", "1", "-m", "-u", "-n", "-i",
+		"/usr/bin/mmcli", "-m", modemIdx, "--signal-get", "-J")
+	output, err := cmd.Output()
+	if err != nil {
+		// Fallback to basic quality
+		cmd = exec.Command("nsenter", "-t", "1", "-m", "-u", "-n", "-i",
+			"/usr/bin/mmcli", "-m", modemIdx, "-J")
+		output, _ = cmd.Output()
+	}
+
+	// Parse signal JSON
+	var sigOutput struct {
+		Modem struct {
+			Generic struct {
+				SignalQuality struct {
+					Value int `json:"value"`
+				} `json:"signal-quality"`
+				AccessTech []string `json:"access-technologies"`
+			} `json:"generic"`
+			Signal struct {
+				LTE struct {
+					RSSI string `json:"rssi"`
+					RSRP string `json:"rsrp"`
+					RSRQ string `json:"rsrq"`
+					SNR  string `json:"snr"`
+				} `json:"lte"`
+				UMTS struct {
+					RSSI string `json:"rssi"`
+					RSCP string `json:"rscp"`
+				} `json:"umts"`
+				GSM struct {
+					RSSI string `json:"rssi"`
+				} `json:"gsm"`
+			} `json:"signal"`
+		} `json:"modem"`
+	}
+
+	if err := json.Unmarshal(output, &sigOutput); err == nil {
+		signal.Quality = sigOutput.Modem.Generic.SignalQuality.Value
+		if len(sigOutput.Modem.Generic.AccessTech) > 0 {
+			signal.Technology = sigOutput.Modem.Generic.AccessTech[0]
+		}
+
+		// Parse LTE signals
+		if sigOutput.Modem.Signal.LTE.RSSI != "" {
+			signal.RSSI, _ = strconv.ParseFloat(strings.TrimSuffix(sigOutput.Modem.Signal.LTE.RSSI, " dBm"), 64)
+		}
+		if sigOutput.Modem.Signal.LTE.RSRP != "" {
+			signal.RSRP, _ = strconv.ParseFloat(strings.TrimSuffix(sigOutput.Modem.Signal.LTE.RSRP, " dBm"), 64)
+		}
+		if sigOutput.Modem.Signal.LTE.RSRQ != "" {
+			signal.RSRQ, _ = strconv.ParseFloat(strings.TrimSuffix(sigOutput.Modem.Signal.LTE.RSRQ, " dB"), 64)
+		}
+		if sigOutput.Modem.Signal.LTE.SNR != "" {
+			signal.SINR, _ = strconv.ParseFloat(strings.TrimSuffix(sigOutput.Modem.Signal.LTE.SNR, " dB"), 64)
+		}
+	}
+
+	return signal
+}
+
+// getModemBearerInfo gets IP address from bearer
+func (h *HALHandler) getModemBearerInfo(modemIdx int, status *CellularStatus) {
+	cmd := exec.Command("nsenter", "-t", "1", "-m", "-u", "-n", "-i",
+		"/usr/bin/mmcli", "-m", strconv.Itoa(modemIdx), "-J")
+	output, err := cmd.Output()
+	if err != nil {
+		return
+	}
+
+	var mmOutput struct {
+		Modem struct {
+			Generic struct {
+				Bearers []string `json:"bearers"`
+			} `json:"generic"`
+		} `json:"modem"`
+	}
+
+	if err := json.Unmarshal(output, &mmOutput); err != nil || len(mmOutput.Modem.Generic.Bearers) == 0 {
+		return
+	}
+
+	// Get bearer details
+	bearerPath := mmOutput.Modem.Generic.Bearers[0]
+	// Extract bearer number from path
+	re := regexp.MustCompile(`/Bearer/(\d+)`)
+	matches := re.FindStringSubmatch(bearerPath)
+	if len(matches) < 2 {
+		return
+	}
+
+	cmd = exec.Command("nsenter", "-t", "1", "-m", "-u", "-n", "-i",
+		"/usr/bin/mmcli", "-b", matches[1], "-J")
+	output, err = cmd.Output()
+	if err != nil {
+		return
+	}
+
+	var bearerOutput struct {
+		Bearer struct {
+			Status struct {
+				Interface string `json:"interface"`
+			} `json:"status"`
+			IPv4Config struct {
+				Address string `json:"address"`
+			} `json:"ipv4-config"`
+		} `json:"bearer"`
+	}
+
+	if err := json.Unmarshal(output, &bearerOutput); err == nil {
+		status.IPAddress = bearerOutput.Bearer.IPv4Config.Address
+		status.Interface = bearerOutput.Bearer.Status.Interface
+	}
+}
+
+// checkAndroidTethering checks for Android USB/BT tethering
+func (h *HALHandler) checkAndroidTethering(status *CellularStatus) bool {
+	// Check for rndis_host (USB tethering) or cdc_ncm interface
+	interfaces, _ := filepath.Glob("/sys/class/net/*")
+
+	for _, iface := range interfaces {
+		ifName := filepath.Base(iface)
+
+		// Check driver
+		driverPath := filepath.Join(iface, "device/driver")
+		if link, err := os.Readlink(driverPath); err == nil {
+			driver := filepath.Base(link)
+			if driver == "rndis_host" || driver == "cdc_ncm" || driver == "cdc_ether" {
+				status.Available = true
+				status.Connected = true
+				status.Interface = ifName
+				status.ModemCount = 1
+				status.Modems = []CellularModem{{
+					Index:        0,
+					Model:        "Android Tethering",
+					State:        "connected",
+					Manufacturer: "Android",
+				}}
+
+				// Get IP address
+				cmd := exec.Command("ip", "-j", "addr", "show", ifName)
+				if output, err := cmd.Output(); err == nil {
+					var addrs []struct {
+						AddrInfo []struct {
+							Local string `json:"local"`
+						} `json:"addr_info"`
+					}
+					if json.Unmarshal(output, &addrs) == nil && len(addrs) > 0 && len(addrs[0].AddrInfo) > 0 {
+						status.IPAddress = addrs[0].AddrInfo[0].Local
+					}
+				}
+
+				return true
+			}
+		}
+	}
+
+	// Check for Bluetooth PAN (bnep0)
+	if _, err := os.Stat("/sys/class/net/bnep0"); err == nil {
+		status.Available = true
+		status.Connected = true
+		status.Interface = "bnep0"
+		status.ModemCount = 1
+		status.Modems = []CellularModem{{
+			Index:        0,
+			Model:        "Bluetooth Tethering",
+			State:        "connected",
+			Manufacturer: "Android",
+		}}
+		return true
+	}
+
+	return false
+}
+
+// ============================================================================
 // AP Client Operations
 // ============================================================================
 

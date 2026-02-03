@@ -90,6 +90,13 @@ func main() {
 		r.Get("/gps/status", h.GetGPSStatus)
 		r.Get("/gps/position", h.GetGPSPosition)
 
+		// Cellular modem (ModemManager + Android tethering)
+		r.Get("/cellular/status", h.GetCellularStatus)
+		r.Get("/cellular/modems", h.GetCellularModems)
+		r.Get("/cellular/signal", h.GetCellularSignal)
+		r.Post("/cellular/connect", h.ConnectCellular)
+		r.Post("/cellular/disconnect", h.DisconnectCellular)
+
 		// USB operations
 		r.Get("/usb/devices", h.ListUSBDevices)
 		r.Post("/usb/mount/{device}", h.MountUSB)
