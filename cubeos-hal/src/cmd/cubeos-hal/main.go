@@ -97,6 +97,13 @@ func main() {
 		r.Post("/cellular/connect", h.ConnectCellular)
 		r.Post("/cellular/disconnect", h.DisconnectCellular)
 
+		// Meshtastic LoRa mesh
+		r.Get("/meshtastic/devices", h.GetMeshtasticDevices)
+		r.Get("/meshtastic/status", h.GetMeshtasticStatus)
+		r.Get("/meshtastic/nodes", h.GetMeshtasticNodes)
+		r.Get("/meshtastic/position", h.GetMeshtasticPosition)
+		r.Post("/meshtastic/send", h.SendMeshtasticMessage)
+
 		// USB operations
 		r.Get("/usb/devices", h.ListUSBDevices)
 		r.Post("/usb/mount/{device}", h.MountUSB)
