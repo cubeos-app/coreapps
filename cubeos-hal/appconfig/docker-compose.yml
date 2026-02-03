@@ -59,6 +59,9 @@ services:
       - /etc/hostapd:/etc/hostapd
       - /etc/wpa_supplicant:/etc/wpa_supplicant
       - /var/run/wpa_supplicant:/var/run/wpa_supplicant
+
+      # Hostapd control socket (for hostapd_cli)
+      - /var/run/hostapd:/var/run/hostapd
       
       # VPN configurations
       - /cubeos/config/vpn:/cubeos/config/vpn

@@ -103,6 +103,39 @@ func (h *HALHandler) GetInterface(w http.ResponseWriter, r *http.Request) {
 	jsonResponse(w, http.StatusOK, iface)
 }
 
+// GetInterfaceTraffic returns traffic stats for an interface
+func (h *HALHandler) GetInterfaceTraffic(w http.ResponseWriter, r *http.Request) {
+	name := chi.URLParam(r, "name")
+	if name == "" {
+		errorResponse(w, http.StatusBadRequest, "interface name required")
+		return
+	}
+
+	// Check interface exists
+	basePath := filepath.Join("/sys/class/net", name)
+	if _, err := os.Stat(basePath); os.IsNotExist(err) {
+		errorResponse(w, http.StatusNotFound, "interface not found: "+name)
+		return
+	}
+
+	statsPath := filepath.Join(basePath, "statistics")
+	stats := map[string]int64{}
+
+	files := []string{"rx_bytes", "tx_bytes", "rx_packets", "tx_packets", "rx_errors", "tx_errors", "rx_dropped", "tx_dropped"}
+	for _, f := range files {
+		if data, err := os.ReadFile(filepath.Join(statsPath, f)); err == nil {
+			if val, err := strconv.ParseInt(strings.TrimSpace(string(data)), 10, 64); err == nil {
+				stats[f] = val
+			}
+		}
+	}
+
+	jsonResponse(w, http.StatusOK, map[string]interface{}{
+		"interface": name,
+		"stats":     stats,
+	})
+}
+
 func (h *HALHandler) getInterfaceInfo(name string) NetworkInterface {
 	iface := NetworkInterface{Name: name}
 	basePath := filepath.Join("/sys/class/net", name)

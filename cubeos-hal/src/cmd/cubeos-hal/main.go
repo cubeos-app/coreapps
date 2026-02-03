@@ -47,6 +47,7 @@ func main() {
 		// Network interfaces
 		r.Get("/network/interfaces", h.ListInterfaces)
 		r.Get("/network/interface/{name}", h.GetInterface)
+		r.Get("/network/interface/{name}/traffic", h.GetInterfaceTraffic)
 		r.Post("/network/interface/{name}/up", h.BringInterfaceUp)
 		r.Post("/network/interface/{name}/down", h.BringInterfaceDown)
 		r.Get("/network/status", h.GetNetworkStatus)
