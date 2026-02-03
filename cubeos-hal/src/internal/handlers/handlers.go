@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"os"
 	"os/exec"
@@ -3419,6 +3420,889 @@ func (h *HALHandler) mtStatusMessage(status int) string {
 		return msg
 	}
 	return fmt.Sprintf("Unknown status %d", status)
+}
+
+// ============================================================================
+// USB Storage (External Drives)
+// ============================================================================
+
+// USBStorageDevice represents an external USB storage device
+type USBStorageDevice struct {
+	Path       string                `json:"path"`
+	Name       string                `json:"name"`
+	Size       int64                 `json:"size"`
+	SizeHuman  string                `json:"size_human"`
+	Vendor     string                `json:"vendor,omitempty"`
+	Model      string                `json:"model,omitempty"`
+	Serial     string                `json:"serial,omitempty"`
+	Filesystem string                `json:"filesystem,omitempty"`
+	Mountpoint string                `json:"mountpoint,omitempty"`
+	Mounted    bool                  `json:"mounted"`
+	Removable  bool                  `json:"removable"`
+	Partitions []USBStoragePartition `json:"partitions,omitempty"`
+}
+
+// USBStoragePartition represents a partition on USB storage
+type USBStoragePartition struct {
+	Path       string `json:"path"`
+	Size       int64  `json:"size"`
+	SizeHuman  string `json:"size_human"`
+	Filesystem string `json:"filesystem,omitempty"`
+	Label      string `json:"label,omitempty"`
+	Mountpoint string `json:"mountpoint,omitempty"`
+	Mounted    bool   `json:"mounted"`
+}
+
+// GetUSBStorageDevices lists external USB storage devices
+func (h *HALHandler) GetUSBStorageDevices(w http.ResponseWriter, r *http.Request) {
+	devices := h.scanUSBStorage()
+	jsonResponse(w, http.StatusOK, map[string]interface{}{
+		"devices": devices,
+		"count":   len(devices),
+	})
+}
+
+// MountUSBStorage mounts a USB storage device
+func (h *HALHandler) MountUSBStorage(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Device     string `json:"device"`     // /dev/sda1
+		Mountpoint string `json:"mountpoint"` // Optional, auto-generated if empty
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		errorResponse(w, http.StatusBadRequest, "invalid request")
+		return
+	}
+
+	if req.Device == "" {
+		errorResponse(w, http.StatusBadRequest, "device required")
+		return
+	}
+
+	// Default mountpoint
+	if req.Mountpoint == "" {
+		devName := filepath.Base(req.Device)
+		req.Mountpoint = "/mnt/usb/" + devName
+	}
+
+	// Create mountpoint
+	mkdirCmd := fmt.Sprintf("mkdir -p %s", req.Mountpoint)
+	exec.Command("nsenter", "-t", "1", "-m", "-u", "-n", "-i", "/bin/sh", "-c", mkdirCmd).Run()
+
+	// Mount with auto filesystem detection
+	mountCmd := fmt.Sprintf("mount %s %s", req.Device, req.Mountpoint)
+	cmd := exec.Command("nsenter", "-t", "1", "-m", "-u", "-n", "-i", "/bin/sh", "-c", mountCmd)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		errorResponse(w, http.StatusInternalServerError, "mount failed: "+string(output))
+		return
+	}
+
+	jsonResponse(w, http.StatusOK, map[string]interface{}{
+		"status":     "ok",
+		"message":    "mounted",
+		"device":     req.Device,
+		"mountpoint": req.Mountpoint,
+	})
+}
+
+// UnmountUSBStorage unmounts a USB storage device
+func (h *HALHandler) UnmountUSBStorage(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Device     string `json:"device"`
+		Mountpoint string `json:"mountpoint"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		errorResponse(w, http.StatusBadRequest, "invalid request")
+		return
+	}
+
+	target := req.Mountpoint
+	if target == "" {
+		target = req.Device
+	}
+
+	if target == "" {
+		errorResponse(w, http.StatusBadRequest, "device or mountpoint required")
+		return
+	}
+
+	// Unmount
+	umountCmd := fmt.Sprintf("umount %s", target)
+	cmd := exec.Command("nsenter", "-t", "1", "-m", "-u", "-n", "-i", "/bin/sh", "-c", umountCmd)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		errorResponse(w, http.StatusInternalServerError, "unmount failed: "+string(output))
+		return
+	}
+
+	successResponse(w, "unmounted")
+}
+
+// EjectUSBStorage safely ejects a USB storage device
+func (h *HALHandler) EjectUSBStorage(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Device string `json:"device"` // /dev/sda
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		errorResponse(w, http.StatusBadRequest, "invalid request")
+		return
+	}
+
+	if req.Device == "" {
+		errorResponse(w, http.StatusBadRequest, "device required")
+		return
+	}
+
+	// First unmount all partitions
+	partitions, _ := filepath.Glob(req.Device + "*")
+	for _, part := range partitions {
+		if part != req.Device {
+			exec.Command("nsenter", "-t", "1", "-m", "-u", "-n", "-i", "/bin/umount", part).Run()
+		}
+	}
+
+	// Sync and eject
+	exec.Command("nsenter", "-t", "1", "-m", "-u", "-n", "-i", "/bin/sync").Run()
+
+	ejectCmd := fmt.Sprintf("echo 1 > /sys/block/%s/device/delete", filepath.Base(req.Device))
+	cmd := exec.Command("nsenter", "-t", "1", "-m", "-u", "-n", "-i", "/bin/sh", "-c", ejectCmd)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		// Try udisksctl as fallback
+		cmd = exec.Command("nsenter", "-t", "1", "-m", "-u", "-n", "-i", "/usr/bin/udisksctl", "power-off", "-b", req.Device)
+		output, err = cmd.CombinedOutput()
+		if err != nil {
+			errorResponse(w, http.StatusInternalServerError, "eject failed: "+string(output))
+			return
+		}
+	}
+
+	successResponse(w, "ejected safely")
+}
+
+// scanUSBStorage scans for USB storage devices
+func (h *HALHandler) scanUSBStorage() []USBStorageDevice {
+	var devices []USBStorageDevice
+
+	// Get block devices via lsblk
+	cmd := exec.Command("nsenter", "-t", "1", "-m", "-u", "-n", "-i", "/usr/bin/lsblk", "-J", "-b", "-o",
+		"NAME,SIZE,TYPE,MOUNTPOINT,FSTYPE,VENDOR,MODEL,SERIAL,RM,TRAN,LABEL")
+	output, err := cmd.Output()
+	if err != nil {
+		return devices
+	}
+
+	var lsblkOutput struct {
+		Blockdevices []struct {
+			Name       string `json:"name"`
+			Size       int64  `json:"size"`
+			Type       string `json:"type"`
+			Mountpoint string `json:"mountpoint"`
+			Fstype     string `json:"fstype"`
+			Vendor     string `json:"vendor"`
+			Model      string `json:"model"`
+			Serial     string `json:"serial"`
+			Rm         bool   `json:"rm"`
+			Tran       string `json:"tran"`
+			Label      string `json:"label"`
+			Children   []struct {
+				Name       string `json:"name"`
+				Size       int64  `json:"size"`
+				Type       string `json:"type"`
+				Mountpoint string `json:"mountpoint"`
+				Fstype     string `json:"fstype"`
+				Label      string `json:"label"`
+			} `json:"children"`
+		} `json:"blockdevices"`
+	}
+
+	if err := json.Unmarshal(output, &lsblkOutput); err != nil {
+		return devices
+	}
+
+	for _, bd := range lsblkOutput.Blockdevices {
+		// Only USB devices (tran=usb) or removable devices
+		if bd.Tran != "usb" && !bd.Rm {
+			continue
+		}
+		// Skip internal storage
+		if strings.HasPrefix(bd.Name, "mmcblk") || strings.HasPrefix(bd.Name, "nvme") {
+			continue
+		}
+
+		dev := USBStorageDevice{
+			Path:       "/dev/" + bd.Name,
+			Name:       bd.Name,
+			Size:       bd.Size,
+			SizeHuman:  formatBytes(bd.Size),
+			Vendor:     strings.TrimSpace(bd.Vendor),
+			Model:      strings.TrimSpace(bd.Model),
+			Serial:     strings.TrimSpace(bd.Serial),
+			Filesystem: bd.Fstype,
+			Mountpoint: bd.Mountpoint,
+			Mounted:    bd.Mountpoint != "",
+			Removable:  bd.Rm,
+		}
+
+		// Add partitions
+		for _, child := range bd.Children {
+			part := USBStoragePartition{
+				Path:       "/dev/" + child.Name,
+				Size:       child.Size,
+				SizeHuman:  formatBytes(child.Size),
+				Filesystem: child.Fstype,
+				Label:      child.Label,
+				Mountpoint: child.Mountpoint,
+				Mounted:    child.Mountpoint != "",
+			}
+			dev.Partitions = append(dev.Partitions, part)
+		}
+
+		devices = append(devices, dev)
+	}
+
+	return devices
+}
+
+// ============================================================================
+// Camera Support (Pi Camera + USB Webcam)
+// ============================================================================
+
+// CameraDevice represents a camera
+type CameraDevice struct {
+	Path       string   `json:"path"`
+	Name       string   `json:"name"`
+	Type       string   `json:"type"` // "csi" or "usb"
+	Driver     string   `json:"driver,omitempty"`
+	Formats    []string `json:"formats,omitempty"`
+	Resolution string   `json:"resolution,omitempty"`
+}
+
+// GetCameraDevices lists available cameras
+func (h *HALHandler) GetCameraDevices(w http.ResponseWriter, r *http.Request) {
+	var cameras []CameraDevice
+
+	// Check for Pi Camera (CSI)
+	cmd := exec.Command("nsenter", "-t", "1", "-m", "-u", "-n", "-i", "/usr/bin/vcgencmd", "get_camera")
+	if output, err := cmd.Output(); err == nil {
+		if strings.Contains(string(output), "detected=1") {
+			cameras = append(cameras, CameraDevice{
+				Path: "/dev/video0",
+				Name: "Pi Camera",
+				Type: "csi",
+			})
+		}
+	}
+
+	// Check for V4L2 devices (USB webcams)
+	v4lDevices, _ := filepath.Glob("/dev/video*")
+	for _, dev := range v4lDevices {
+		// Get device info
+		cmd := exec.Command("nsenter", "-t", "1", "-m", "-u", "-n", "-i", "/usr/bin/v4l2-ctl", "-d", dev, "--info")
+		output, err := cmd.Output()
+		if err != nil {
+			continue
+		}
+
+		camera := CameraDevice{
+			Path: dev,
+			Type: "usb",
+		}
+
+		// Parse output for card name
+		for _, line := range strings.Split(string(output), "\n") {
+			if strings.Contains(line, "Card type") {
+				parts := strings.SplitN(line, ":", 2)
+				if len(parts) == 2 {
+					camera.Name = strings.TrimSpace(parts[1])
+				}
+			}
+			if strings.Contains(line, "Driver name") {
+				parts := strings.SplitN(line, ":", 2)
+				if len(parts) == 2 {
+					camera.Driver = strings.TrimSpace(parts[1])
+				}
+			}
+		}
+
+		// Skip if already added as Pi Camera
+		isPiCam := false
+		for _, c := range cameras {
+			if c.Path == dev {
+				isPiCam = true
+				break
+			}
+		}
+		if !isPiCam && camera.Name != "" {
+			cameras = append(cameras, camera)
+		}
+	}
+
+	jsonResponse(w, http.StatusOK, map[string]interface{}{
+		"devices": cameras,
+		"count":   len(cameras),
+	})
+}
+
+// CaptureImage captures an image from camera
+func (h *HALHandler) CaptureImage(w http.ResponseWriter, r *http.Request) {
+	device := r.URL.Query().Get("device")
+	if device == "" {
+		device = "/dev/video0"
+	}
+
+	// Generate filename
+	filename := fmt.Sprintf("/tmp/capture_%d.jpg", time.Now().Unix())
+
+	// Try libcamera-still for Pi Camera
+	cmd := exec.Command("nsenter", "-t", "1", "-m", "-u", "-n", "-i", "/usr/bin/libcamera-still",
+		"-o", filename, "-t", "1000", "--nopreview")
+	output, err := cmd.CombinedOutput()
+
+	if err != nil {
+		// Fallback to fswebcam for USB cameras
+		cmd = exec.Command("nsenter", "-t", "1", "-m", "-u", "-n", "-i", "/usr/bin/fswebcam",
+			"-d", device, "-r", "1280x720", "--no-banner", filename)
+		output, err = cmd.CombinedOutput()
+		if err != nil {
+			errorResponse(w, http.StatusInternalServerError, "capture failed: "+string(output))
+			return
+		}
+	}
+
+	// Read and return image
+	imageData, err := os.ReadFile(filename)
+	if err != nil {
+		errorResponse(w, http.StatusInternalServerError, "failed to read image")
+		return
+	}
+
+	// Clean up
+	os.Remove(filename)
+
+	w.Header().Set("Content-Type", "image/jpeg")
+	w.Header().Set("Content-Length", strconv.Itoa(len(imageData)))
+	w.Write(imageData)
+}
+
+// ============================================================================
+// 1-Wire Sensors (DS18B20 Temperature)
+// ============================================================================
+
+// OneWireSensor represents a 1-Wire sensor
+type OneWireSensor struct {
+	ID          string  `json:"id"`
+	Type        string  `json:"type"`
+	Temperature float64 `json:"temperature,omitempty"`
+	Path        string  `json:"path"`
+}
+
+// GetOneWireDevices lists 1-Wire devices
+func (h *HALHandler) GetOneWireDevices(w http.ResponseWriter, r *http.Request) {
+	devices := h.scan1WireDevices()
+	jsonResponse(w, http.StatusOK, map[string]interface{}{
+		"devices": devices,
+		"count":   len(devices),
+	})
+}
+
+// GetOneWireTemperature reads temperature from 1-Wire sensors
+func (h *HALHandler) GetOneWireTemperature(w http.ResponseWriter, r *http.Request) {
+	sensorID := r.URL.Query().Get("id")
+
+	devices := h.scan1WireDevices()
+
+	var results []map[string]interface{}
+	for _, dev := range devices {
+		if sensorID != "" && dev.ID != sensorID {
+			continue
+		}
+		if dev.Type == "DS18B20" {
+			temp := h.read1WireTemp(dev.Path)
+			results = append(results, map[string]interface{}{
+				"id":          dev.ID,
+				"type":        dev.Type,
+				"temperature": temp,
+				"unit":        "celsius",
+			})
+		}
+	}
+
+	jsonResponse(w, http.StatusOK, map[string]interface{}{
+		"sensors": results,
+		"count":   len(results),
+	})
+}
+
+// scan1WireDevices scans for 1-Wire devices
+func (h *HALHandler) scan1WireDevices() []OneWireSensor {
+	var devices []OneWireSensor
+
+	// 1-Wire devices are in /sys/bus/w1/devices/
+	w1Path := "/sys/bus/w1/devices"
+	entries, err := os.ReadDir(w1Path)
+	if err != nil {
+		return devices
+	}
+
+	for _, entry := range entries {
+		name := entry.Name()
+		// DS18B20 IDs start with "28-"
+		if strings.HasPrefix(name, "28-") {
+			devices = append(devices, OneWireSensor{
+				ID:   name,
+				Type: "DS18B20",
+				Path: filepath.Join(w1Path, name),
+			})
+		}
+	}
+
+	return devices
+}
+
+// read1WireTemp reads temperature from DS18B20
+func (h *HALHandler) read1WireTemp(path string) float64 {
+	tempFile := filepath.Join(path, "w1_slave")
+	data, err := os.ReadFile(tempFile)
+	if err != nil {
+		return 0
+	}
+
+	// Parse: ... t=25062 (temperature in millidegrees)
+	text := string(data)
+	re := regexp.MustCompile(`t=(-?\d+)`)
+	if matches := re.FindStringSubmatch(text); len(matches) > 1 {
+		if milliC, err := strconv.Atoi(matches[1]); err == nil {
+			return float64(milliC) / 1000.0
+		}
+	}
+
+	return 0
+}
+
+// ============================================================================
+// Environmental Sensors (BME280 via I2C)
+// ============================================================================
+
+// EnvironmentalReading represents sensor data
+type EnvironmentalReading struct {
+	Temperature float64 `json:"temperature"`        // Celsius
+	Humidity    float64 `json:"humidity"`           // %
+	Pressure    float64 `json:"pressure"`           // hPa
+	Altitude    float64 `json:"altitude,omitempty"` // meters (calculated)
+	Timestamp   string  `json:"timestamp"`
+}
+
+// GetEnvironmentalSensors lists I2C environmental sensors
+func (h *HALHandler) GetEnvironmentalSensors(w http.ResponseWriter, r *http.Request) {
+	sensors := []map[string]interface{}{}
+
+	// Scan I2C for BME280 (0x76 or 0x77)
+	for _, addr := range []string{"0x76", "0x77"} {
+		// Check if device responds
+		cmd := exec.Command("nsenter", "-t", "1", "-m", "-u", "-n", "-i", "/usr/sbin/i2cget", "-y", "1", addr)
+		if err := cmd.Run(); err == nil {
+			sensors = append(sensors, map[string]interface{}{
+				"address": addr,
+				"type":    "BME280",
+				"bus":     1,
+			})
+		}
+	}
+
+	jsonResponse(w, http.StatusOK, map[string]interface{}{
+		"sensors": sensors,
+		"count":   len(sensors),
+	})
+}
+
+// GetEnvironmentalReading reads BME280 sensor data
+func (h *HALHandler) GetEnvironmentalReading(w http.ResponseWriter, r *http.Request) {
+	// Try to read via Python script or bme280 tool
+	cmd := exec.Command("nsenter", "-t", "1", "-m", "-u", "-n", "-i", "/usr/bin/python3", "-c", `
+import smbus2
+import bme280
+bus = smbus2.SMBus(1)
+addr = 0x76
+cal = bme280.load_calibration_params(bus, addr)
+data = bme280.sample(bus, addr, cal)
+print(f"{data.temperature:.2f},{data.humidity:.2f},{data.pressure:.2f}")
+`)
+	output, err := cmd.Output()
+
+	reading := EnvironmentalReading{
+		Timestamp: time.Now().UTC().Format(time.RFC3339),
+	}
+
+	if err == nil {
+		parts := strings.Split(strings.TrimSpace(string(output)), ",")
+		if len(parts) >= 3 {
+			reading.Temperature, _ = strconv.ParseFloat(parts[0], 64)
+			reading.Humidity, _ = strconv.ParseFloat(parts[1], 64)
+			reading.Pressure, _ = strconv.ParseFloat(parts[2], 64)
+			// Calculate altitude (rough estimate)
+			if reading.Pressure > 0 {
+				reading.Altitude = 44330 * (1 - math.Pow(reading.Pressure/1013.25, 0.1903))
+			}
+		}
+	} else {
+		// Return empty/error reading
+		errorResponse(w, http.StatusServiceUnavailable, "BME280 not available or python bme280 not installed")
+		return
+	}
+
+	jsonResponse(w, http.StatusOK, reading)
+}
+
+// ============================================================================
+// SDR (RTL-SDR)
+// ============================================================================
+
+// SDRDevice represents an RTL-SDR device
+type SDRDevice struct {
+	Index     int    `json:"index"`
+	Name      string `json:"name"`
+	Serial    string `json:"serial,omitempty"`
+	VendorID  string `json:"vendor_id"`
+	ProductID string `json:"product_id"`
+	Available bool   `json:"available"`
+}
+
+// GetSDRDevices lists RTL-SDR devices
+func (h *HALHandler) GetSDRDevices(w http.ResponseWriter, r *http.Request) {
+	var devices []SDRDevice
+
+	// Use rtl_test to detect devices
+	cmd := exec.Command("nsenter", "-t", "1", "-m", "-u", "-n", "-i", "/usr/bin/rtl_test", "-t")
+	output, _ := cmd.CombinedOutput()
+
+	// Parse output for device info
+	text := string(output)
+
+	// Look for "Found X device(s)"
+	if strings.Contains(text, "Found") {
+		re := regexp.MustCompile(`(\d+):\s+(\w+),\s*(\w+),\s*SN:\s*(\S+)`)
+		matches := re.FindAllStringSubmatch(text, -1)
+		for _, match := range matches {
+			if len(match) >= 5 {
+				idx, _ := strconv.Atoi(match[1])
+				devices = append(devices, SDRDevice{
+					Index:     idx,
+					Name:      match[2] + " " + match[3],
+					Serial:    match[4],
+					Available: true,
+				})
+			}
+		}
+	}
+
+	// Also check USB for RTL-SDR VIDs
+	usbDevices, _ := filepath.Glob("/sys/bus/usb/devices/*/idVendor")
+	for _, vidPath := range usbDevices {
+		vid, _ := os.ReadFile(vidPath)
+		vidStr := strings.TrimSpace(string(vid))
+
+		// RTL-SDR vendor IDs
+		if vidStr == "0bda" { // Realtek
+			pidPath := strings.Replace(vidPath, "idVendor", "idProduct", 1)
+			pid, _ := os.ReadFile(pidPath)
+			pidStr := strings.TrimSpace(string(pid))
+
+			// RTL2832U product IDs
+			if pidStr == "2832" || pidStr == "2838" {
+				// Check if already added
+				found := false
+				for _, d := range devices {
+					if d.VendorID == vidStr && d.ProductID == pidStr {
+						found = true
+						break
+					}
+				}
+				if !found {
+					devices = append(devices, SDRDevice{
+						Index:     len(devices),
+						Name:      "RTL2832U SDR",
+						VendorID:  vidStr,
+						ProductID: pidStr,
+						Available: true,
+					})
+				}
+			}
+		}
+	}
+
+	jsonResponse(w, http.StatusOK, map[string]interface{}{
+		"devices": devices,
+		"count":   len(devices),
+	})
+}
+
+// ============================================================================
+// Audio Devices
+// ============================================================================
+
+// AudioDevice represents an audio device
+type AudioDevice struct {
+	Card   int    `json:"card"`
+	Device int    `json:"device"`
+	Name   string `json:"name"`
+	Type   string `json:"type"` // "playback" or "capture"
+	Path   string `json:"path"`
+}
+
+// GetAudioDevices lists audio devices
+func (h *HALHandler) GetAudioDevices(w http.ResponseWriter, r *http.Request) {
+	var devices []AudioDevice
+
+	// Get playback devices
+	cmd := exec.Command("nsenter", "-t", "1", "-m", "-u", "-n", "-i", "/usr/bin/aplay", "-l")
+	if output, err := cmd.Output(); err == nil {
+		devices = append(devices, parseAudioDevices(string(output), "playback")...)
+	}
+
+	// Get capture devices
+	cmd = exec.Command("nsenter", "-t", "1", "-m", "-u", "-n", "-i", "/usr/bin/arecord", "-l")
+	if output, err := cmd.Output(); err == nil {
+		devices = append(devices, parseAudioDevices(string(output), "capture")...)
+	}
+
+	jsonResponse(w, http.StatusOK, map[string]interface{}{
+		"devices": devices,
+		"count":   len(devices),
+	})
+}
+
+// GetAudioVolume gets current volume level
+func (h *HALHandler) GetAudioVolume(w http.ResponseWriter, r *http.Request) {
+	cmd := exec.Command("nsenter", "-t", "1", "-m", "-u", "-n", "-i", "/usr/bin/amixer", "get", "Master")
+	output, err := cmd.Output()
+
+	result := map[string]interface{}{
+		"available": false,
+	}
+
+	if err == nil {
+		// Parse volume percentage
+		re := regexp.MustCompile(`\[(\d+)%\]`)
+		if matches := re.FindStringSubmatch(string(output)); len(matches) > 1 {
+			vol, _ := strconv.Atoi(matches[1])
+			result["available"] = true
+			result["volume"] = vol
+			result["muted"] = strings.Contains(string(output), "[off]")
+		}
+	}
+
+	jsonResponse(w, http.StatusOK, result)
+}
+
+// SetAudioVolume sets volume level
+func (h *HALHandler) SetAudioVolume(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Volume int   `json:"volume"` // 0-100
+		Mute   *bool `json:"mute,omitempty"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		errorResponse(w, http.StatusBadRequest, "invalid request")
+		return
+	}
+
+	if req.Volume < 0 || req.Volume > 100 {
+		errorResponse(w, http.StatusBadRequest, "volume must be 0-100")
+		return
+	}
+
+	// Set volume
+	volCmd := fmt.Sprintf("%d%%", req.Volume)
+	cmd := exec.Command("nsenter", "-t", "1", "-m", "-u", "-n", "-i", "/usr/bin/amixer", "set", "Master", volCmd)
+	if output, err := cmd.CombinedOutput(); err != nil {
+		errorResponse(w, http.StatusInternalServerError, "failed to set volume: "+string(output))
+		return
+	}
+
+	// Handle mute
+	if req.Mute != nil {
+		muteCmd := "unmute"
+		if *req.Mute {
+			muteCmd = "mute"
+		}
+		exec.Command("nsenter", "-t", "1", "-m", "-u", "-n", "-i", "/usr/bin/amixer", "set", "Master", muteCmd).Run()
+	}
+
+	successResponse(w, "volume set")
+}
+
+// PlayAudioAlert plays an audio alert
+func (h *HALHandler) PlayAudioAlert(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Type     string `json:"type"`     // "beep", "alarm", "custom"
+		File     string `json:"file"`     // Path for custom audio
+		Duration int    `json:"duration"` // Beep duration in ms
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		errorResponse(w, http.StatusBadRequest, "invalid request")
+		return
+	}
+
+	switch req.Type {
+	case "beep":
+		duration := req.Duration
+		if duration <= 0 {
+			duration = 200
+		}
+		cmd := exec.Command("nsenter", "-t", "1", "-m", "-u", "-n", "-i", "/usr/bin/speaker-test", "-t", "sine", "-f", "1000", "-l", "1", "-P", strconv.Itoa(duration))
+		cmd.Run()
+	case "alarm":
+		// Play system alarm sound
+		cmd := exec.Command("nsenter", "-t", "1", "-m", "-u", "-n", "-i", "/usr/bin/aplay", "/usr/share/sounds/alsa/Front_Center.wav")
+		cmd.Run()
+	case "custom":
+		if req.File == "" {
+			errorResponse(w, http.StatusBadRequest, "file required for custom audio")
+			return
+		}
+		cmd := exec.Command("nsenter", "-t", "1", "-m", "-u", "-n", "-i", "/usr/bin/aplay", req.File)
+		if output, err := cmd.CombinedOutput(); err != nil {
+			errorResponse(w, http.StatusInternalServerError, "playback failed: "+string(output))
+			return
+		}
+	default:
+		errorResponse(w, http.StatusBadRequest, "type must be beep, alarm, or custom")
+		return
+	}
+
+	successResponse(w, "audio played")
+}
+
+// parseAudioDevices parses aplay/arecord output
+func parseAudioDevices(output string, devType string) []AudioDevice {
+	var devices []AudioDevice
+
+	// Format: card 0: ... [device name], device 0: ...
+	re := regexp.MustCompile(`card (\d+):.*\[([^\]]+)\].*device (\d+):`)
+	for _, match := range re.FindAllStringSubmatch(output, -1) {
+		if len(match) >= 4 {
+			card, _ := strconv.Atoi(match[1])
+			device, _ := strconv.Atoi(match[3])
+			devices = append(devices, AudioDevice{
+				Card:   card,
+				Device: device,
+				Name:   strings.TrimSpace(match[2]),
+				Type:   devType,
+				Path:   fmt.Sprintf("hw:%d,%d", card, device),
+			})
+		}
+	}
+
+	return devices
+}
+
+// ============================================================================
+// GPIO Control (Pi GPIO Pins)
+// ============================================================================
+
+// GPIOPin represents a GPIO pin state
+type GPIOPin struct {
+	Pin   int    `json:"pin"`
+	Mode  string `json:"mode"`           // "in", "out"
+	Value int    `json:"value"`          // 0 or 1
+	Pull  string `json:"pull,omitempty"` // "up", "down", "none"
+}
+
+// GetGPIOStatus gets status of all or specific GPIO pins
+func (h *HALHandler) GetGPIOStatus(w http.ResponseWriter, r *http.Request) {
+	pinStr := r.URL.Query().Get("pin")
+
+	var pins []GPIOPin
+
+	if pinStr != "" {
+		// Single pin
+		pin, err := strconv.Atoi(pinStr)
+		if err != nil {
+			errorResponse(w, http.StatusBadRequest, "invalid pin number")
+			return
+		}
+		p := h.readGPIOPin(pin)
+		pins = append(pins, p)
+	} else {
+		// Common GPIO pins (BCM numbering)
+		commonPins := []int{2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27}
+		for _, pin := range commonPins {
+			p := h.readGPIOPin(pin)
+			pins = append(pins, p)
+		}
+	}
+
+	jsonResponse(w, http.StatusOK, map[string]interface{}{
+		"pins":  pins,
+		"count": len(pins),
+	})
+}
+
+// SetGPIOPin sets a GPIO pin value
+func (h *HALHandler) SetGPIOPin(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Pin   int    `json:"pin"`
+		Mode  string `json:"mode,omitempty"`  // "in" or "out"
+		Value int    `json:"value,omitempty"` // 0 or 1
+		Pull  string `json:"pull,omitempty"`  // "up", "down", "none"
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		errorResponse(w, http.StatusBadRequest, "invalid request")
+		return
+	}
+
+	if req.Pin < 0 || req.Pin > 27 {
+		errorResponse(w, http.StatusBadRequest, "pin must be 0-27 (BCM)")
+		return
+	}
+
+	// Export pin if needed
+	exportPath := fmt.Sprintf("/sys/class/gpio/gpio%d", req.Pin)
+	if _, err := os.Stat(exportPath); os.IsNotExist(err) {
+		os.WriteFile("/sys/class/gpio/export", []byte(strconv.Itoa(req.Pin)), 0644)
+		time.Sleep(100 * time.Millisecond) // Wait for sysfs
+	}
+
+	// Set direction/mode
+	if req.Mode != "" {
+		dirPath := fmt.Sprintf("/sys/class/gpio/gpio%d/direction", req.Pin)
+		os.WriteFile(dirPath, []byte(req.Mode), 0644)
+	}
+
+	// Set value (only if output mode)
+	if req.Value == 0 || req.Value == 1 {
+		valPath := fmt.Sprintf("/sys/class/gpio/gpio%d/value", req.Pin)
+		os.WriteFile(valPath, []byte(strconv.Itoa(req.Value)), 0644)
+	}
+
+	// Read back and return
+	pin := h.readGPIOPin(req.Pin)
+	jsonResponse(w, http.StatusOK, pin)
+}
+
+// readGPIOPin reads a GPIO pin state via sysfs
+func (h *HALHandler) readGPIOPin(pin int) GPIOPin {
+	result := GPIOPin{Pin: pin}
+
+	basePath := fmt.Sprintf("/sys/class/gpio/gpio%d", pin)
+
+	// Check if exported
+	if _, err := os.Stat(basePath); os.IsNotExist(err) {
+		result.Mode = "unexported"
+		return result
+	}
+
+	// Read direction
+	if data, err := os.ReadFile(basePath + "/direction"); err == nil {
+		result.Mode = strings.TrimSpace(string(data))
+	}
+
+	// Read value
+	if data, err := os.ReadFile(basePath + "/value"); err == nil {
+		result.Value, _ = strconv.Atoi(strings.TrimSpace(string(data)))
+	}
+
+	return result
 }
 
 // ============================================================================

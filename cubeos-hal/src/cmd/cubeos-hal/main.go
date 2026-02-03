@@ -111,6 +111,37 @@ func main() {
 		r.Post("/iridium/send", h.SendIridiumMessage)
 		r.Post("/iridium/receive", h.ReceiveIridiumMessage)
 
+		// USB External Storage
+		r.Get("/storage/usb", h.GetUSBStorageDevices)
+		r.Post("/storage/usb/mount", h.MountUSBStorage)
+		r.Post("/storage/usb/unmount", h.UnmountUSBStorage)
+		r.Post("/storage/usb/eject", h.EjectUSBStorage)
+
+		// Camera (Pi Camera + USB Webcam)
+		r.Get("/camera/devices", h.GetCameraDevices)
+		r.Get("/camera/capture", h.CaptureImage)
+
+		// 1-Wire Sensors (DS18B20)
+		r.Get("/onewire/devices", h.GetOneWireDevices)
+		r.Get("/onewire/temperature/{id}", h.GetOneWireTemperature)
+
+		// Environmental Sensors (BME280)
+		r.Get("/environmental/sensors", h.GetEnvironmentalSensors)
+		r.Get("/environmental/reading", h.GetEnvironmentalReading)
+
+		// SDR (RTL-SDR)
+		r.Get("/sdr/devices", h.GetSDRDevices)
+
+		// Audio
+		r.Get("/audio/devices", h.GetAudioDevices)
+		r.Get("/audio/volume", h.GetAudioVolume)
+		r.Post("/audio/volume", h.SetAudioVolume)
+		r.Post("/audio/alert", h.PlayAudioAlert)
+
+		// GPIO Direct Access
+		r.Get("/gpio/pins", h.GetGPIOStatus)
+		r.Post("/gpio/pin", h.SetGPIOPin)
+
 		// USB operations
 		r.Get("/usb/devices", h.ListUSBDevices)
 		r.Post("/usb/mount/{device}", h.MountUSB)
