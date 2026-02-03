@@ -30,7 +30,9 @@ RUN apk add --no-cache \
     openvpn \
     util-linux \
     procps \
-    usbutils
+    usbutils \
+    i2c-tools \
+    libgpiod
 
 WORKDIR /app
 

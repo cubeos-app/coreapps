@@ -101,6 +101,34 @@ func main() {
 		r.Post("/mounts/test", h.TestMountConnection)
 		r.Get("/mounts/list", h.ListMounts)
 		r.Get("/mounts/check", h.CheckMounted)
+
+		// Power management (UPS/Battery)
+		r.Get("/power/status", h.GetPowerStatus)
+		r.Get("/power/battery", h.GetBatteryStatus)
+		r.Get("/power/ups", h.GetUPSInfo)
+		r.Post("/power/charging", h.SetChargingEnabled)
+		r.Post("/power/battery/quickstart", h.QuickStartBattery)
+		r.Post("/power/monitor/start", h.StartPowerMonitor)
+		r.Post("/power/monitor/stop", h.StopPowerMonitor)
+
+		// System info
+		r.Get("/system/uptime", h.GetUptime)
+
+		// RTC (Real-Time Clock)
+		r.Get("/rtc/status", h.GetRTCStatus)
+		r.Post("/rtc/sync-to-rtc", h.SetRTCTime)
+		r.Post("/rtc/sync-from-rtc", h.SyncTimeFromRTC)
+		r.Post("/rtc/wakealarm", h.SetWakeAlarm)
+		r.Delete("/rtc/wakealarm", h.ClearWakeAlarm)
+
+		// Watchdog
+		r.Get("/watchdog/status", h.GetWatchdogStatus)
+		r.Post("/watchdog/pet", h.PetWatchdog)
+		r.Post("/watchdog/enable", h.EnableWatchdog)
+
+		// I2C bus operations
+		r.Get("/i2c/buses", h.ListI2CBuses)
+		r.Get("/i2c/scan", h.ScanI2CBus)
 	})
 
 	// Start server

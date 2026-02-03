@@ -29,21 +29,31 @@ services:
       - NET_RAW
       - SYS_ADMIN
       - SYS_PTRACE
+      - SYS_RAWIO  # I2C/GPIO direct access
     
     environment:
       - HAL_PORT=6005
       - HAL_HOST=0.0.0.0
       - TZ=${TZ:-UTC}
       - DBUS_SYSTEM_BUS_ADDRESS=unix:path=/run/dbus/system_bus_socket
+      # UPS/Power management
+      - HAL_UPS_ENABLED=true
+      - HAL_UPS_MODEL=X1202
+      - HAL_UPS_LOW_BATTERY_THRESHOLD=15
+      - HAL_UPS_CRITICAL_BATTERY_THRESHOLD=5
+      - HAL_UPS_SHUTDOWN_DELAY=30
+      # Hardware features
+      - HAL_I2C_BUS=1
+      - HAL_GPIO_CHIP=gpiochip4
     
     env_file:
       - /cubeos/config/defaults.env
     
     volumes:
       # System access
-      - /sys:/sys
-      - /proc:/proc
-      - /dev:/dev
+      - /sys:/sys:rw
+      - /proc:/proc:ro
+      - /dev:/dev:rw
       
       # Network configuration
       - /etc/hostapd:/etc/hostapd
@@ -59,6 +69,24 @@ services:
       # For systemctl access
       - /run/dbus/system_bus_socket:/run/dbus/system_bus_socket
       - /run/systemd:/run/systemd:ro
+      
+      # HAL persistent data
+      - /cubeos/coreapps/cubeos-hal/appdata:/data
+      
+      # Bluetooth
+      - /var/lib/bluetooth:/var/lib/bluetooth:rw
+    
+    devices:
+      # I2C bus (UPS HAT, sensors)
+      - /dev/i2c-1:/dev/i2c-1
+      # GPIO (Pi 5 uses gpiochip4)
+      - /dev/gpiochip0:/dev/gpiochip0
+      - /dev/gpiochip4:/dev/gpiochip4
+      - /dev/gpiomem:/dev/gpiomem
+      # Hardware watchdog
+      - /dev/watchdog:/dev/watchdog
+      # RTC
+      - /dev/rtc0:/dev/rtc0
     
     healthcheck:
       test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:6005/health"]
