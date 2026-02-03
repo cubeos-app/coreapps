@@ -1,10 +1,12 @@
 package handlers
 
 import (
+	"archive/zip"
 	"bufio"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"os/exec"
@@ -1173,6 +1175,462 @@ func formatBytes(bytes int64) string {
 		exp++
 	}
 	return fmt.Sprintf("%.1f %cB", float64(bytes)/float64(div), "KMGTPE"[exp])
+}
+
+// ============================================================================
+// Logs and Debug
+// ============================================================================
+
+// GetKernelLogs returns kernel ring buffer (dmesg)
+func (h *HALHandler) GetKernelLogs(w http.ResponseWriter, r *http.Request) {
+	lines := r.URL.Query().Get("lines")
+	if lines == "" {
+		lines = "500"
+	}
+
+	level := r.URL.Query().Get("level") // err, warn, info
+	
+	args := []string{"-t", "1", "-m", "-u", "-n", "-i", "/usr/bin/dmesg", "--time-format=iso", "-T"}
+	
+	if level != "" {
+		args = append(args, "--level="+level)
+	}
+
+	cmd := exec.Command("nsenter", args...)
+	output, err := cmd.Output()
+	if err != nil {
+		errorResponse(w, http.StatusInternalServerError, "dmesg failed: "+err.Error())
+		return
+	}
+
+	// Parse and limit lines
+	allLines := strings.Split(string(output), "\n")
+	maxLines, _ := strconv.Atoi(lines)
+	if maxLines <= 0 {
+		maxLines = 500
+	}
+
+	start := 0
+	if len(allLines) > maxLines {
+		start = len(allLines) - maxLines
+	}
+	resultLines := allLines[start:]
+
+	jsonResponse(w, http.StatusOK, map[string]interface{}{
+		"lines":       resultLines,
+		"count":       len(resultLines),
+		"total_lines": len(allLines),
+		"level":       level,
+	})
+}
+
+// GetJournalLogs returns systemd journal logs
+func (h *HALHandler) GetJournalLogs(w http.ResponseWriter, r *http.Request) {
+	lines := r.URL.Query().Get("lines")
+	if lines == "" {
+		lines = "200"
+	}
+	
+	unit := r.URL.Query().Get("unit")     // e.g., hostapd, docker
+	since := r.URL.Query().Get("since")   // e.g., "1h", "24h", "7d"
+	priority := r.URL.Query().Get("priority") // 0-7 (emerg to debug)
+	grep := r.URL.Query().Get("grep")     // search pattern
+
+	args := []string{"-t", "1", "-m", "-u", "-n", "-i", "/usr/bin/journalctl", "--no-pager", "-o", "short-iso", "-n", lines}
+	
+	if unit != "" {
+		args = append(args, "-u", unit)
+	}
+	if since != "" {
+		args = append(args, "--since", parseSinceTime(since))
+	}
+	if priority != "" {
+		args = append(args, "-p", priority)
+	}
+	if grep != "" {
+		args = append(args, "-g", grep)
+	}
+
+	cmd := exec.Command("nsenter", args...)
+	output, err := cmd.CombinedOutput()
+	if err != nil && len(output) == 0 {
+		errorResponse(w, http.StatusInternalServerError, "journalctl failed: "+err.Error())
+		return
+	}
+
+	logLines := strings.Split(strings.TrimSpace(string(output)), "\n")
+
+	jsonResponse(w, http.StatusOK, map[string]interface{}{
+		"lines":    logLines,
+		"count":    len(logLines),
+		"unit":     unit,
+		"since":    since,
+		"priority": priority,
+	})
+}
+
+// GetHardwareLogs returns hardware-specific logs (I2C, GPIO, USB, etc.)
+func (h *HALHandler) GetHardwareLogs(w http.ResponseWriter, r *http.Request) {
+	category := r.URL.Query().Get("category") // i2c, gpio, usb, pcie, mmc, all
+	if category == "" {
+		category = "all"
+	}
+
+	// Get dmesg and filter for hardware
+	cmd := exec.Command("nsenter", "-t", "1", "-m", "-u", "-n", "-i", "/usr/bin/dmesg", "--time-format=iso", "-T")
+	output, err := cmd.Output()
+	if err != nil {
+		errorResponse(w, http.StatusInternalServerError, "dmesg failed: "+err.Error())
+		return
+	}
+
+	filters := map[string][]string{
+		"i2c":  {"i2c", "I2C"},
+		"gpio": {"gpio", "GPIO", "pinctrl", "gpiochip"},
+		"usb":  {"usb", "USB", "xhci", "dwc"},
+		"pcie": {"pcie", "PCIe", "nvme", "NVMe"},
+		"mmc":  {"mmc", "MMC", "sdhost", "sdhci"},
+		"net":  {"wlan", "eth", "wifi", "hostapd", "dhcp"},
+		"power": {"voltage", "throttl", "temperature", "thermal"},
+	}
+
+	result := map[string][]string{}
+	lines := strings.Split(string(output), "\n")
+
+	for cat, keywords := range filters {
+		if category != "all" && category != cat {
+			continue
+		}
+		var catLines []string
+		for _, line := range lines {
+			for _, kw := range keywords {
+				if strings.Contains(strings.ToLower(line), strings.ToLower(kw)) {
+					catLines = append(catLines, line)
+					break
+				}
+			}
+		}
+		if len(catLines) > 0 {
+			// Keep last 100 per category
+			if len(catLines) > 100 {
+				catLines = catLines[len(catLines)-100:]
+			}
+			result[cat] = catLines
+		}
+	}
+
+	jsonResponse(w, http.StatusOK, map[string]interface{}{
+		"category": category,
+		"logs":     result,
+	})
+}
+
+// GetSupportBundle generates a support ZIP with logs and system info
+func (h *HALHandler) GetSupportBundle(w http.ResponseWriter, r *http.Request) {
+	// Get Pi serial number
+	serial := "unknown"
+	if data, err := os.ReadFile("/proc/cpuinfo"); err == nil {
+		for _, line := range strings.Split(string(data), "\n") {
+			if strings.HasPrefix(line, "Serial") {
+				parts := strings.Split(line, ":")
+				if len(parts) == 2 {
+					serial = strings.TrimSpace(parts[1])
+				}
+			}
+		}
+	}
+
+	// Generate filename
+	timestamp := time.Now().Format("20060102_150405")
+	filename := fmt.Sprintf("%s_%s_supportinfo.zip", timestamp, serial)
+
+	// Create temp directory
+	tmpDir, err := os.MkdirTemp("", "support-bundle-")
+	if err != nil {
+		errorResponse(w, http.StatusInternalServerError, "failed to create temp dir: "+err.Error())
+		return
+	}
+	defer os.RemoveAll(tmpDir)
+
+	// Collect system info
+	systemInfo := h.collectSystemInfo()
+	os.WriteFile(filepath.Join(tmpDir, "system_info.json"), systemInfo, 0644)
+
+	// Collect dmesg
+	if output, err := exec.Command("nsenter", "-t", "1", "-m", "-u", "-n", "-i", "/usr/bin/dmesg", "-T").Output(); err == nil {
+		os.WriteFile(filepath.Join(tmpDir, "dmesg.log"), output, 0644)
+	}
+
+	// Collect journal (last 7 days)
+	if output, err := exec.Command("nsenter", "-t", "1", "-m", "-u", "-n", "-i", "/usr/bin/journalctl", "--no-pager", "--since", "7 days ago").Output(); err == nil {
+		os.WriteFile(filepath.Join(tmpDir, "journal_7days.log"), output, 0644)
+	}
+
+	// Collect journal errors only
+	if output, err := exec.Command("nsenter", "-t", "1", "-m", "-u", "-n", "-i", "/usr/bin/journalctl", "--no-pager", "-p", "err", "--since", "7 days ago").Output(); err == nil {
+		os.WriteFile(filepath.Join(tmpDir, "journal_errors.log"), output, 0644)
+	}
+
+	// Collect network info
+	networkInfo := h.collectNetworkInfo()
+	os.WriteFile(filepath.Join(tmpDir, "network_info.json"), networkInfo, 0644)
+
+	// Collect storage info
+	if output, err := exec.Command("nsenter", "-t", "1", "-m", "-u", "-n", "-i", "/usr/bin/lsblk", "-J", "-b", "-o", "NAME,SIZE,TYPE,MOUNTPOINT,FSTYPE,MODEL,SERIAL,TRAN").Output(); err == nil {
+		os.WriteFile(filepath.Join(tmpDir, "storage.json"), output, 0644)
+	}
+
+	// Collect df
+	if output, err := exec.Command("nsenter", "-t", "1", "-m", "-u", "-n", "-i", "/usr/bin/df", "-h").Output(); err == nil {
+		os.WriteFile(filepath.Join(tmpDir, "disk_usage.txt"), output, 0644)
+	}
+
+	// Collect Docker info
+	if output, err := exec.Command("nsenter", "-t", "1", "-m", "-u", "-n", "-i", "/usr/bin/docker", "ps", "-a").Output(); err == nil {
+		os.WriteFile(filepath.Join(tmpDir, "docker_ps.txt"), output, 0644)
+	}
+	if output, err := exec.Command("nsenter", "-t", "1", "-m", "-u", "-n", "-i", "/usr/bin/docker", "info").Output(); err == nil {
+		os.WriteFile(filepath.Join(tmpDir, "docker_info.txt"), output, 0644)
+	}
+
+	// Collect Swarm info
+	if output, err := exec.Command("nsenter", "-t", "1", "-m", "-u", "-n", "-i", "/usr/bin/docker", "node", "ls").Output(); err == nil {
+		os.WriteFile(filepath.Join(tmpDir, "swarm_nodes.txt"), output, 0644)
+	}
+	if output, err := exec.Command("nsenter", "-t", "1", "-m", "-u", "-n", "-i", "/usr/bin/docker", "service", "ls").Output(); err == nil {
+		os.WriteFile(filepath.Join(tmpDir, "swarm_services.txt"), output, 0644)
+	}
+
+	// Collect config.txt
+	if data, err := os.ReadFile("/boot/firmware/config.txt"); err == nil {
+		os.WriteFile(filepath.Join(tmpDir, "config.txt"), data, 0644)
+	}
+
+	// Collect HAL status
+	halStatus := h.collectHALStatus()
+	os.WriteFile(filepath.Join(tmpDir, "hal_status.json"), halStatus, 0644)
+
+	// Collect hostapd config (sanitized)
+	if data, err := os.ReadFile("/etc/hostapd/hostapd.conf"); err == nil {
+		// Redact password
+		sanitized := regexp.MustCompile(`(?m)^wpa_passphrase=.*$`).ReplaceAllString(string(data), "wpa_passphrase=<REDACTED>")
+		os.WriteFile(filepath.Join(tmpDir, "hostapd.conf"), []byte(sanitized), 0644)
+	}
+
+	// Create ZIP
+	zipPath := filepath.Join(tmpDir, filename)
+	if err := createZip(zipPath, tmpDir, filename); err != nil {
+		errorResponse(w, http.StatusInternalServerError, "failed to create ZIP: "+err.Error())
+		return
+	}
+
+	// Read ZIP and send
+	zipData, err := os.ReadFile(zipPath)
+	if err != nil {
+		errorResponse(w, http.StatusInternalServerError, "failed to read ZIP: "+err.Error())
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/zip")
+	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%s", filename))
+	w.Header().Set("Content-Length", strconv.Itoa(len(zipData)))
+	w.Write(zipData)
+}
+
+// Helper: parse "1h", "24h", "7d" to journalctl format
+func parseSinceTime(since string) string {
+	if since == "" {
+		return "24 hours ago"
+	}
+	
+	// Handle common formats
+	if strings.HasSuffix(since, "m") {
+		mins := strings.TrimSuffix(since, "m")
+		return mins + " minutes ago"
+	}
+	if strings.HasSuffix(since, "h") {
+		hours := strings.TrimSuffix(since, "h")
+		return hours + " hours ago"
+	}
+	if strings.HasSuffix(since, "d") {
+		days := strings.TrimSuffix(since, "d")
+		return days + " days ago"
+	}
+	
+	return since
+}
+
+// Helper: collect system info
+func (h *HALHandler) collectSystemInfo() []byte {
+	info := map[string]interface{}{
+		"collected_at": time.Now().UTC().Format(time.RFC3339),
+	}
+
+	// Pi model
+	if data, err := os.ReadFile("/proc/device-tree/model"); err == nil {
+		info["model"] = strings.TrimRight(string(data), "\x00\n")
+	}
+
+	// Serial
+	if data, err := os.ReadFile("/proc/cpuinfo"); err == nil {
+		for _, line := range strings.Split(string(data), "\n") {
+			if strings.HasPrefix(line, "Serial") {
+				parts := strings.Split(line, ":")
+				if len(parts) == 2 {
+					info["serial"] = strings.TrimSpace(parts[1])
+				}
+			}
+			if strings.HasPrefix(line, "Revision") {
+				parts := strings.Split(line, ":")
+				if len(parts) == 2 {
+					info["revision"] = strings.TrimSpace(parts[1])
+				}
+			}
+		}
+	}
+
+	// OS info
+	if data, err := os.ReadFile("/etc/os-release"); err == nil {
+		for _, line := range strings.Split(string(data), "\n") {
+			if strings.HasPrefix(line, "PRETTY_NAME=") {
+				info["os"] = strings.Trim(strings.TrimPrefix(line, "PRETTY_NAME="), "\"")
+			}
+		}
+	}
+
+	// Kernel
+	if output, err := exec.Command("uname", "-r").Output(); err == nil {
+		info["kernel"] = strings.TrimSpace(string(output))
+	}
+
+	// Uptime
+	if data, err := os.ReadFile("/proc/uptime"); err == nil {
+		fields := strings.Fields(string(data))
+		if len(fields) > 0 {
+			if secs, err := strconv.ParseFloat(fields[0], 64); err == nil {
+				info["uptime_seconds"] = secs
+			}
+		}
+	}
+
+	// Memory
+	if data, err := os.ReadFile("/proc/meminfo"); err == nil {
+		for _, line := range strings.Split(string(data), "\n") {
+			if strings.HasPrefix(line, "MemTotal:") {
+				fields := strings.Fields(line)
+				if len(fields) >= 2 {
+					if kb, err := strconv.ParseInt(fields[1], 10, 64); err == nil {
+						info["memory_total_mb"] = kb / 1024
+					}
+				}
+			}
+		}
+	}
+
+	// CPU temp
+	if data, err := os.ReadFile("/sys/class/thermal/thermal_zone0/temp"); err == nil {
+		if milliC, err := strconv.ParseInt(strings.TrimSpace(string(data)), 10, 64); err == nil {
+			info["cpu_temp_c"] = float64(milliC) / 1000.0
+		}
+	}
+
+	// Throttle status
+	if output, err := exec.Command("nsenter", "-t", "1", "-m", "-u", "-n", "-i", "/usr/bin/vcgencmd", "get_throttled").Output(); err == nil {
+		info["throttled"] = strings.TrimSpace(string(output))
+	}
+
+	data, _ := json.MarshalIndent(info, "", "  ")
+	return data
+}
+
+// Helper: collect network info
+func (h *HALHandler) collectNetworkInfo() []byte {
+	info := map[string]interface{}{}
+
+	// Interfaces
+	if output, err := exec.Command("ip", "-j", "addr").Output(); err == nil {
+		var ifaces []interface{}
+		json.Unmarshal(output, &ifaces)
+		info["interfaces"] = ifaces
+	}
+
+	// Routes
+	if output, err := exec.Command("ip", "-j", "route").Output(); err == nil {
+		var routes []interface{}
+		json.Unmarshal(output, &routes)
+		info["routes"] = routes
+	}
+
+	// DNS
+	if data, err := os.ReadFile("/etc/resolv.conf"); err == nil {
+		info["resolv_conf"] = string(data)
+	}
+
+	data, _ := json.MarshalIndent(info, "", "  ")
+	return data
+}
+
+// Helper: collect HAL status
+func (h *HALHandler) collectHALStatus() []byte {
+	status := map[string]interface{}{
+		"collected_at": time.Now().UTC().Format(time.RFC3339),
+	}
+
+	// Battery
+	status["battery"] = h.getBatteryStatus()
+
+	// UPS info
+	status["ups"] = h.getUPSInfo()
+
+	// RTC
+	status["rtc"] = h.getRTCStatus()
+
+	// Watchdog
+	status["watchdog"] = h.getWatchdogInfo()
+
+	data, _ := json.MarshalIndent(status, "", "  ")
+	return data
+}
+
+// Helper: create ZIP file
+func createZip(zipPath string, sourceDir string, zipName string) error {
+	zipFile, err := os.Create(zipPath)
+	if err != nil {
+		return err
+	}
+	defer zipFile.Close()
+
+	archive := zip.NewWriter(zipFile)
+	defer archive.Close()
+
+	// Walk directory and add files
+	return filepath.Walk(sourceDir, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+
+		// Skip the zip file itself and directories
+		if info.IsDir() || filepath.Base(path) == filepath.Base(zipPath) {
+			return nil
+		}
+
+		// Create file in archive
+		relPath, _ := filepath.Rel(sourceDir, path)
+		writer, err := archive.Create(relPath)
+		if err != nil {
+			return err
+		}
+
+		// Copy file content
+		file, err := os.Open(path)
+		if err != nil {
+			return err
+		}
+		defer file.Close()
+
+		_, err = io.Copy(writer, file)
+		return err
+	})
 }
 
 // ============================================================================

@@ -107,6 +107,12 @@ func main() {
 		r.Get("/storage/smart/{device}", h.GetSmartInfo)
 		r.Get("/storage/usage", h.GetStorageUsage)
 
+		// Logs and debug
+		r.Get("/logs/kernel", h.GetKernelLogs)
+		r.Get("/logs/journal", h.GetJournalLogs)
+		r.Get("/logs/hardware", h.GetHardwareLogs)
+		r.Get("/support/bundle", h.GetSupportBundle)
+
 		// Mount operations
 		r.Post("/mounts/smb", h.MountSMB)
 		r.Post("/mounts/nfs", h.MountNFS)
