@@ -599,18 +599,25 @@ func (h *HALHandler) getFirewallStatus() map[string]interface{} {
 
 // GetThrottleStatus returns Pi CPU/GPU throttling status
 func (h *HALHandler) GetThrottleStatus(w http.ResponseWriter, r *http.Request) {
-	cmd := exec.Command("vcgencmd", "get_throttled")
+	// Use nsenter to run vcgencmd on host (requires pid:host in container)
+	cmd := exec.Command("nsenter", "-t", "1", "-m", "-u", "-n", "-i", "/usr/bin/vcgencmd", "get_throttled")
 	output, err := cmd.Output()
 	if err != nil {
-		errorResponse(w, http.StatusInternalServerError, "vcgencmd failed: "+err.Error())
-		return
+		// Fallback: try reading from sysfs (some Pi kernels expose this)
+		if data, err := os.ReadFile("/sys/devices/platform/soc/soc:firmware/get_throttled"); err == nil {
+			output = data
+		} else {
+			errorResponse(w, http.StatusInternalServerError, "vcgencmd failed (try running on host): "+err.Error())
+			return
+		}
 	}
 
 	// Parse "throttled=0x0" format
-	parts := strings.Split(strings.TrimSpace(string(output)), "=")
+	str := strings.TrimSpace(string(output))
+	parts := strings.Split(str, "=")
 	if len(parts) != 2 {
-		errorResponse(w, http.StatusInternalServerError, "unexpected vcgencmd output")
-		return
+		// Maybe just the hex value
+		parts = []string{"throttled", str}
 	}
 
 	val, _ := strconv.ParseInt(strings.TrimPrefix(parts[1], "0x"), 16, 64)
@@ -632,8 +639,8 @@ func (h *HALHandler) GetThrottleStatus(w http.ResponseWriter, r *http.Request) {
 
 // GetCPUTemp returns CPU temperature
 func (h *HALHandler) GetCPUTemp(w http.ResponseWriter, r *http.Request) {
-	// Try vcgencmd first (Pi specific)
-	cmd := exec.Command("vcgencmd", "measure_temp")
+	// Try nsenter + vcgencmd first (Pi specific, requires pid:host)
+	cmd := exec.Command("nsenter", "-t", "1", "-m", "-u", "-n", "-i", "/usr/bin/vcgencmd", "measure_temp")
 	if output, err := cmd.Output(); err == nil {
 		// Parse "temp=45.0'C" format
 		str := strings.TrimSpace(string(output))

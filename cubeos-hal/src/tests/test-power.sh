@@ -4,8 +4,6 @@
 #
 # Usage: ./test-power.sh [HAL_URL]
 
-set -e
-
 HAL_URL="${1:-http://127.0.0.1:6005}"
 PASS=0
 FAIL=0
@@ -41,24 +39,24 @@ test_endpoint() {
     
     if [ -z "$response" ]; then
         echo -e "${RED}FAIL${NC} (no response)"
-        ((FAIL++))
+        FAIL=$((FAIL+1))
         return 1
     fi
     
     if [ -n "$expected_field" ]; then
         if echo "$response" | jq -e ".$expected_field" > /dev/null 2>&1; then
             echo -e "${GREEN}PASS${NC}"
-            ((PASS++))
+            PASS=$((PASS+1))
             return 0
         else
             echo -e "${RED}FAIL${NC} (missing field: $expected_field)"
             echo "  Response: $response"
-            ((FAIL++))
+            FAIL=$((FAIL+1))
             return 1
         fi
     else
         echo -e "${GREEN}PASS${NC}"
-        ((PASS++))
+        PASS=$((PASS+1))
         return 0
     fi
 }
@@ -84,6 +82,8 @@ test_endpoint "UPS info" "GET" "/hal/power/ups" "model"
 echo ""
 echo "--- System Info ---"
 test_endpoint "System uptime" "GET" "/hal/system/uptime" "seconds"
+test_endpoint "CPU throttle" "GET" "/hal/system/throttle" "raw"
+test_endpoint "CPU temperature" "GET" "/hal/system/temperature" "temperature"
 
 # ============================================
 # RTC
@@ -108,6 +108,16 @@ test_endpoint "List I2C buses" "GET" "/hal/i2c/buses" "buses"
 test_endpoint "Scan I2C bus 1" "GET" "/hal/i2c/scan?bus=1" "devices"
 
 # ============================================
+# Network
+# ============================================
+echo ""
+echo "--- Network ---"
+test_endpoint "Network status" "GET" "/hal/network/status" "internet"
+test_endpoint "Network interfaces" "GET" "/hal/network/interfaces" "interfaces"
+test_endpoint "AP clients" "GET" "/hal/network/ap/clients" "clients"
+test_endpoint "Interface traffic" "GET" "/hal/network/interface/wlan0/traffic" "stats"
+
+# ============================================
 # Detailed Output
 # ============================================
 echo ""
@@ -124,6 +134,14 @@ echo "--- UPS Info ---"
 curl -s "$HAL_URL/hal/power/ups" | jq '.' 2>/dev/null || echo "Failed to get UPS info"
 
 echo ""
+echo "--- CPU Throttle ---"
+curl -s "$HAL_URL/hal/system/throttle" | jq '.' 2>/dev/null || echo "Failed to get throttle status"
+
+echo ""
+echo "--- CPU Temperature ---"
+curl -s "$HAL_URL/hal/system/temperature" | jq '.' 2>/dev/null || echo "Failed to get temperature"
+
+echo ""
 echo "--- Uptime ---"
 curl -s "$HAL_URL/hal/system/uptime" | jq '.' 2>/dev/null || echo "Failed to get uptime"
 
@@ -138,6 +156,10 @@ curl -s "$HAL_URL/hal/watchdog/status" | jq '.' 2>/dev/null || echo "Failed to g
 echo ""
 echo "--- I2C Devices on Bus 1 ---"
 curl -s "$HAL_URL/hal/i2c/scan?bus=1" | jq '.' 2>/dev/null || echo "Failed to scan I2C"
+
+echo ""
+echo "--- Network Status ---"
+curl -s "$HAL_URL/hal/network/status" | jq '{internet, internet_latency, ap, nat, firewall}' 2>/dev/null || echo "Failed to get network status"
 
 # ============================================
 # Summary
