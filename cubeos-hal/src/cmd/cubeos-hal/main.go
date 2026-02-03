@@ -44,6 +44,10 @@ func main() {
 
 	// HAL routes
 	r.Route("/hal", func(r chi.Router) {
+		// Documentation
+		r.Get("/docs", h.ServeSwaggerUI)
+		r.Get("/openapi.yaml", h.ServeOpenAPISpec)
+
 		// Network interfaces
 		r.Get("/network/interfaces", h.ListInterfaces)
 		r.Get("/network/interface/{name}", h.GetInterface)
@@ -219,6 +223,8 @@ func main() {
 	log.Printf("Starting CubeOS HAL service on %s", addr)
 	log.Printf("Health: http://%s/health", addr)
 	log.Printf("API: http://%s/hal/...", addr)
+	log.Printf("Docs: http://%s/hal/docs", addr)
+	log.Printf("OpenAPI: http://%s/hal/openapi.yaml", addr)
 
 	if err := http.ListenAndServe(addr, r); err != nil {
 		log.Fatalf("Failed to start server: %v", err)
