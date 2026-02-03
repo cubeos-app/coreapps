@@ -22,7 +22,7 @@ variables:
   CUBEOS_DOMAIN: "cubeos.cube"
   # Service classification
   COMPOSE_SERVICES: "pihole npm cubeos-hal"
-  STACK_SERVICES: "registry cubeos-api cubeos-dashboard dozzle ollama chromadb"
+  STACK_SERVICES: "registry cubeos-api cubeos-dashboard cubeos-filebrowser dozzle ollama chromadb"
   # HAL image
   HAL_IMAGE: "ghcr.io/cubeos-app/hal"
   BUILDER_IMAGE: "ghcr.io/cubeos-app/api-builder:latest"

@@ -1,0 +1,46 @@
+# CubeOS FileBrowser - Swarm Stack
+# Web-based file manager for /cubeos/mounts
+version: "3.8"
+
+services:
+  filebrowser:
+    image: filebrowser/filebrowser:s6
+    deploy:
+      replicas: 1
+      restart_policy:
+        condition: on-failure
+        delay: 5s
+        max_attempts: 3
+      labels:
+        - "cubeos.type=system"
+        - "cubeos.port=6013"
+        - "cubeos.description=Web File Manager"
+    volumes:
+      # All mount points (USB, NVMe, SMB, NFS)
+      - type: bind
+        source: /cubeos/mounts
+        target: /srv
+      # Database and config
+      - type: bind
+        source: /cubeos/coreapps/cubeos-filebrowser/appdata
+        target: /database
+    environment:
+      - FB_DATABASE=/database/filebrowser.db
+      - FB_ROOT=/srv
+      - FB_PORT=6013
+      - FB_BASEURL=/
+      - FB_LOG=stdout
+      - FB_NOAUTH=false
+    ports:
+      - "6013:6013"
+    networks:
+      - cubeos-network
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:6013/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+networks:
+  cubeos-network:
+    external: true
