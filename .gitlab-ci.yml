@@ -7,6 +7,8 @@
 # - Multi-arch builds (ARM64 + AMD64)
 # - Swagger UI auto-updates on each deploy
 #
+# Fixed: Generated openapi.yaml is now properly copied into Docker build context
+#
 stages:
   - validate
   - build
@@ -93,7 +95,6 @@ build-hal:
         cp docs/swagger.yaml internal/handlers/openapi.yaml
         echo "✅ OpenAPI spec generated ($(wc -l < docs/swagger.yaml) lines)"
       elif [ -f docs/swagger.json ]; then
-        # Convert JSON to YAML if only JSON was generated
         echo "Converting swagger.json to yaml..."
         python3 -c "import json,yaml; yaml.dump(json.load(open('docs/swagger.json')), open('internal/handlers/openapi.yaml','w'), default_flow_style=False)" 2>/dev/null \
           || cp docs/swagger.json internal/handlers/openapi.yaml
@@ -111,18 +112,23 @@ build-hal:
     - echo "🔨 Building AMD64 binary..."
     - GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -ldflags="-s -w" -o cubeos-hal-amd64 ./cmd/cubeos-hal/
     
-    # Copy artifacts
+    # ──────────────────────────────────────────────────────────
+    # Copy artifacts to project dir
+    # ──────────────────────────────────────────────────────────
     - cp cubeos-hal-arm64 cubeos-hal-amd64 ${CI_PROJECT_DIR}/
-    - cp internal/handlers/openapi.yaml ${CI_PROJECT_DIR}/openapi.yaml 2>/dev/null || true
+    - cp internal/handlers/openapi.yaml ${CI_PROJECT_DIR}/openapi.yaml
     
-    # Show results
-    - ls -lh ${CI_PROJECT_DIR}/cubeos-hal-* ${CI_PROJECT_DIR}/openapi.yaml 2>/dev/null || ls -lh ${CI_PROJECT_DIR}/cubeos-hal-*
+    # IMPORTANT: Also update the source tree so package-hal gets the new spec
+    - cp internal/handlers/openapi.yaml ${CI_PROJECT_DIR}/cubeos-hal/src/internal/handlers/openapi.yaml
+    
+    - ls -lh ${CI_PROJECT_DIR}/cubeos-hal-* ${CI_PROJECT_DIR}/openapi.yaml
     - echo "✅ Build complete"
   artifacts:
     paths:
       - cubeos-hal-arm64
       - cubeos-hal-amd64
       - openapi.yaml
+      - cubeos-hal/src/internal/handlers/openapi.yaml
     expire_in: 1 week
   rules:
     - if: $CI_COMMIT_BRANCH == "main"
@@ -138,13 +144,34 @@ package-hal:
   image: docker:24
   needs:
     - job: build-hal
-      optional: true
+      artifacts: true
   before_script:
     - echo "$GHCR_TOKEN" | docker login ghcr.io -u "$GHCR_USER" --password-stdin
     - docker buildx create --name halbuilder --driver docker-container --use
     - docker buildx inspect --bootstrap
   script:
     - |
+      # ──────────────────────────────────────────────────────────
+      # Verify generated OpenAPI spec is present
+      # ──────────────────────────────────────────────────────────
+      if [ -f "openapi.yaml" ]; then
+        echo "📄 Found generated OpenAPI spec ($(wc -l < openapi.yaml) lines)"
+        # Copy to Docker build context
+        cp openapi.yaml cubeos-hal/src/internal/handlers/openapi.yaml
+        echo "✅ Copied OpenAPI spec to Docker build context"
+      else
+        echo "⚠️ No generated openapi.yaml found, using existing"
+      fi
+      
+      # Show what we're building with
+      echo "📄 OpenAPI spec in build context:"
+      head -20 cubeos-hal/src/internal/handlers/openapi.yaml
+      echo "..."
+      wc -l cubeos-hal/src/internal/handlers/openapi.yaml
+      
+      # ──────────────────────────────────────────────────────────
+      # Build and push multi-arch image
+      # ──────────────────────────────────────────────────────────
       cd cubeos-hal/src
       docker buildx build --no-cache \
         --platform linux/amd64,linux/arm64 \
@@ -490,6 +517,7 @@ restart-changed:
       docker stack ls 2>/dev/null || echo "  None"
       echo ""
       echo "📚 Swagger UI: http://cubeos.cube:6005/hal/docs"
+      echo "📄 OpenAPI Spec: http://cubeos.cube:6005/hal/docs/openapi.yaml"
       echo "✅ Restart complete"
   rules:
     - if: $CI_COMMIT_BRANCH == "main"
