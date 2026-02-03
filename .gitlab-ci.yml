@@ -1,6 +1,12 @@
 # =============================================================================
 # CubeOS Coreapps Pipeline - Validate, Build, Deploy
 # =============================================================================
+# 
+# Features:
+# - Automatic OpenAPI spec generation from swaggo annotations
+# - Multi-arch builds (ARM64 + AMD64)
+# - Swagger UI auto-updates on each deploy
+#
 stages:
   - validate
   - build
@@ -53,7 +59,7 @@ shellcheck:
   allow_failure: true
 
 # -----------------------------------------------------------------------------
-# BUILD HAL - Compile Go binary for both architectures
+# BUILD HAL - Generate OpenAPI docs + Compile Go binary for both architectures
 # -----------------------------------------------------------------------------
 build-hal:
   stage: build
@@ -63,14 +69,60 @@ build-hal:
     - cp -r cubeos-hal/src/. /app/
     - cd /app
     - go mod download
+    
+    # ──────────────────────────────────────────────────────────
+    # Generate OpenAPI docs from swaggo annotations
+    # ──────────────────────────────────────────────────────────
+    - echo "📚 Installing swag CLI..."
+    - go install github.com/swaggo/swag/cmd/swag@latest
+    - export PATH=$PATH:$(go env GOPATH)/bin
+    
+    - echo "📚 Generating OpenAPI spec from annotations..."
+    - |
+      swag init \
+        -g cmd/cubeos-hal/main.go \
+        --output ./docs \
+        --parseDependency \
+        --parseInternal \
+        --parseDepth 2 \
+        || echo "⚠️ Swag init had warnings (may be OK)"
+    
+    # Copy generated spec to handlers directory (embedded in binary)
+    - |
+      if [ -f docs/swagger.yaml ]; then
+        cp docs/swagger.yaml internal/handlers/openapi.yaml
+        echo "✅ OpenAPI spec generated ($(wc -l < docs/swagger.yaml) lines)"
+      elif [ -f docs/swagger.json ]; then
+        # Convert JSON to YAML if only JSON was generated
+        echo "Converting swagger.json to yaml..."
+        python3 -c "import json,yaml; yaml.dump(json.load(open('docs/swagger.json')), open('internal/handlers/openapi.yaml','w'), default_flow_style=False)" 2>/dev/null \
+          || cp docs/swagger.json internal/handlers/openapi.yaml
+        echo "✅ OpenAPI spec generated from JSON"
+      else
+        echo "⚠️ No swagger spec generated, using existing openapi.yaml"
+      fi
+    
+    # ──────────────────────────────────────────────────────────
+    # Build binaries for both architectures
+    # ──────────────────────────────────────────────────────────
+    - echo "🔨 Building ARM64 binary..."
     - GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -ldflags="-s -w" -o cubeos-hal-arm64 ./cmd/cubeos-hal/
+    
+    - echo "🔨 Building AMD64 binary..."
     - GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -ldflags="-s -w" -o cubeos-hal-amd64 ./cmd/cubeos-hal/
+    
+    # Copy artifacts
     - cp cubeos-hal-arm64 cubeos-hal-amd64 ${CI_PROJECT_DIR}/
-    - ls -lh ${CI_PROJECT_DIR}/cubeos-hal-*
+    - cp internal/handlers/openapi.yaml ${CI_PROJECT_DIR}/openapi.yaml 2>/dev/null || true
+    
+    # Show results
+    - ls -lh ${CI_PROJECT_DIR}/cubeos-hal-* ${CI_PROJECT_DIR}/openapi.yaml 2>/dev/null || ls -lh ${CI_PROJECT_DIR}/cubeos-hal-*
+    - echo "✅ Build complete"
   artifacts:
     paths:
       - cubeos-hal-arm64
       - cubeos-hal-amd64
+      - openapi.yaml
     expire_in: 1 week
   rules:
     - if: $CI_COMMIT_BRANCH == "main"
@@ -437,6 +489,7 @@ restart-changed:
       echo "SWARM STACKS:"
       docker stack ls 2>/dev/null || echo "  None"
       echo ""
+      echo "📚 Swagger UI: http://cubeos.cube:6005/hal/docs"
       echo "✅ Restart complete"
   rules:
     - if: $CI_COMMIT_BRANCH == "main"
