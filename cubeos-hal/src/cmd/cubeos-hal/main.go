@@ -104,6 +104,13 @@ func main() {
 		r.Get("/meshtastic/position", h.GetMeshtasticPosition)
 		r.Post("/meshtastic/send", h.SendMeshtasticMessage)
 
+		// Iridium SBD (RockBLOCK 9603)
+		r.Get("/iridium/devices", h.GetIridiumDevices)
+		r.Get("/iridium/status", h.GetIridiumStatus)
+		r.Get("/iridium/signal", h.GetIridiumSignal)
+		r.Post("/iridium/send", h.SendIridiumMessage)
+		r.Post("/iridium/receive", h.ReceiveIridiumMessage)
+
 		// USB operations
 		r.Get("/usb/devices", h.ListUSBDevices)
 		r.Post("/usb/mount/{device}", h.MountUSB)

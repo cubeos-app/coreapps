@@ -625,15 +625,15 @@ func (h *HALHandler) GetThrottleStatus(w http.ResponseWriter, r *http.Request) {
 	val, _ := strconv.ParseInt(strings.TrimPrefix(parts[1], "0x"), 16, 64)
 
 	status := map[string]interface{}{
-		"raw":                       parts[1],
-		"under_voltage":             val&0x1 != 0,
-		"freq_capped":               val&0x2 != 0,
-		"throttled":                 val&0x4 != 0,
-		"soft_temp_limit":           val&0x8 != 0,
-		"under_voltage_occurred":    val&0x10000 != 0,
-		"freq_capped_occurred":      val&0x20000 != 0,
-		"throttled_occurred":        val&0x40000 != 0,
-		"soft_temp_limit_occurred":  val&0x80000 != 0,
+		"raw":                      parts[1],
+		"under_voltage":            val&0x1 != 0,
+		"freq_capped":              val&0x2 != 0,
+		"throttled":                val&0x4 != 0,
+		"soft_temp_limit":          val&0x8 != 0,
+		"under_voltage_occurred":   val&0x10000 != 0,
+		"freq_capped_occurred":     val&0x20000 != 0,
+		"throttled_occurred":       val&0x40000 != 0,
+		"soft_temp_limit_occurred": val&0x80000 != 0,
 	}
 
 	jsonResponse(w, http.StatusOK, status)
@@ -828,31 +828,31 @@ func (h *HALHandler) GetBootConfig(w http.ResponseWriter, r *http.Request) {
 
 // StorageDevice represents a storage device
 type StorageDevice struct {
-	Name       string            `json:"name"`
-	Path       string            `json:"path"`
-	Size       int64             `json:"size"`        // bytes
-	SizeHuman  string            `json:"size_human"`  // "128GB"
-	Type       string            `json:"type"`        // disk, part, rom
-	Model      string            `json:"model,omitempty"`
-	Serial     string            `json:"serial,omitempty"`
-	Transport  string            `json:"transport,omitempty"` // usb, nvme, sata, mmc
-	Filesystem string            `json:"filesystem,omitempty"`
-	Mountpoint string            `json:"mountpoint,omitempty"`
-	Children   []StorageDevice   `json:"children,omitempty"`
-	Smart      *SmartInfo        `json:"smart,omitempty"`
+	Name       string          `json:"name"`
+	Path       string          `json:"path"`
+	Size       int64           `json:"size"`       // bytes
+	SizeHuman  string          `json:"size_human"` // "128GB"
+	Type       string          `json:"type"`       // disk, part, rom
+	Model      string          `json:"model,omitempty"`
+	Serial     string          `json:"serial,omitempty"`
+	Transport  string          `json:"transport,omitempty"` // usb, nvme, sata, mmc
+	Filesystem string          `json:"filesystem,omitempty"`
+	Mountpoint string          `json:"mountpoint,omitempty"`
+	Children   []StorageDevice `json:"children,omitempty"`
+	Smart      *SmartInfo      `json:"smart,omitempty"`
 }
 
 // SmartInfo contains SMART health data
 type SmartInfo struct {
-	Available       bool    `json:"available"`
-	Healthy         bool    `json:"healthy"`
-	Temperature     int     `json:"temperature,omitempty"`      // Celsius
-	PowerOnHours    int     `json:"power_on_hours,omitempty"`
-	PowerCycles     int     `json:"power_cycles,omitempty"`
-	MediaErrors     int     `json:"media_errors,omitempty"`
-	PercentUsed     int     `json:"percent_used,omitempty"`     // NVMe wear
-	SpareAvailable  int     `json:"spare_available,omitempty"`  // NVMe spare %
-	RawData         string  `json:"raw_data,omitempty"`
+	Available      bool   `json:"available"`
+	Healthy        bool   `json:"healthy"`
+	Temperature    int    `json:"temperature,omitempty"` // Celsius
+	PowerOnHours   int    `json:"power_on_hours,omitempty"`
+	PowerCycles    int    `json:"power_cycles,omitempty"`
+	MediaErrors    int    `json:"media_errors,omitempty"`
+	PercentUsed    int    `json:"percent_used,omitempty"`    // NVMe wear
+	SpareAvailable int    `json:"spare_available,omitempty"` // NVMe spare %
+	RawData        string `json:"raw_data,omitempty"`
 }
 
 // GetStorageDevices returns all storage devices
@@ -1122,14 +1122,14 @@ func (h *HALHandler) getSmartInfo(devPath string) SmartInfo {
 		PowerOnTime struct {
 			Hours int `json:"hours"`
 		} `json:"power_on_time"`
-		PowerCycleCount int `json:"power_cycle_count"`
+		PowerCycleCount               int `json:"power_cycle_count"`
 		NvmeSmartHealthInformationLog struct {
-			Temperature         int `json:"temperature"`
-			AvailableSpare      int `json:"available_spare"`
-			PercentageUsed      int `json:"percentage_used"`
-			PowerOnHours        int `json:"power_on_hours"`
-			PowerCycles         int `json:"power_cycles"`
-			MediaErrors         int `json:"media_errors"`
+			Temperature    int `json:"temperature"`
+			AvailableSpare int `json:"available_spare"`
+			PercentageUsed int `json:"percentage_used"`
+			PowerOnHours   int `json:"power_on_hours"`
+			PowerCycles    int `json:"power_cycles"`
+			MediaErrors    int `json:"media_errors"`
 		} `json:"nvme_smart_health_information_log"`
 	}
 
@@ -1189,9 +1189,9 @@ func (h *HALHandler) GetKernelLogs(w http.ResponseWriter, r *http.Request) {
 	}
 
 	level := r.URL.Query().Get("level") // err, warn, info
-	
+
 	args := []string{"-t", "1", "-m", "-u", "-n", "-i", "/usr/bin/dmesg", "--time-format=iso", "-T"}
-	
+
 	if level != "" {
 		args = append(args, "--level="+level)
 	}
@@ -1230,14 +1230,14 @@ func (h *HALHandler) GetJournalLogs(w http.ResponseWriter, r *http.Request) {
 	if lines == "" {
 		lines = "200"
 	}
-	
-	unit := r.URL.Query().Get("unit")     // e.g., hostapd, docker
-	since := r.URL.Query().Get("since")   // e.g., "1h", "24h", "7d"
+
+	unit := r.URL.Query().Get("unit")         // e.g., hostapd, docker
+	since := r.URL.Query().Get("since")       // e.g., "1h", "24h", "7d"
 	priority := r.URL.Query().Get("priority") // 0-7 (emerg to debug)
-	grep := r.URL.Query().Get("grep")     // search pattern
+	grep := r.URL.Query().Get("grep")         // search pattern
 
 	args := []string{"-t", "1", "-m", "-u", "-n", "-i", "/usr/bin/journalctl", "--no-pager", "-o", "short-iso", "-n", lines}
-	
+
 	if unit != "" {
 		args = append(args, "-u", unit)
 	}
@@ -1285,12 +1285,12 @@ func (h *HALHandler) GetHardwareLogs(w http.ResponseWriter, r *http.Request) {
 	}
 
 	filters := map[string][]string{
-		"i2c":  {"i2c", "I2C"},
-		"gpio": {"gpio", "GPIO", "pinctrl", "gpiochip"},
-		"usb":  {"usb", "USB", "xhci", "dwc"},
-		"pcie": {"pcie", "PCIe", "nvme", "NVMe"},
-		"mmc":  {"mmc", "MMC", "sdhost", "sdhci"},
-		"net":  {"wlan", "eth", "wifi", "hostapd", "dhcp"},
+		"i2c":   {"i2c", "I2C"},
+		"gpio":  {"gpio", "GPIO", "pinctrl", "gpiochip"},
+		"usb":   {"usb", "USB", "xhci", "dwc"},
+		"pcie":  {"pcie", "PCIe", "nvme", "NVMe"},
+		"mmc":   {"mmc", "MMC", "sdhost", "sdhci"},
+		"net":   {"wlan", "eth", "wifi", "hostapd", "dhcp"},
 		"power": {"voltage", "throttl", "temperature", "thermal"},
 	}
 
@@ -1442,7 +1442,7 @@ func parseSinceTime(since string) string {
 	if since == "" {
 		return "24 hours ago"
 	}
-	
+
 	// Handle common formats
 	if strings.HasSuffix(since, "m") {
 		mins := strings.TrimSuffix(since, "m")
@@ -1456,7 +1456,7 @@ func parseSinceTime(since string) string {
 		days := strings.TrimSuffix(since, "d")
 		return days + " days ago"
 	}
-	
+
 	return since
 }
 
@@ -1865,12 +1865,12 @@ func (h *HALHandler) getTorExitInfo() map[string]string {
 
 // GPSDevice represents a detected GPS device
 type GPSDevice struct {
-	Path     string `json:"path"`
-	Name     string `json:"name,omitempty"`
-	VendorID string `json:"vendor_id,omitempty"`
+	Path      string `json:"path"`
+	Name      string `json:"name,omitempty"`
+	VendorID  string `json:"vendor_id,omitempty"`
 	ProductID string `json:"product_id,omitempty"`
-	Driver   string `json:"driver,omitempty"`
-	Active   bool   `json:"active"`
+	Driver    string `json:"driver,omitempty"`
+	Active    bool   `json:"active"`
 }
 
 // GPSPosition represents GPS position data
@@ -1878,29 +1878,29 @@ type GPSPosition struct {
 	Valid       bool    `json:"valid"`
 	Latitude    float64 `json:"latitude"`
 	Longitude   float64 `json:"longitude"`
-	Altitude    float64 `json:"altitude"`       // meters
-	Speed       float64 `json:"speed"`          // km/h
-	Course      float64 `json:"course"`         // degrees
+	Altitude    float64 `json:"altitude"` // meters
+	Speed       float64 `json:"speed"`    // km/h
+	Course      float64 `json:"course"`   // degrees
 	Satellites  int     `json:"satellites"`
-	FixQuality  int     `json:"fix_quality"`    // 0=invalid, 1=GPS, 2=DGPS
-	FixType     string  `json:"fix_type"`       // "none", "2D", "3D"
-	HDOP        float64 `json:"hdop"`           // Horizontal dilution of precision
-	Timestamp   string  `json:"timestamp"`      // UTC time from GPS
+	FixQuality  int     `json:"fix_quality"` // 0=invalid, 1=GPS, 2=DGPS
+	FixType     string  `json:"fix_type"`    // "none", "2D", "3D"
+	HDOP        float64 `json:"hdop"`        // Horizontal dilution of precision
+	Timestamp   string  `json:"timestamp"`   // UTC time from GPS
 	LastUpdated string  `json:"last_updated"`
 }
 
 // GPSStatus represents GPS device status
 type GPSStatus struct {
-	Available   bool        `json:"available"`
-	Device      string      `json:"device,omitempty"`
-	HasFix      bool        `json:"has_fix"`
-	Position    *GPSPosition `json:"position,omitempty"`
+	Available bool         `json:"available"`
+	Device    string       `json:"device,omitempty"`
+	HasFix    bool         `json:"has_fix"`
+	Position  *GPSPosition `json:"position,omitempty"`
 }
 
 // GetGPSDevices lists all detected GPS devices
 func (h *HALHandler) GetGPSDevices(w http.ResponseWriter, r *http.Request) {
 	devices := h.scanGPSDevices()
-	
+
 	jsonResponse(w, http.StatusOK, map[string]interface{}{
 		"devices": devices,
 		"count":   len(devices),
@@ -1910,11 +1910,11 @@ func (h *HALHandler) GetGPSDevices(w http.ResponseWriter, r *http.Request) {
 // GetGPSStatus returns GPS device status
 func (h *HALHandler) GetGPSStatus(w http.ResponseWriter, r *http.Request) {
 	devices := h.scanGPSDevices()
-	
+
 	status := GPSStatus{
 		Available: len(devices) > 0,
 	}
-	
+
 	if len(devices) > 0 {
 		// Use first active device
 		for _, dev := range devices {
@@ -1934,14 +1934,14 @@ func (h *HALHandler) GetGPSStatus(w http.ResponseWriter, r *http.Request) {
 			status.Position = pos
 		}
 	}
-	
+
 	jsonResponse(w, http.StatusOK, status)
 }
 
 // GetGPSPosition returns current GPS position
 func (h *HALHandler) GetGPSPosition(w http.ResponseWriter, r *http.Request) {
 	device := r.URL.Query().Get("device")
-	
+
 	if device == "" {
 		// Auto-detect
 		devices := h.scanGPSDevices()
@@ -1951,28 +1951,28 @@ func (h *HALHandler) GetGPSPosition(w http.ResponseWriter, r *http.Request) {
 		}
 		device = devices[0].Path
 	}
-	
+
 	pos := h.readGPSPosition(device)
 	if pos == nil {
 		errorResponse(w, http.StatusInternalServerError, "failed to read GPS position")
 		return
 	}
-	
+
 	jsonResponse(w, http.StatusOK, pos)
 }
 
 // scanGPSDevices scans for GPS devices on serial ports
 func (h *HALHandler) scanGPSDevices() []GPSDevice {
 	var devices []GPSDevice
-	
+
 	// Known GPS vendor IDs
 	gpsVendors := map[string]string{
-		"1546": "u-blox",      // u-blox GPS
-		"067b": "Prolific",    // PL2303 (common GPS adapter)
+		"1546": "u-blox",       // u-blox GPS
+		"067b": "Prolific",     // PL2303 (common GPS adapter)
 		"10c4": "Silicon Labs", // CP210x
-		"0403": "FTDI",        // FTDI (could be GPS)
+		"0403": "FTDI",         // FTDI (could be GPS)
 	}
-	
+
 	// Scan ttyACM devices (native USB CDC)
 	acmDevices, _ := filepath.Glob("/dev/ttyACM*")
 	for _, dev := range acmDevices {
@@ -1981,7 +1981,7 @@ func (h *HALHandler) scanGPSDevices() []GPSDevice {
 			devices = append(devices, *gps)
 		}
 	}
-	
+
 	// Scan ttyUSB devices (USB-serial adapters)
 	usbDevices, _ := filepath.Glob("/dev/ttyUSB*")
 	for _, dev := range usbDevices {
@@ -1990,7 +1990,7 @@ func (h *HALHandler) scanGPSDevices() []GPSDevice {
 			devices = append(devices, *gps)
 		}
 	}
-	
+
 	return devices
 }
 
@@ -1998,37 +1998,37 @@ func (h *HALHandler) scanGPSDevices() []GPSDevice {
 func (h *HALHandler) probeGPSDevice(devPath string, gpsVendors map[string]string) *GPSDevice {
 	// Get device name (e.g., ttyACM0)
 	devName := filepath.Base(devPath)
-	
+
 	// Check vendor/product ID via sysfs
 	vendorPath := fmt.Sprintf("/sys/class/tty/%s/device/../idVendor", devName)
 	productPath := fmt.Sprintf("/sys/class/tty/%s/device/../idProduct", devName)
-	
+
 	vendorID := ""
 	productID := ""
-	
+
 	if data, err := os.ReadFile(vendorPath); err == nil {
 		vendorID = strings.TrimSpace(string(data))
 	}
 	if data, err := os.ReadFile(productPath); err == nil {
 		productID = strings.TrimSpace(string(data))
 	}
-	
+
 	// Check if known GPS vendor
 	vendorName, isKnown := gpsVendors[vendorID]
-	
+
 	// For u-blox, we're confident it's GPS
 	// For others, probe with NMEA
 	isGPS := vendorID == "1546" // u-blox is definitely GPS
-	
+
 	if !isGPS && isKnown {
 		// Probe by reading NMEA sentences
 		isGPS = h.probeNMEA(devPath)
 	}
-	
+
 	if !isGPS && !isKnown {
 		return nil
 	}
-	
+
 	device := &GPSDevice{
 		Path:      devPath,
 		Name:      vendorName,
@@ -2036,13 +2036,13 @@ func (h *HALHandler) probeGPSDevice(devPath string, gpsVendors map[string]string
 		ProductID: productID,
 		Active:    true,
 	}
-	
+
 	// Get driver name
 	driverPath := fmt.Sprintf("/sys/class/tty/%s/device/driver", devName)
 	if link, err := os.Readlink(driverPath); err == nil {
 		device.Driver = filepath.Base(link)
 	}
-	
+
 	return device
 }
 
@@ -2052,11 +2052,11 @@ func (h *HALHandler) probeNMEA(devPath string) bool {
 	cmd := exec.Command("nsenter", "-t", "1", "-m", "-u", "-n", "-i", "/bin/sh", "-c",
 		fmt.Sprintf("stty -F %s 9600 raw -echo; timeout 2 head -c 500 %s 2>/dev/null", devPath, devPath))
 	output, _ := cmd.Output()
-	
+
 	// Check for NMEA signature
-	return strings.Contains(string(output), "$GP") || 
-	       strings.Contains(string(output), "$GN") ||
-	       strings.Contains(string(output), "$GL")
+	return strings.Contains(string(output), "$GP") ||
+		strings.Contains(string(output), "$GN") ||
+		strings.Contains(string(output), "$GL")
 }
 
 // readGPSPosition reads current position from GPS device
@@ -2064,7 +2064,7 @@ func (h *HALHandler) readGPSPosition(devPath string) *GPSPosition {
 	pos := &GPSPosition{
 		LastUpdated: time.Now().UTC().Format(time.RFC3339),
 	}
-	
+
 	// Read NMEA sentences (timeout 3 seconds, read enough for full cycle)
 	cmd := exec.Command("nsenter", "-t", "1", "-m", "-u", "-n", "-i", "/bin/sh", "-c",
 		fmt.Sprintf("stty -F %s 9600 raw -echo 2>/dev/null; timeout 3 cat %s 2>/dev/null", devPath, devPath))
@@ -2072,22 +2072,22 @@ func (h *HALHandler) readGPSPosition(devPath string) *GPSPosition {
 	if err != nil {
 		return pos
 	}
-	
+
 	lines := strings.Split(string(output), "\n")
 	for _, line := range lines {
 		line = strings.TrimSpace(line)
-		
+
 		// Parse GPGGA (position + fix info)
 		if strings.HasPrefix(line, "$GPGGA") || strings.HasPrefix(line, "$GNGGA") {
 			h.parseGPGGA(line, pos)
 		}
-		
+
 		// Parse GPRMC (position + speed + course)
 		if strings.HasPrefix(line, "$GPRMC") || strings.HasPrefix(line, "$GNRMC") {
 			h.parseGPRMC(line, pos)
 		}
 	}
-	
+
 	return pos
 }
 
@@ -2098,12 +2098,12 @@ func (h *HALHandler) parseGPGGA(sentence string, pos *GPSPosition) {
 	if idx := strings.Index(sentence, "*"); idx > 0 {
 		sentence = sentence[:idx]
 	}
-	
+
 	fields := strings.Split(sentence, ",")
 	if len(fields) < 15 {
 		return
 	}
-	
+
 	// Fix quality (field 6)
 	if fix, err := strconv.Atoi(fields[6]); err == nil {
 		pos.FixQuality = fix
@@ -2123,32 +2123,32 @@ func (h *HALHandler) parseGPGGA(sentence string, pos *GPSPosition) {
 			pos.FixType = "unknown"
 		}
 	}
-	
+
 	// Time (field 1) - HHMMSS.sss
 	if fields[1] != "" {
 		pos.Timestamp = formatNMEATime(fields[1])
 	}
-	
+
 	// Latitude (fields 2,3) - DDMM.MMMM,N/S
 	if fields[2] != "" && fields[3] != "" {
 		pos.Latitude = parseNMEACoord(fields[2], fields[3])
 	}
-	
+
 	// Longitude (fields 4,5) - DDDMM.MMMM,E/W
 	if fields[4] != "" && fields[5] != "" {
 		pos.Longitude = parseNMEACoord(fields[4], fields[5])
 	}
-	
+
 	// Satellites (field 7)
 	if sats, err := strconv.Atoi(fields[7]); err == nil {
 		pos.Satellites = sats
 	}
-	
+
 	// HDOP (field 8)
 	if hdop, err := strconv.ParseFloat(fields[8], 64); err == nil {
 		pos.HDOP = hdop
 	}
-	
+
 	// Altitude (field 9)
 	if alt, err := strconv.ParseFloat(fields[9], 64); err == nil {
 		pos.Altitude = alt
@@ -2162,32 +2162,32 @@ func (h *HALHandler) parseGPRMC(sentence string, pos *GPSPosition) {
 	if idx := strings.Index(sentence, "*"); idx > 0 {
 		sentence = sentence[:idx]
 	}
-	
+
 	fields := strings.Split(sentence, ",")
 	if len(fields) < 12 {
 		return
 	}
-	
+
 	// Status (field 2) - A=valid, V=void
 	if fields[2] == "A" {
 		pos.Valid = true
 	}
-	
+
 	// Latitude (fields 3,4)
 	if fields[3] != "" && fields[4] != "" && pos.Latitude == 0 {
 		pos.Latitude = parseNMEACoord(fields[3], fields[4])
 	}
-	
+
 	// Longitude (fields 5,6)
 	if fields[5] != "" && fields[6] != "" && pos.Longitude == 0 {
 		pos.Longitude = parseNMEACoord(fields[5], fields[6])
 	}
-	
+
 	// Speed in knots (field 7) -> convert to km/h
 	if speed, err := strconv.ParseFloat(fields[7], 64); err == nil {
 		pos.Speed = speed * 1.852 // knots to km/h
 	}
-	
+
 	// Course (field 8)
 	if course, err := strconv.ParseFloat(fields[8], 64); err == nil {
 		pos.Course = course
@@ -2199,30 +2199,30 @@ func parseNMEACoord(coord string, dir string) float64 {
 	if coord == "" {
 		return 0
 	}
-	
+
 	// Find decimal point
 	dotIdx := strings.Index(coord, ".")
 	if dotIdx < 2 {
 		return 0
 	}
-	
+
 	// Degrees are before the last 2 digits before decimal
 	degStr := coord[:dotIdx-2]
 	minStr := coord[dotIdx-2:]
-	
+
 	deg, err1 := strconv.ParseFloat(degStr, 64)
 	min, err2 := strconv.ParseFloat(minStr, 64)
 	if err1 != nil || err2 != nil {
 		return 0
 	}
-	
+
 	result := deg + min/60.0
-	
+
 	// Apply direction
 	if dir == "S" || dir == "W" {
 		result = -result
 	}
-	
+
 	return result
 }
 
@@ -2240,43 +2240,43 @@ func formatNMEATime(t string) string {
 
 // CellularModem represents a detected modem
 type CellularModem struct {
-	Index          int    `json:"index"`
-	Path           string `json:"path"`
-	Manufacturer   string `json:"manufacturer,omitempty"`
-	Model          string `json:"model,omitempty"`
-	IMEI           string `json:"imei,omitempty"`
-	State          string `json:"state"`
-	PowerState     string `json:"power_state,omitempty"`
-	SignalQuality  int    `json:"signal_quality"`
-	AccessTech     string `json:"access_tech,omitempty"`
-	Operator       string `json:"operator,omitempty"`
-	OperatorCode   string `json:"operator_code,omitempty"`
+	Index         int    `json:"index"`
+	Path          string `json:"path"`
+	Manufacturer  string `json:"manufacturer,omitempty"`
+	Model         string `json:"model,omitempty"`
+	IMEI          string `json:"imei,omitempty"`
+	State         string `json:"state"`
+	PowerState    string `json:"power_state,omitempty"`
+	SignalQuality int    `json:"signal_quality"`
+	AccessTech    string `json:"access_tech,omitempty"`
+	Operator      string `json:"operator,omitempty"`
+	OperatorCode  string `json:"operator_code,omitempty"`
 }
 
 // CellularStatus represents cellular connection status
 type CellularStatus struct {
-	Available    bool             `json:"available"`
-	ModemCount   int              `json:"modem_count"`
-	Modems       []CellularModem  `json:"modems,omitempty"`
-	Connected    bool             `json:"connected"`
-	IPAddress    string           `json:"ip_address,omitempty"`
-	Interface    string           `json:"interface,omitempty"`
+	Available  bool            `json:"available"`
+	ModemCount int             `json:"modem_count"`
+	Modems     []CellularModem `json:"modems,omitempty"`
+	Connected  bool            `json:"connected"`
+	IPAddress  string          `json:"ip_address,omitempty"`
+	Interface  string          `json:"interface,omitempty"`
 }
 
 // CellularSignal represents detailed signal info
 type CellularSignal struct {
-	Quality    int     `json:"quality"`      // 0-100%
-	RSSI       float64 `json:"rssi,omitempty"`        // dBm
-	RSRP       float64 `json:"rsrp,omitempty"`        // LTE Reference Signal Received Power
-	RSRQ       float64 `json:"rsrq,omitempty"`        // LTE Reference Signal Received Quality
-	SINR       float64 `json:"sinr,omitempty"`        // Signal to Interference+Noise Ratio
-	Technology string  `json:"technology,omitempty"`  // GSM, UMTS, LTE, 5GNR
+	Quality    int     `json:"quality"`              // 0-100%
+	RSSI       float64 `json:"rssi,omitempty"`       // dBm
+	RSRP       float64 `json:"rsrp,omitempty"`       // LTE Reference Signal Received Power
+	RSRQ       float64 `json:"rsrq,omitempty"`       // LTE Reference Signal Received Quality
+	SINR       float64 `json:"sinr,omitempty"`       // Signal to Interference+Noise Ratio
+	Technology string  `json:"technology,omitempty"` // GSM, UMTS, LTE, 5GNR
 }
 
 // GetCellularStatus returns cellular modem status
 func (h *HALHandler) GetCellularStatus(w http.ResponseWriter, r *http.Request) {
 	status := CellularStatus{}
-	
+
 	// Check if ModemManager is running
 	cmd := exec.Command("nsenter", "-t", "1", "-m", "-u", "-n", "-i", "/usr/bin/systemctl", "is-active", "ModemManager")
 	if output, err := cmd.Output(); err != nil || strings.TrimSpace(string(output)) != "active" {
@@ -2285,13 +2285,13 @@ func (h *HALHandler) GetCellularStatus(w http.ResponseWriter, r *http.Request) {
 		jsonResponse(w, http.StatusOK, status)
 		return
 	}
-	
+
 	// List modems
 	modems := h.listModems()
 	status.ModemCount = len(modems)
 	status.Modems = modems
 	status.Available = len(modems) > 0
-	
+
 	// Check if any modem is connected
 	for _, m := range modems {
 		if m.State == "connected" {
@@ -2301,7 +2301,7 @@ func (h *HALHandler) GetCellularStatus(w http.ResponseWriter, r *http.Request) {
 			break
 		}
 	}
-	
+
 	jsonResponse(w, http.StatusOK, status)
 }
 
@@ -2320,7 +2320,7 @@ func (h *HALHandler) GetCellularSignal(w http.ResponseWriter, r *http.Request) {
 	if modemIdx == "" {
 		modemIdx = "0"
 	}
-	
+
 	signal := h.getModemSignal(modemIdx)
 	jsonResponse(w, http.StatusOK, signal)
 }
@@ -2335,11 +2335,11 @@ func (h *HALHandler) ConnectCellular(w http.ResponseWriter, r *http.Request) {
 		errorResponse(w, http.StatusBadRequest, "invalid request")
 		return
 	}
-	
+
 	if req.APN == "" {
 		req.APN = "internet" // Default APN
 	}
-	
+
 	// Use mmcli simple-connect
 	cmd := exec.Command("nsenter", "-t", "1", "-m", "-u", "-n", "-i",
 		"/usr/bin/mmcli", "-m", strconv.Itoa(req.Modem), "--simple-connect=apn="+req.APN)
@@ -2348,7 +2348,7 @@ func (h *HALHandler) ConnectCellular(w http.ResponseWriter, r *http.Request) {
 		errorResponse(w, http.StatusInternalServerError, "connect failed: "+string(output))
 		return
 	}
-	
+
 	successResponse(w, "connected")
 }
 
@@ -2361,7 +2361,7 @@ func (h *HALHandler) DisconnectCellular(w http.ResponseWriter, r *http.Request) 
 		errorResponse(w, http.StatusBadRequest, "invalid request")
 		return
 	}
-	
+
 	cmd := exec.Command("nsenter", "-t", "1", "-m", "-u", "-n", "-i",
 		"/usr/bin/mmcli", "-m", strconv.Itoa(req.Modem), "--simple-disconnect")
 	output, err := cmd.CombinedOutput()
@@ -2369,40 +2369,40 @@ func (h *HALHandler) DisconnectCellular(w http.ResponseWriter, r *http.Request) 
 		errorResponse(w, http.StatusInternalServerError, "disconnect failed: "+string(output))
 		return
 	}
-	
+
 	successResponse(w, "disconnected")
 }
 
 // listModems returns list of detected modems via mmcli
 func (h *HALHandler) listModems() []CellularModem {
 	var modems []CellularModem
-	
+
 	// Get modem list
 	cmd := exec.Command("nsenter", "-t", "1", "-m", "-u", "-n", "-i", "/usr/bin/mmcli", "-L")
 	output, err := cmd.Output()
 	if err != nil {
 		return modems
 	}
-	
+
 	// Parse output: /org/freedesktop/ModemManager1/Modem/0 [Quectel] EC25
 	lines := strings.Split(string(output), "\n")
 	for _, line := range lines {
 		if !strings.Contains(line, "/Modem/") {
 			continue
 		}
-		
+
 		// Extract modem index
 		re := regexp.MustCompile(`/Modem/(\d+)`)
 		matches := re.FindStringSubmatch(line)
 		if len(matches) < 2 {
 			continue
 		}
-		
+
 		idx, _ := strconv.Atoi(matches[1])
 		modem := h.getModemDetails(idx)
 		modems = append(modems, modem)
 	}
-	
+
 	return modems
 }
 
@@ -2412,7 +2412,7 @@ func (h *HALHandler) getModemDetails(idx int) CellularModem {
 		Index: idx,
 		Path:  fmt.Sprintf("/org/freedesktop/ModemManager1/Modem/%d", idx),
 	}
-	
+
 	// Get modem info as JSON
 	cmd := exec.Command("nsenter", "-t", "1", "-m", "-u", "-n", "-i",
 		"/usr/bin/mmcli", "-m", strconv.Itoa(idx), "-J")
@@ -2420,7 +2420,7 @@ func (h *HALHandler) getModemDetails(idx int) CellularModem {
 	if err != nil {
 		return modem
 	}
-	
+
 	// Parse JSON
 	var mmOutput struct {
 		Modem struct {
@@ -2441,7 +2441,7 @@ func (h *HALHandler) getModemDetails(idx int) CellularModem {
 			} `json:"3gpp"`
 		} `json:"modem"`
 	}
-	
+
 	if err := json.Unmarshal(output, &mmOutput); err == nil {
 		modem.Manufacturer = mmOutput.Modem.Generic.Manufacturer
 		modem.Model = mmOutput.Modem.Generic.Model
@@ -2455,18 +2455,18 @@ func (h *HALHandler) getModemDetails(idx int) CellularModem {
 			modem.AccessTech = mmOutput.Modem.Generic.AccessTech[0]
 		}
 	}
-	
+
 	return modem
 }
 
 // getModemSignal gets detailed signal info
 func (h *HALHandler) getModemSignal(modemIdx string) CellularSignal {
 	signal := CellularSignal{}
-	
+
 	// Setup signal polling first
 	exec.Command("nsenter", "-t", "1", "-m", "-u", "-n", "-i",
 		"/usr/bin/mmcli", "-m", modemIdx, "--signal-setup=5").Run()
-	
+
 	// Get signal info
 	cmd := exec.Command("nsenter", "-t", "1", "-m", "-u", "-n", "-i",
 		"/usr/bin/mmcli", "-m", modemIdx, "--signal-get", "-J")
@@ -2477,7 +2477,7 @@ func (h *HALHandler) getModemSignal(modemIdx string) CellularSignal {
 			"/usr/bin/mmcli", "-m", modemIdx, "-J")
 		output, _ = cmd.Output()
 	}
-	
+
 	// Parse signal JSON
 	var sigOutput struct {
 		Modem struct {
@@ -2504,13 +2504,13 @@ func (h *HALHandler) getModemSignal(modemIdx string) CellularSignal {
 			} `json:"signal"`
 		} `json:"modem"`
 	}
-	
+
 	if err := json.Unmarshal(output, &sigOutput); err == nil {
 		signal.Quality = sigOutput.Modem.Generic.SignalQuality.Value
 		if len(sigOutput.Modem.Generic.AccessTech) > 0 {
 			signal.Technology = sigOutput.Modem.Generic.AccessTech[0]
 		}
-		
+
 		// Parse LTE signals
 		if sigOutput.Modem.Signal.LTE.RSSI != "" {
 			signal.RSSI, _ = strconv.ParseFloat(strings.TrimSuffix(sigOutput.Modem.Signal.LTE.RSSI, " dBm"), 64)
@@ -2525,7 +2525,7 @@ func (h *HALHandler) getModemSignal(modemIdx string) CellularSignal {
 			signal.SINR, _ = strconv.ParseFloat(strings.TrimSuffix(sigOutput.Modem.Signal.LTE.SNR, " dB"), 64)
 		}
 	}
-	
+
 	return signal
 }
 
@@ -2537,7 +2537,7 @@ func (h *HALHandler) getModemBearerInfo(modemIdx int, status *CellularStatus) {
 	if err != nil {
 		return
 	}
-	
+
 	var mmOutput struct {
 		Modem struct {
 			Generic struct {
@@ -2545,11 +2545,11 @@ func (h *HALHandler) getModemBearerInfo(modemIdx int, status *CellularStatus) {
 			} `json:"generic"`
 		} `json:"modem"`
 	}
-	
+
 	if err := json.Unmarshal(output, &mmOutput); err != nil || len(mmOutput.Modem.Generic.Bearers) == 0 {
 		return
 	}
-	
+
 	// Get bearer details
 	bearerPath := mmOutput.Modem.Generic.Bearers[0]
 	// Extract bearer number from path
@@ -2558,14 +2558,14 @@ func (h *HALHandler) getModemBearerInfo(modemIdx int, status *CellularStatus) {
 	if len(matches) < 2 {
 		return
 	}
-	
+
 	cmd = exec.Command("nsenter", "-t", "1", "-m", "-u", "-n", "-i",
 		"/usr/bin/mmcli", "-b", matches[1], "-J")
 	output, err = cmd.Output()
 	if err != nil {
 		return
 	}
-	
+
 	var bearerOutput struct {
 		Bearer struct {
 			Status struct {
@@ -2576,7 +2576,7 @@ func (h *HALHandler) getModemBearerInfo(modemIdx int, status *CellularStatus) {
 			} `json:"ipv4-config"`
 		} `json:"bearer"`
 	}
-	
+
 	if err := json.Unmarshal(output, &bearerOutput); err == nil {
 		status.IPAddress = bearerOutput.Bearer.IPv4Config.Address
 		status.Interface = bearerOutput.Bearer.Status.Interface
@@ -2587,10 +2587,10 @@ func (h *HALHandler) getModemBearerInfo(modemIdx int, status *CellularStatus) {
 func (h *HALHandler) checkAndroidTethering(status *CellularStatus) bool {
 	// Check for rndis_host (USB tethering) or cdc_ncm interface
 	interfaces, _ := filepath.Glob("/sys/class/net/*")
-	
+
 	for _, iface := range interfaces {
 		ifName := filepath.Base(iface)
-		
+
 		// Check driver
 		driverPath := filepath.Join(iface, "device/driver")
 		if link, err := os.Readlink(driverPath); err == nil {
@@ -2606,7 +2606,7 @@ func (h *HALHandler) checkAndroidTethering(status *CellularStatus) bool {
 					State:        "connected",
 					Manufacturer: "Android",
 				}}
-				
+
 				// Get IP address
 				cmd := exec.Command("ip", "-j", "addr", "show", ifName)
 				if output, err := cmd.Output(); err == nil {
@@ -2619,12 +2619,12 @@ func (h *HALHandler) checkAndroidTethering(status *CellularStatus) bool {
 						status.IPAddress = addrs[0].AddrInfo[0].Local
 					}
 				}
-				
+
 				return true
 			}
 		}
 	}
-	
+
 	// Check for Bluetooth PAN (bnep0)
 	if _, err := os.Stat("/sys/class/net/bnep0"); err == nil {
 		status.Available = true
@@ -2639,7 +2639,7 @@ func (h *HALHandler) checkAndroidTethering(status *CellularStatus) bool {
 		}}
 		return true
 	}
-	
+
 	return false
 }
 
@@ -2649,39 +2649,39 @@ func (h *HALHandler) checkAndroidTethering(status *CellularStatus) bool {
 
 // MeshtasticDevice represents a detected Meshtastic device
 type MeshtasticDevice struct {
-	Port       string `json:"port"`
-	VendorID   string `json:"vendor_id"`
-	ProductID  string `json:"product_id"`
-	Name       string `json:"name"`
-	Connected  bool   `json:"connected"`
+	Port      string `json:"port"`
+	VendorID  string `json:"vendor_id"`
+	ProductID string `json:"product_id"`
+	Name      string `json:"name"`
+	Connected bool   `json:"connected"`
 }
 
 // MeshtasticStatus represents Meshtastic node status
 type MeshtasticStatus struct {
-	Available    bool               `json:"available"`
-	Device       string             `json:"device,omitempty"`
-	NodeID       string             `json:"node_id,omitempty"`
-	NodeName     string             `json:"node_name,omitempty"`
-	HardwareModel string            `json:"hardware_model,omitempty"`
-	Firmware     string             `json:"firmware,omitempty"`
-	HasGPS       bool               `json:"has_gps"`
-	BatteryLevel int                `json:"battery_level,omitempty"`
-	ChannelCount int                `json:"channel_count,omitempty"`
+	Available     bool   `json:"available"`
+	Device        string `json:"device,omitempty"`
+	NodeID        string `json:"node_id,omitempty"`
+	NodeName      string `json:"node_name,omitempty"`
+	HardwareModel string `json:"hardware_model,omitempty"`
+	Firmware      string `json:"firmware,omitempty"`
+	HasGPS        bool   `json:"has_gps"`
+	BatteryLevel  int    `json:"battery_level,omitempty"`
+	ChannelCount  int    `json:"channel_count,omitempty"`
 }
 
 // MeshtasticNode represents a node in the mesh
 type MeshtasticNode struct {
-	NodeID       string  `json:"node_id"`
-	NodeName     string  `json:"node_name,omitempty"`
-	ShortName    string  `json:"short_name,omitempty"`
-	HardwareModel string `json:"hardware_model,omitempty"`
-	LastHeard    string  `json:"last_heard,omitempty"`
-	SNR          float64 `json:"snr,omitempty"`
-	RSSI         int     `json:"rssi,omitempty"`
-	Latitude     float64 `json:"latitude,omitempty"`
-	Longitude    float64 `json:"longitude,omitempty"`
-	Altitude     float64 `json:"altitude,omitempty"`
-	BatteryLevel int     `json:"battery_level,omitempty"`
+	NodeID        string  `json:"node_id"`
+	NodeName      string  `json:"node_name,omitempty"`
+	ShortName     string  `json:"short_name,omitempty"`
+	HardwareModel string  `json:"hardware_model,omitempty"`
+	LastHeard     string  `json:"last_heard,omitempty"`
+	SNR           float64 `json:"snr,omitempty"`
+	RSSI          int     `json:"rssi,omitempty"`
+	Latitude      float64 `json:"latitude,omitempty"`
+	Longitude     float64 `json:"longitude,omitempty"`
+	Altitude      float64 `json:"altitude,omitempty"`
+	BatteryLevel  int     `json:"battery_level,omitempty"`
 }
 
 // MeshtasticMessage represents a message to send
@@ -2693,11 +2693,11 @@ type MeshtasticMessage struct {
 
 // Known Meshtastic device VID:PIDs
 var meshtasticDevices = map[string]string{
-	"10c4:ea60": "CP210x (Heltec, T-Beam)",      // Silicon Labs CP210x
-	"1a86:55d4": "CH9102 (Heltec V3/V4)",        // QinHeng CH9102
-	"1a86:7523": "CH340 (Various)",               // QinHeng CH340
-	"303a:1001": "ESP32-S3 Native USB",           // Espressif ESP32-S3
-	"239a:80ab": "TTGO T-Beam S3",                // Adafruit VID for T-Beam
+	"10c4:ea60": "CP210x (Heltec, T-Beam)", // Silicon Labs CP210x
+	"1a86:55d4": "CH9102 (Heltec V3/V4)",   // QinHeng CH9102
+	"1a86:7523": "CH340 (Various)",         // QinHeng CH340
+	"303a:1001": "ESP32-S3 Native USB",     // Espressif ESP32-S3
+	"239a:80ab": "TTGO T-Beam S3",          // Adafruit VID for T-Beam
 }
 
 // GetMeshtasticDevices lists detected Meshtastic devices
@@ -2712,16 +2712,16 @@ func (h *HALHandler) GetMeshtasticDevices(w http.ResponseWriter, r *http.Request
 // GetMeshtasticStatus returns Meshtastic node status
 func (h *HALHandler) GetMeshtasticStatus(w http.ResponseWriter, r *http.Request) {
 	status := MeshtasticStatus{}
-	
+
 	devices := h.scanMeshtasticDevices()
 	if len(devices) == 0 {
 		jsonResponse(w, http.StatusOK, status)
 		return
 	}
-	
+
 	status.Available = true
 	status.Device = devices[0].Port
-	
+
 	// Try to get node info via meshtastic CLI if available
 	info := h.getMeshtasticInfo(devices[0].Port)
 	status.NodeID = info["node_id"]
@@ -2735,7 +2735,7 @@ func (h *HALHandler) GetMeshtasticStatus(w http.ResponseWriter, r *http.Request)
 	if cc, err := strconv.Atoi(info["channels"]); err == nil {
 		status.ChannelCount = cc
 	}
-	
+
 	jsonResponse(w, http.StatusOK, status)
 }
 
@@ -2748,12 +2748,12 @@ func (h *HALHandler) GetMeshtasticNodes(w http.ResponseWriter, r *http.Request) 
 			device = devices[0].Port
 		}
 	}
-	
+
 	if device == "" {
 		errorResponse(w, http.StatusNotFound, "no Meshtastic device found")
 		return
 	}
-	
+
 	nodes := h.getMeshtasticNodes(device)
 	jsonResponse(w, http.StatusOK, map[string]interface{}{
 		"nodes": nodes,
@@ -2768,12 +2768,12 @@ func (h *HALHandler) SendMeshtasticMessage(w http.ResponseWriter, r *http.Reques
 		errorResponse(w, http.StatusBadRequest, "invalid request")
 		return
 	}
-	
+
 	if msg.Text == "" {
 		errorResponse(w, http.StatusBadRequest, "text required")
 		return
 	}
-	
+
 	device := r.URL.Query().Get("device")
 	if device == "" {
 		devices := h.scanMeshtasticDevices()
@@ -2781,20 +2781,20 @@ func (h *HALHandler) SendMeshtasticMessage(w http.ResponseWriter, r *http.Reques
 			device = devices[0].Port
 		}
 	}
-	
+
 	if device == "" {
 		errorResponse(w, http.StatusNotFound, "no Meshtastic device found")
 		return
 	}
-	
+
 	// Use meshtastic CLI to send
 	args := []string{"-t", "1", "-m", "-u", "-n", "-i", "/usr/local/bin/meshtastic",
 		"--port", device, "--sendtext", msg.Text}
-	
+
 	if msg.Destination != "" && msg.Destination != "^all" {
 		args = append(args, "--dest", msg.Destination)
 	}
-	
+
 	cmd := exec.Command("nsenter", args...)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
@@ -2807,7 +2807,7 @@ func (h *HALHandler) SendMeshtasticMessage(w http.ResponseWriter, r *http.Reques
 			return
 		}
 	}
-	
+
 	successResponse(w, "message sent")
 }
 
@@ -2820,12 +2820,12 @@ func (h *HALHandler) GetMeshtasticPosition(w http.ResponseWriter, r *http.Reques
 			device = devices[0].Port
 		}
 	}
-	
+
 	if device == "" {
 		errorResponse(w, http.StatusNotFound, "no Meshtastic device found")
 		return
 	}
-	
+
 	pos := h.getMeshtasticPosition(device)
 	jsonResponse(w, http.StatusOK, pos)
 }
@@ -2833,35 +2833,35 @@ func (h *HALHandler) GetMeshtasticPosition(w http.ResponseWriter, r *http.Reques
 // scanMeshtasticDevices scans for Meshtastic devices
 func (h *HALHandler) scanMeshtasticDevices() []MeshtasticDevice {
 	var devices []MeshtasticDevice
-	
+
 	// Scan ttyUSB and ttyACM
 	patterns := []string{"/dev/ttyUSB*", "/dev/ttyACM*"}
-	
+
 	for _, pattern := range patterns {
 		matches, _ := filepath.Glob(pattern)
 		for _, port := range matches {
 			devName := filepath.Base(port)
-			
+
 			// Get VID:PID
 			vidPath := fmt.Sprintf("/sys/class/tty/%s/device/../idVendor", devName)
 			pidPath := fmt.Sprintf("/sys/class/tty/%s/device/../idProduct", devName)
-			
+
 			// Try alternate path
 			if _, err := os.Stat(vidPath); os.IsNotExist(err) {
 				vidPath = fmt.Sprintf("/sys/class/tty/%s/device/../../idVendor", devName)
 				pidPath = fmt.Sprintf("/sys/class/tty/%s/device/../../idProduct", devName)
 			}
-			
+
 			vid, err := os.ReadFile(vidPath)
 			if err != nil {
 				continue
 			}
 			pid, _ := os.ReadFile(pidPath)
-			
+
 			vidStr := strings.TrimSpace(string(vid))
 			pidStr := strings.TrimSpace(string(pid))
 			key := vidStr + ":" + pidStr
-			
+
 			if name, ok := meshtasticDevices[key]; ok {
 				devices = append(devices, MeshtasticDevice{
 					Port:      port,
@@ -2873,14 +2873,14 @@ func (h *HALHandler) scanMeshtasticDevices() []MeshtasticDevice {
 			}
 		}
 	}
-	
+
 	return devices
 }
 
 // getMeshtasticInfo gets node info via CLI
 func (h *HALHandler) getMeshtasticInfo(port string) map[string]string {
 	info := make(map[string]string)
-	
+
 	// Try meshtastic --info
 	cmd := exec.Command("nsenter", "-t", "1", "-m", "-u", "-n", "-i", "/usr/local/bin/meshtastic",
 		"--port", port, "--info")
@@ -2894,12 +2894,12 @@ func (h *HALHandler) getMeshtasticInfo(port string) map[string]string {
 			return info
 		}
 	}
-	
+
 	// Parse output
 	lines := strings.Split(string(output), "\n")
 	for _, line := range lines {
 		line = strings.TrimSpace(line)
-		
+
 		if strings.Contains(line, "Owner:") {
 			info["node_name"] = strings.TrimSpace(strings.TrimPrefix(line, "Owner:"))
 		}
@@ -2937,14 +2937,14 @@ func (h *HALHandler) getMeshtasticInfo(port string) map[string]string {
 			}
 		}
 	}
-	
+
 	return info
 }
 
 // getMeshtasticNodes gets mesh nodes via CLI
 func (h *HALHandler) getMeshtasticNodes(port string) []MeshtasticNode {
 	var nodes []MeshtasticNode
-	
+
 	cmd := exec.Command("nsenter", "-t", "1", "-m", "-u", "-n", "-i", "/usr/local/bin/meshtastic",
 		"--port", port, "--nodes")
 	output, err := cmd.Output()
@@ -2956,23 +2956,23 @@ func (h *HALHandler) getMeshtasticNodes(port string) []MeshtasticNode {
 			return nodes
 		}
 	}
-	
+
 	// Parse table output
 	lines := strings.Split(string(output), "\n")
 	for _, line := range lines {
 		line = strings.TrimSpace(line)
-		
+
 		// Look for node IDs (format: !hexstring)
 		re := regexp.MustCompile(`(!?[0-9a-fA-F]{8})`)
 		matches := re.FindStringSubmatch(line)
 		if len(matches) < 1 {
 			continue
 		}
-		
+
 		node := MeshtasticNode{
 			NodeID: matches[0],
 		}
-		
+
 		// Try to extract more fields from the line
 		fields := strings.Fields(line)
 		for i, f := range fields {
@@ -2993,10 +2993,10 @@ func (h *HALHandler) getMeshtasticNodes(port string) []MeshtasticNode {
 				}
 			}
 		}
-		
+
 		nodes = append(nodes, node)
 	}
-	
+
 	return nodes
 }
 
@@ -3005,7 +3005,7 @@ func (h *HALHandler) getMeshtasticPosition(port string) map[string]interface{} {
 	result := map[string]interface{}{
 		"valid": false,
 	}
-	
+
 	cmd := exec.Command("nsenter", "-t", "1", "-m", "-u", "-n", "-i", "/usr/local/bin/meshtastic",
 		"--port", port, "--info")
 	output, err := cmd.Output()
@@ -3017,15 +3017,15 @@ func (h *HALHandler) getMeshtasticPosition(port string) map[string]interface{} {
 			return result
 		}
 	}
-	
+
 	// Parse position from output
 	text := string(output)
-	
+
 	// Look for latitude/longitude
 	latRe := regexp.MustCompile(`[Ll]at(?:itude)?[:\s]+(-?\d+\.?\d*)`)
 	lonRe := regexp.MustCompile(`[Ll]on(?:gitude)?[:\s]+(-?\d+\.?\d*)`)
 	altRe := regexp.MustCompile(`[Aa]lt(?:itude)?[:\s]+(-?\d+\.?\d*)`)
-	
+
 	if matches := latRe.FindStringSubmatch(text); len(matches) > 1 {
 		if lat, err := strconv.ParseFloat(matches[1], 64); err == nil && lat != 0 {
 			result["latitude"] = lat
@@ -3042,11 +3042,383 @@ func (h *HALHandler) getMeshtasticPosition(port string) map[string]interface{} {
 			result["altitude"] = alt
 		}
 	}
-	
+
 	result["source"] = "meshtastic_gps"
 	result["last_updated"] = time.Now().UTC().Format(time.RFC3339)
-	
+
 	return result
+}
+
+// ============================================================================
+// Iridium SBD (RockBLOCK 9603) Support
+// ============================================================================
+
+// IridiumDevice represents a detected Iridium modem
+type IridiumDevice struct {
+	Port      string `json:"port"`
+	VendorID  string `json:"vendor_id"`
+	ProductID string `json:"product_id"`
+	Name      string `json:"name"`
+	IMEI      string `json:"imei,omitempty"`
+}
+
+// IridiumStatus represents Iridium modem status
+type IridiumStatus struct {
+	Available     bool   `json:"available"`
+	Device        string `json:"device,omitempty"`
+	IMEI          string `json:"imei,omitempty"`
+	SignalQuality int    `json:"signal_quality"` // 0-5
+	SignalBars    string `json:"signal_bars"`    // Visual representation
+	MOStatus      string `json:"mo_status"`      // Mobile Originated buffer status
+	MTStatus      string `json:"mt_status"`      // Mobile Terminated buffer status
+	MTQueued      int    `json:"mt_queued"`      // Messages waiting
+}
+
+// IridiumMessage represents a message to send/receive
+type IridiumMessage struct {
+	Text string `json:"text"`
+}
+
+// IridiumSendResult represents the result of sending a message
+type IridiumSendResult struct {
+	Success   bool   `json:"success"`
+	MOStatus  int    `json:"mo_status"`
+	MOMessage string `json:"mo_message"`
+	MTStatus  int    `json:"mt_status"`
+	MTMessage string `json:"mt_message"`
+	MTLength  int    `json:"mt_length,omitempty"`
+	MTQueued  int    `json:"mt_queued"`
+}
+
+// Known Iridium/RockBLOCK device VID:PIDs
+var iridiumDevices = map[string]string{
+	"0403:6001": "FTDI (RockBLOCK)", // FTDI FT232R - most common for RockBLOCK
+	"0403:6015": "FTDI FT231X",      // FTDI FT231X
+	"067b:2303": "Prolific PL2303",  // Some adapters
+}
+
+// GetIridiumDevices lists detected Iridium devices
+func (h *HALHandler) GetIridiumDevices(w http.ResponseWriter, r *http.Request) {
+	devices := h.scanIridiumDevices()
+	jsonResponse(w, http.StatusOK, map[string]interface{}{
+		"devices": devices,
+		"count":   len(devices),
+	})
+}
+
+// GetIridiumStatus returns Iridium modem status
+func (h *HALHandler) GetIridiumStatus(w http.ResponseWriter, r *http.Request) {
+	status := IridiumStatus{}
+
+	devices := h.scanIridiumDevices()
+	if len(devices) == 0 {
+		jsonResponse(w, http.StatusOK, status)
+		return
+	}
+
+	device := devices[0]
+	status.Available = true
+	status.Device = device.Port
+	status.IMEI = device.IMEI
+
+	// Get signal quality
+	signal := h.iridiumCommand(device.Port, "AT+CSQ")
+	if strings.Contains(signal, "+CSQ:") {
+		re := regexp.MustCompile(`\+CSQ:\s*(\d+)`)
+		if matches := re.FindStringSubmatch(signal); len(matches) > 1 {
+			if sq, err := strconv.Atoi(matches[1]); err == nil {
+				status.SignalQuality = sq
+				status.SignalBars = strings.Repeat("█", sq) + strings.Repeat("░", 5-sq)
+			}
+		}
+	}
+
+	// Get buffer status
+	status.MOStatus = "ready"
+	status.MTStatus = "empty"
+
+	jsonResponse(w, http.StatusOK, status)
+}
+
+// GetIridiumSignal returns current signal quality
+func (h *HALHandler) GetIridiumSignal(w http.ResponseWriter, r *http.Request) {
+	device := r.URL.Query().Get("device")
+	if device == "" {
+		devices := h.scanIridiumDevices()
+		if len(devices) > 0 {
+			device = devices[0].Port
+		}
+	}
+
+	if device == "" {
+		errorResponse(w, http.StatusNotFound, "no Iridium device found")
+		return
+	}
+
+	response := h.iridiumCommand(device, "AT+CSQ")
+
+	signal := map[string]interface{}{
+		"quality":      0,
+		"bars":         "░░░░░",
+		"can_transmit": false,
+		"raw":          response,
+	}
+
+	if strings.Contains(response, "+CSQ:") {
+		re := regexp.MustCompile(`\+CSQ:\s*(\d+)`)
+		if matches := re.FindStringSubmatch(response); len(matches) > 1 {
+			if sq, err := strconv.Atoi(matches[1]); err == nil {
+				signal["quality"] = sq
+				signal["bars"] = strings.Repeat("█", sq) + strings.Repeat("░", 5-sq)
+				signal["can_transmit"] = sq >= 1
+			}
+		}
+	}
+
+	jsonResponse(w, http.StatusOK, signal)
+}
+
+// SendIridiumMessage sends a message via Iridium SBD
+func (h *HALHandler) SendIridiumMessage(w http.ResponseWriter, r *http.Request) {
+	var msg IridiumMessage
+	if err := json.NewDecoder(r.Body).Decode(&msg); err != nil {
+		errorResponse(w, http.StatusBadRequest, "invalid request")
+		return
+	}
+
+	if msg.Text == "" {
+		errorResponse(w, http.StatusBadRequest, "text required")
+		return
+	}
+
+	if len(msg.Text) > 340 {
+		errorResponse(w, http.StatusBadRequest, "message too long (max 340 bytes)")
+		return
+	}
+
+	device := r.URL.Query().Get("device")
+	if device == "" {
+		devices := h.scanIridiumDevices()
+		if len(devices) > 0 {
+			device = devices[0].Port
+		}
+	}
+
+	if device == "" {
+		errorResponse(w, http.StatusNotFound, "no Iridium device found")
+		return
+	}
+
+	result := IridiumSendResult{}
+
+	// Write text to MO buffer
+	writeResp := h.iridiumCommand(device, "AT+SBDWT="+msg.Text)
+	if !strings.Contains(writeResp, "OK") {
+		errorResponse(w, http.StatusInternalServerError, "failed to write message: "+writeResp)
+		return
+	}
+
+	// Initiate SBD session
+	sbdixResp := h.iridiumCommand(device, "AT+SBDIX")
+
+	// Parse SBDIX response: +SBDIX: <MO_status>, <MOMSN>, <MT_status>, <MTMSN>, <MT_length>, <MT_queued>
+	re := regexp.MustCompile(`\+SBDIX:\s*(\d+),\s*(\d+),\s*(\d+),\s*(\d+),\s*(\d+),\s*(\d+)`)
+	if matches := re.FindStringSubmatch(sbdixResp); len(matches) > 6 {
+		result.MOStatus, _ = strconv.Atoi(matches[1])
+		result.MTStatus, _ = strconv.Atoi(matches[3])
+		result.MTLength, _ = strconv.Atoi(matches[5])
+		result.MTQueued, _ = strconv.Atoi(matches[6])
+
+		// MO status 0-4 = success
+		result.Success = result.MOStatus <= 4
+		result.MOMessage = h.moStatusMessage(result.MOStatus)
+		result.MTMessage = h.mtStatusMessage(result.MTStatus)
+	} else {
+		errorResponse(w, http.StatusInternalServerError, "failed to parse SBDIX response: "+sbdixResp)
+		return
+	}
+
+	jsonResponse(w, http.StatusOK, result)
+}
+
+// ReceiveIridiumMessage checks for and retrieves incoming messages
+func (h *HALHandler) ReceiveIridiumMessage(w http.ResponseWriter, r *http.Request) {
+	device := r.URL.Query().Get("device")
+	if device == "" {
+		devices := h.scanIridiumDevices()
+		if len(devices) > 0 {
+			device = devices[0].Port
+		}
+	}
+
+	if device == "" {
+		errorResponse(w, http.StatusNotFound, "no Iridium device found")
+		return
+	}
+
+	// Check mailbox (this also checks for incoming)
+	sbdixResp := h.iridiumCommand(device, "AT+SBDIX")
+
+	result := map[string]interface{}{
+		"has_message": false,
+	}
+
+	// Parse SBDIX response
+	re := regexp.MustCompile(`\+SBDIX:\s*(\d+),\s*(\d+),\s*(\d+),\s*(\d+),\s*(\d+),\s*(\d+)`)
+	if matches := re.FindStringSubmatch(sbdixResp); len(matches) > 6 {
+		mtStatus, _ := strconv.Atoi(matches[3])
+		mtLength, _ := strconv.Atoi(matches[5])
+		mtQueued, _ := strconv.Atoi(matches[6])
+
+		result["mt_status"] = mtStatus
+		result["mt_queued"] = mtQueued
+
+		// MT status 1 = message received
+		if mtStatus == 1 && mtLength > 0 {
+			result["has_message"] = true
+			result["message_length"] = mtLength
+
+			// Read the message
+			readResp := h.iridiumCommand(device, "AT+SBDRT")
+			if strings.Contains(readResp, "+SBDRT:") {
+				// Extract message text after +SBDRT:\r\n
+				parts := strings.SplitN(readResp, "+SBDRT:", 2)
+				if len(parts) > 1 {
+					msgText := strings.TrimSpace(parts[1])
+					// Remove trailing OK
+					msgText = strings.TrimSuffix(msgText, "OK")
+					msgText = strings.TrimSpace(msgText)
+					result["message"] = msgText
+				}
+			}
+
+			// Clear the MT buffer
+			h.iridiumCommand(device, "AT+SBDD1")
+		}
+	}
+
+	jsonResponse(w, http.StatusOK, result)
+}
+
+// scanIridiumDevices scans for Iridium modems
+func (h *HALHandler) scanIridiumDevices() []IridiumDevice {
+	var devices []IridiumDevice
+
+	// Scan ttyUSB devices
+	matches, _ := filepath.Glob("/dev/ttyUSB*")
+
+	for _, port := range matches {
+		devName := filepath.Base(port)
+
+		// Get VID:PID
+		vidPath := fmt.Sprintf("/sys/class/tty/%s/device/../idVendor", devName)
+		pidPath := fmt.Sprintf("/sys/class/tty/%s/device/../idProduct", devName)
+
+		vid, err := os.ReadFile(vidPath)
+		if err != nil {
+			continue
+		}
+		pid, _ := os.ReadFile(pidPath)
+
+		vidStr := strings.TrimSpace(string(vid))
+		pidStr := strings.TrimSpace(string(pid))
+		key := vidStr + ":" + pidStr
+
+		if name, ok := iridiumDevices[key]; ok {
+			dev := IridiumDevice{
+				Port:      port,
+				VendorID:  vidStr,
+				ProductID: pidStr,
+				Name:      name,
+			}
+
+			// Verify it's actually an Iridium modem by querying IMEI
+			imeiResp := h.iridiumCommand(port, "AT+CGSN")
+			if strings.Contains(imeiResp, "OK") {
+				// Extract 15-digit IMEI
+				re := regexp.MustCompile(`(\d{15})`)
+				if matches := re.FindStringSubmatch(imeiResp); len(matches) > 1 {
+					dev.IMEI = matches[1]
+					devices = append(devices, dev)
+				}
+			}
+		}
+	}
+
+	return devices
+}
+
+// iridiumCommand sends an AT command and reads response
+func (h *HALHandler) iridiumCommand(port string, command string) string {
+	// Configure serial port: 19200 baud, 8N1, no flow control
+	configCmd := fmt.Sprintf("stty -F %s 19200 cs8 -cstopb -parenb -crtscts raw -echo", port)
+	exec.Command("nsenter", "-t", "1", "-m", "-u", "-n", "-i", "/bin/sh", "-c", configCmd).Run()
+
+	// Send command and read response with timeout
+	// Format: command\r, wait for response ending in OK or ERROR
+	cmdStr := fmt.Sprintf("echo -ne '%s\\r' > %s; timeout 30 cat %s", command, port, port)
+	cmd := exec.Command("nsenter", "-t", "1", "-m", "-u", "-n", "-i", "/bin/sh", "-c", cmdStr)
+
+	output, err := cmd.Output()
+	if err != nil {
+		return "ERROR: " + err.Error()
+	}
+
+	// Read until we get OK or ERROR
+	response := string(output)
+
+	// Simple approach: read for a fixed time
+	readCmd := fmt.Sprintf("timeout 5 head -c 500 %s", port)
+	cmd = exec.Command("nsenter", "-t", "1", "-m", "-u", "-n", "-i", "/bin/sh", "-c", readCmd)
+	extraOutput, _ := cmd.Output()
+	response += string(extraOutput)
+
+	return strings.TrimSpace(response)
+}
+
+// moStatusMessage returns human-readable MO status
+func (h *HALHandler) moStatusMessage(status int) string {
+	messages := map[int]string{
+		0:  "MO message transferred successfully",
+		1:  "MO message transferred successfully (too big for MT)",
+		2:  "MO message transferred successfully (location not accepted)",
+		3:  "MO message transferred successfully",
+		4:  "MO message transferred successfully",
+		10: "GSS reported timeout",
+		11: "MO message queue full",
+		12: "MO message has too many segments",
+		13: "GSS reported incomplete session",
+		14: "Invalid segment size",
+		15: "Access denied",
+		16: "ISU locked",
+		17: "Gateway not responding",
+		18: "Connection lost",
+		19: "Link failure",
+		32: "No network service",
+		33: "Antenna fault",
+		34: "Radio disabled",
+		35: "ISU busy",
+		36: "Try later (30 sec)",
+		37: "SBD service temporarily disabled",
+		38: "Try later (30 sec rate limit)",
+	}
+	if msg, ok := messages[status]; ok {
+		return msg
+	}
+	return fmt.Sprintf("Unknown status %d", status)
+}
+
+// mtStatusMessage returns human-readable MT status
+func (h *HALHandler) mtStatusMessage(status int) string {
+	messages := map[int]string{
+		0: "No MT message to receive",
+		1: "MT message received",
+		2: "Error during MT message reception",
+	}
+	if msg, ok := messages[status]; ok {
+		return msg
+	}
+	return fmt.Sprintf("Unknown status %d", status)
 }
 
 // ============================================================================
@@ -3243,7 +3615,7 @@ func parseDHCPLeases() map[string]DHCPLease {
 
 	// Try Pi-hole DHCP leases first
 	leasePaths := []string{
-	 	"/cubeos/coreapps/pihole/appdata/etc-pihole/dhcp.leases", // CubeOS Pi-hole v6
+		"/cubeos/coreapps/pihole/appdata/etc-pihole/dhcp.leases", // CubeOS Pi-hole v6
 		"/etc/pihole/dhcp.leases",
 		"/var/lib/misc/dnsmasq.leases",
 		"/var/lib/dhcp/dhcpd.leases",
