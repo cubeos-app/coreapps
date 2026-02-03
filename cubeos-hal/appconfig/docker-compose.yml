@@ -85,6 +85,9 @@ services:
       # Raspberry Pi utilities (vcgencmd for throttle/temp)
       - /usr/bin/vcgencmd:/usr/bin/vcgencmd:ro
       - /opt/vc:/opt/vc:ro
+      
+      # Boot config for EEPROM/config.txt access
+      - /boot/firmware:/boot/firmware:ro
     
     devices:
       # I2C bus (UPS HAT, sensors)

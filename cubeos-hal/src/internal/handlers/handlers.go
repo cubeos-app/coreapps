@@ -671,6 +671,155 @@ func (h *HALHandler) GetCPUTemp(w http.ResponseWriter, r *http.Request) {
 	errorResponse(w, http.StatusInternalServerError, "unable to read CPU temperature")
 }
 
+// GetEEPROMInfo returns Pi bootloader EEPROM information
+func (h *HALHandler) GetEEPROMInfo(w http.ResponseWriter, r *http.Request) {
+	cmd := exec.Command("nsenter", "-t", "1", "-m", "-u", "-n", "-i", "/usr/bin/vcgencmd", "bootloader_version")
+	output, err := cmd.Output()
+	if err != nil {
+		errorResponse(w, http.StatusInternalServerError, "failed to read EEPROM: "+err.Error())
+		return
+	}
+
+	info := map[string]interface{}{
+		"raw": strings.TrimSpace(string(output)),
+	}
+
+	// Parse the output
+	lines := strings.Split(string(output), "\n")
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+
+		// First line is date: "2024/09/23 14:02:56"
+		if strings.Contains(line, "/") && strings.Contains(line, ":") && !strings.Contains(line, "=") {
+			info["date"] = line
+			continue
+		}
+
+		// Parse key=value or "key value" pairs
+		if strings.Contains(line, "=") {
+			parts := strings.SplitN(line, "=", 2)
+			if len(parts) == 2 {
+				info[strings.TrimSpace(parts[0])] = strings.TrimSpace(parts[1])
+			}
+		} else if strings.HasPrefix(line, "version ") {
+			info["version"] = strings.TrimPrefix(line, "version ")
+		} else if strings.HasPrefix(line, "timestamp ") {
+			if ts, err := strconv.ParseInt(strings.TrimPrefix(line, "timestamp "), 10, 64); err == nil {
+				info["timestamp"] = ts
+				info["timestamp_formatted"] = time.Unix(ts, 0).UTC().Format(time.RFC3339)
+			}
+		} else if strings.HasPrefix(line, "update-time ") {
+			if ts, err := strconv.ParseInt(strings.TrimPrefix(line, "update-time "), 10, 64); err == nil {
+				info["update_time"] = ts
+				info["update_time_formatted"] = time.Unix(ts, 0).UTC().Format(time.RFC3339)
+			}
+		} else if strings.HasPrefix(line, "capabilities ") {
+			info["capabilities"] = strings.TrimPrefix(line, "capabilities ")
+		}
+	}
+
+	jsonResponse(w, http.StatusOK, info)
+}
+
+// GetBootConfig returns Pi boot configuration
+func (h *HALHandler) GetBootConfig(w http.ResponseWriter, r *http.Request) {
+	result := map[string]interface{}{
+		"config":   map[string]interface{}{},
+		"overlays": []string{},
+	}
+
+	// Get active config from vcgencmd
+	cmd := exec.Command("nsenter", "-t", "1", "-m", "-u", "-n", "-i", "/usr/bin/vcgencmd", "get_config", "int")
+	if output, err := cmd.Output(); err == nil {
+		config := map[string]interface{}{}
+		lines := strings.Split(string(output), "\n")
+		for _, line := range lines {
+			line = strings.TrimSpace(line)
+			if line == "" || !strings.Contains(line, "=") {
+				continue
+			}
+			parts := strings.SplitN(line, "=", 2)
+			if len(parts) == 2 {
+				key := strings.TrimSpace(parts[0])
+				valStr := strings.TrimSpace(parts[1])
+				// Try to parse as int
+				if val, err := strconv.ParseInt(valStr, 0, 64); err == nil {
+					config[key] = val
+				} else {
+					config[key] = valStr
+				}
+			}
+		}
+		result["config"] = config
+	}
+
+	// Read config.txt for overlays and comments
+	configPaths := []string{
+		"/boot/firmware/config.txt",
+		"/boot/config.txt",
+	}
+
+	for _, path := range configPaths {
+		if data, err := os.ReadFile(path); err == nil {
+			result["config_file"] = path
+
+			// Extract dtoverlay entries
+			var overlays []string
+			lines := strings.Split(string(data), "\n")
+			for _, line := range lines {
+				line = strings.TrimSpace(line)
+				if strings.HasPrefix(line, "dtoverlay=") {
+					overlay := strings.TrimPrefix(line, "dtoverlay=")
+					overlays = append(overlays, overlay)
+				}
+			}
+			result["overlays"] = overlays
+			break
+		}
+	}
+
+	// Get some key hardware info
+	hwInfo := map[string]interface{}{}
+
+	// Total RAM
+	cmd = exec.Command("nsenter", "-t", "1", "-m", "-u", "-n", "-i", "/usr/bin/vcgencmd", "get_config", "total_mem")
+	if output, err := cmd.Output(); err == nil {
+		if parts := strings.Split(strings.TrimSpace(string(output)), "="); len(parts) == 2 {
+			if mem, err := strconv.Atoi(parts[1]); err == nil {
+				hwInfo["total_mem_mb"] = mem
+			}
+		}
+	}
+
+	// ARM frequency
+	cmd = exec.Command("nsenter", "-t", "1", "-m", "-u", "-n", "-i", "/usr/bin/vcgencmd", "get_config", "arm_freq")
+	if output, err := cmd.Output(); err == nil {
+		if parts := strings.Split(strings.TrimSpace(string(output)), "="); len(parts) == 2 {
+			if freq, err := strconv.Atoi(parts[1]); err == nil {
+				hwInfo["arm_freq_mhz"] = freq
+			}
+		}
+	}
+
+	// GPU memory
+	cmd = exec.Command("nsenter", "-t", "1", "-m", "-u", "-n", "-i", "/usr/bin/vcgencmd", "get_mem", "gpu")
+	if output, err := cmd.Output(); err == nil {
+		str := strings.TrimSpace(string(output))
+		str = strings.TrimPrefix(str, "gpu=")
+		str = strings.TrimSuffix(str, "M")
+		if mem, err := strconv.Atoi(str); err == nil {
+			hwInfo["gpu_mem_mb"] = mem
+		}
+	}
+
+	result["hardware"] = hwInfo
+
+	jsonResponse(w, http.StatusOK, result)
+}
+
 // ============================================================================
 // AP Client Operations
 // ============================================================================

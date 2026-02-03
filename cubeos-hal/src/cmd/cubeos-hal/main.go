@@ -98,6 +98,8 @@ func main() {
 		r.Get("/system/service/{name}/status", h.ServiceStatus)
 		r.Get("/system/throttle", h.GetThrottleStatus)
 		r.Get("/system/temperature", h.GetCPUTemp)
+		r.Get("/system/eeprom", h.GetEEPROMInfo)
+		r.Get("/system/bootconfig", h.GetBootConfig)
 
 		// Mount operations
 		r.Post("/mounts/smb", h.MountSMB)
