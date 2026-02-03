@@ -58,6 +58,8 @@ func main() {
 
 		// AP (Access Point) operations
 		r.Get("/network/ap/clients", h.GetAPClients)
+		r.Post("/network/ap/disconnect", h.DisconnectAPClient)
+		r.Post("/network/ap/block", h.BlockAPClient)
 
 		// Firewall operations
 		r.Get("/firewall/rules", h.GetFirewallRules)

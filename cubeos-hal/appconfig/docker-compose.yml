@@ -52,7 +52,7 @@ services:
     volumes:
       # System access
       - /sys:/sys:rw
-      - /proc:/proc:ro
+      - /proc:/proc:rw
       - /dev:/dev:rw
       
       # Network configuration

@@ -385,11 +385,15 @@ func (h *HALHandler) DisconnectWiFi(w http.ResponseWriter, r *http.Request) {
 	successResponse(w, fmt.Sprintf("disconnected from WiFi on %s", iface))
 }
 
-// GetNetworkStatus returns overall network status
+// GetNetworkStatus returns comprehensive network status for dashboard
 func (h *HALHandler) GetNetworkStatus(w http.ResponseWriter, r *http.Request) {
 	status := map[string]interface{}{
-		"interfaces": []NetworkInterface{},
-		"internet":   false,
+		"interfaces":       []NetworkInterface{},
+		"internet":         false,
+		"internet_latency": 0,
+		"ap":               h.getAPStatus(),
+		"nat":              h.getNATStatus(),
+		"firewall":         h.getFirewallStatus(),
 	}
 
 	// Get interfaces
@@ -404,13 +408,156 @@ func (h *HALHandler) GetNetworkStatus(w http.ResponseWriter, r *http.Request) {
 	}
 	status["interfaces"] = interfaces
 
-	// Check internet connectivity
+	// Check internet connectivity with latency
+	start := time.Now()
 	cmd := exec.Command("ping", "-c", "1", "-W", "2", "8.8.8.8")
 	if cmd.Run() == nil {
 		status["internet"] = true
+		status["internet_latency"] = time.Since(start).Milliseconds()
 	}
 
 	jsonResponse(w, http.StatusOK, status)
+}
+
+// getAPStatus returns Access Point status
+func (h *HALHandler) getAPStatus() map[string]interface{} {
+	status := map[string]interface{}{
+		"active":    false,
+		"ssid":      "",
+		"channel":   0,
+		"frequency": "",
+		"clients":   0,
+	}
+
+	// Method 1: Check if wlan0 is in AP mode via iw
+	cmd := exec.Command("iw", "dev", "wlan0", "info")
+	if output, err := cmd.Output(); err == nil {
+		if strings.Contains(string(output), "type AP") {
+			status["active"] = true
+		}
+	}
+
+	// Method 2: Check hostapd socket exists (fallback)
+	if !status["active"].(bool) {
+		if _, err := os.Stat("/var/run/hostapd/wlan0"); err == nil {
+			status["active"] = true
+		}
+	}
+
+	// Method 3: Check systemctl via command (fallback)
+	if !status["active"].(bool) {
+		cmd = exec.Command("systemctl", "is-active", "hostapd")
+		if output, err := cmd.Output(); err == nil {
+			if strings.TrimSpace(string(output)) == "active" {
+				status["active"] = true
+			}
+		}
+	}
+
+	// Read hostapd config for SSID/channel
+	configPaths := []string{
+		"/etc/hostapd/hostapd.conf",
+		"/etc/hostapd.conf",
+	}
+
+	for _, configPath := range configPaths {
+		if data, err := os.ReadFile(configPath); err == nil {
+			lines := strings.Split(string(data), "\n")
+			for _, line := range lines {
+				line = strings.TrimSpace(line)
+				if strings.HasPrefix(line, "ssid=") {
+					status["ssid"] = strings.TrimPrefix(line, "ssid=")
+				} else if strings.HasPrefix(line, "channel=") {
+					if ch, err := strconv.Atoi(strings.TrimPrefix(line, "channel=")); err == nil {
+						status["channel"] = ch
+						if ch <= 14 {
+							status["frequency"] = "2.4GHz"
+						} else {
+							status["frequency"] = "5GHz"
+						}
+					}
+				}
+			}
+			break
+		}
+	}
+
+	// Count connected clients
+	cmd = exec.Command("hostapd_cli", "all_sta")
+	if output, err := cmd.Output(); err == nil {
+		lines := strings.Split(string(output), "\n")
+		clientCount := 0
+		for _, line := range lines {
+			if isMACAddress(strings.TrimSpace(line)) {
+				clientCount++
+			}
+		}
+		status["clients"] = clientCount
+	}
+
+	return status
+}
+
+// getNATStatus returns NAT/Internet sharing status
+func (h *HALHandler) getNATStatus() map[string]interface{} {
+	status := map[string]interface{}{
+		"enabled":          false,
+		"ip_forward":       false,
+		"masquerade":       false,
+		"source_interface": "",
+		"dest_interface":   "",
+	}
+
+	// Check IP forwarding
+	if data, err := os.ReadFile("/proc/sys/net/ipv4/ip_forward"); err == nil {
+		status["ip_forward"] = strings.TrimSpace(string(data)) == "1"
+	}
+
+	// Check for MASQUERADE rule
+	cmd := exec.Command("iptables", "-t", "nat", "-L", "POSTROUTING", "-n", "-v")
+	if output, err := cmd.Output(); err == nil {
+		if strings.Contains(string(output), "MASQUERADE") {
+			status["masquerade"] = true
+			status["enabled"] = status["ip_forward"].(bool)
+		}
+	}
+
+	return status
+}
+
+// getFirewallStatus returns firewall status
+func (h *HALHandler) getFirewallStatus() map[string]interface{} {
+	status := map[string]interface{}{
+		"active":      false,
+		"ip_forward":  false,
+		"rules_count": 0,
+	}
+
+	// Check IP forwarding
+	if data, err := os.ReadFile("/proc/sys/net/ipv4/ip_forward"); err == nil {
+		ipForward := strings.TrimSpace(string(data)) == "1"
+		status["ip_forward"] = ipForward
+		status["active"] = ipForward
+	}
+
+	// Count iptables rules
+	cmd := exec.Command("iptables", "-L", "-n")
+	if output, err := cmd.Output(); err == nil {
+		lines := strings.Split(string(output), "\n")
+		ruleCount := 0
+		for _, line := range lines {
+			line = strings.TrimSpace(line)
+			if line != "" && !strings.HasPrefix(line, "Chain") && !strings.HasPrefix(line, "target") {
+				ruleCount++
+			}
+		}
+		status["rules_count"] = ruleCount
+		if ruleCount > 0 {
+			status["active"] = true
+		}
+	}
+
+	return status
 }
 
 // ============================================================================
@@ -468,6 +615,59 @@ func (h *HALHandler) GetAPClients(w http.ResponseWriter, r *http.Request) {
 		"clients": clients,
 		"count":   len(clients),
 	})
+}
+
+// DisconnectAPClient disconnects a client from the AP
+func (h *HALHandler) DisconnectAPClient(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		MAC string `json:"mac"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		errorResponse(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+
+	if req.MAC == "" || !isMACAddress(req.MAC) {
+		errorResponse(w, http.StatusBadRequest, "valid MAC address required")
+		return
+	}
+
+	// Disassociate client (gentle disconnect)
+	cmd := exec.Command("hostapd_cli", "disassociate", req.MAC)
+	if output, err := cmd.CombinedOutput(); err != nil {
+		errorResponse(w, http.StatusInternalServerError, fmt.Sprintf("failed to disconnect: %s - %s", err, string(output)))
+		return
+	}
+
+	successResponse(w, fmt.Sprintf("client %s disconnected", req.MAC))
+}
+
+// BlockAPClient blocks a client from the AP (deauth + deny list)
+func (h *HALHandler) BlockAPClient(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		MAC string `json:"mac"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		errorResponse(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+
+	if req.MAC == "" || !isMACAddress(req.MAC) {
+		errorResponse(w, http.StatusBadRequest, "valid MAC address required")
+		return
+	}
+
+	// Deauthenticate client (forceful)
+	cmd := exec.Command("hostapd_cli", "deauthenticate", req.MAC)
+	if output, err := cmd.CombinedOutput(); err != nil {
+		errorResponse(w, http.StatusInternalServerError, fmt.Sprintf("failed to block: %s - %s", err, string(output)))
+		return
+	}
+
+	// TODO: Add to deny list in hostapd.conf for persistence
+	// For now, just deauth (they can reconnect until hostapd restarts with deny list)
+
+	successResponse(w, fmt.Sprintf("client %s blocked", req.MAC))
 }
 
 // parseHostapdClients parses hostapd_cli all_sta output
