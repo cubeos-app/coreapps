@@ -78,6 +78,13 @@ func main() {
 		r.Post("/vpn/openvpn/up/{name}", h.OpenVPNUp)
 		r.Post("/vpn/openvpn/down/{name}", h.OpenVPNDown)
 
+		// Tor VPN
+		r.Get("/vpn/tor/status", h.GetTorStatus)
+		r.Post("/vpn/tor/start", h.StartTor)
+		r.Post("/vpn/tor/stop", h.StopTor)
+		r.Post("/vpn/tor/newcircuit", h.NewTorCircuit)
+		r.Get("/vpn/tor/config", h.GetTorConfig)
+
 		// USB operations
 		r.Get("/usb/devices", h.ListUSBDevices)
 		r.Post("/usb/mount/{device}", h.MountUSB)

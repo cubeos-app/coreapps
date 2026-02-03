@@ -1634,6 +1634,232 @@ func createZip(zipPath string, sourceDir string, zipName string) error {
 }
 
 // ============================================================================
+// Tor VPN Support
+// ============================================================================
+
+// TorStatus represents Tor service status
+type TorStatus struct {
+	Installed     bool   `json:"installed"`
+	Running       bool   `json:"running"`
+	SOCKSPort     int    `json:"socks_port"`
+	SOCKSAddress  string `json:"socks_address"`
+	ControlPort   int    `json:"control_port,omitempty"`
+	Version       string `json:"version,omitempty"`
+	CircuitStatus string `json:"circuit_status,omitempty"`
+	ExitNode      string `json:"exit_node,omitempty"`
+	ExitCountry   string `json:"exit_country,omitempty"`
+}
+
+// GetTorStatus returns Tor service status
+func (h *HALHandler) GetTorStatus(w http.ResponseWriter, r *http.Request) {
+	status := TorStatus{
+		SOCKSPort:    9050,
+		SOCKSAddress: "127.0.0.1:9050",
+		ControlPort:  9051,
+	}
+
+	// Check if Tor is installed
+	cmd := exec.Command("nsenter", "-t", "1", "-m", "-u", "-n", "-i", "/usr/bin/which", "tor")
+	if err := cmd.Run(); err == nil {
+		status.Installed = true
+	} else {
+		jsonResponse(w, http.StatusOK, status)
+		return
+	}
+
+	// Get version
+	cmd = exec.Command("nsenter", "-t", "1", "-m", "-u", "-n", "-i", "/usr/bin/tor", "--version")
+	if output, err := cmd.Output(); err == nil {
+		lines := strings.Split(string(output), "\n")
+		if len(lines) > 0 {
+			status.Version = strings.TrimSpace(lines[0])
+		}
+	}
+
+	// Check if running
+	cmd = exec.Command("nsenter", "-t", "1", "-m", "-u", "-n", "-i", "/usr/bin/systemctl", "is-active", "tor")
+	if output, err := cmd.Output(); err == nil {
+		status.Running = strings.TrimSpace(string(output)) == "active"
+	}
+
+	// If running, check SOCKS port is listening
+	if status.Running {
+		cmd = exec.Command("nsenter", "-t", "1", "-m", "-u", "-n", "-i", "/usr/bin/ss", "-tlnp")
+		if output, err := cmd.Output(); err == nil {
+			if strings.Contains(string(output), ":9050") {
+				status.SOCKSAddress = "127.0.0.1:9050"
+			}
+		}
+
+		// Try to get circuit info via control port
+		status.CircuitStatus = h.getTorCircuitStatus()
+
+		// Try to get exit node info
+		exitInfo := h.getTorExitInfo()
+		status.ExitNode = exitInfo["exit_node"]
+		status.ExitCountry = exitInfo["exit_country"]
+	}
+
+	jsonResponse(w, http.StatusOK, status)
+}
+
+// StartTor starts the Tor service
+func (h *HALHandler) StartTor(w http.ResponseWriter, r *http.Request) {
+	// Check if installed
+	cmd := exec.Command("nsenter", "-t", "1", "-m", "-u", "-n", "-i", "/usr/bin/which", "tor")
+	if err := cmd.Run(); err != nil {
+		errorResponse(w, http.StatusNotFound, "Tor is not installed")
+		return
+	}
+
+	// Start service
+	cmd = exec.Command("nsenter", "-t", "1", "-m", "-u", "-n", "-i", "/usr/bin/systemctl", "start", "tor")
+	if output, err := cmd.CombinedOutput(); err != nil {
+		errorResponse(w, http.StatusInternalServerError, "failed to start Tor: "+string(output))
+		return
+	}
+
+	// Enable on boot
+	cmd = exec.Command("nsenter", "-t", "1", "-m", "-u", "-n", "-i", "/usr/bin/systemctl", "enable", "tor")
+	cmd.Run() // Best effort
+
+	successResponse(w, "Tor started")
+}
+
+// StopTor stops the Tor service
+func (h *HALHandler) StopTor(w http.ResponseWriter, r *http.Request) {
+	cmd := exec.Command("nsenter", "-t", "1", "-m", "-u", "-n", "-i", "/usr/bin/systemctl", "stop", "tor")
+	if output, err := cmd.CombinedOutput(); err != nil {
+		errorResponse(w, http.StatusInternalServerError, "failed to stop Tor: "+string(output))
+		return
+	}
+
+	successResponse(w, "Tor stopped")
+}
+
+// NewTorCircuit requests a new Tor circuit (new identity)
+func (h *HALHandler) NewTorCircuit(w http.ResponseWriter, r *http.Request) {
+	// Send NEWNYM signal to Tor control port
+	// This requires control port to be enabled with authentication
+
+	// Try using nc to send signal
+	cmd := exec.Command("nsenter", "-t", "1", "-m", "-u", "-n", "-i", "/bin/sh", "-c",
+		`echo -e 'AUTHENTICATE ""\r\nSIGNAL NEWNYM\r\nQUIT\r\n' | nc 127.0.0.1 9051`)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		// Try alternative: send HUP signal to tor process
+		cmd = exec.Command("nsenter", "-t", "1", "-m", "-u", "-n", "-i", "/usr/bin/systemctl", "reload", "tor")
+		if output2, err2 := cmd.CombinedOutput(); err2 != nil {
+			errorResponse(w, http.StatusInternalServerError, "failed to request new circuit: "+string(output)+" / "+string(output2))
+			return
+		}
+	}
+
+	// Check if successful
+	if strings.Contains(string(output), "250 OK") || err == nil {
+		successResponse(w, "new Tor circuit requested")
+		return
+	}
+
+	errorResponse(w, http.StatusInternalServerError, "failed to request new circuit: "+string(output))
+}
+
+// GetTorConfig returns Tor configuration
+func (h *HALHandler) GetTorConfig(w http.ResponseWriter, r *http.Request) {
+	config := map[string]interface{}{
+		"config_file": "/etc/tor/torrc",
+		"data_dir":    "/var/lib/tor",
+	}
+
+	// Read torrc (sanitized)
+	if data, err := os.ReadFile("/etc/tor/torrc"); err == nil {
+		// Remove sensitive lines
+		lines := strings.Split(string(data), "\n")
+		var safeLines []string
+		for _, line := range lines {
+			lower := strings.ToLower(line)
+			// Skip password/auth lines
+			if strings.Contains(lower, "password") || strings.Contains(lower, "cookie") {
+				continue
+			}
+			safeLines = append(safeLines, line)
+		}
+		config["torrc"] = safeLines
+	}
+
+	// Get key settings
+	settings := map[string]string{}
+	if data, err := os.ReadFile("/etc/tor/torrc"); err == nil {
+		for _, line := range strings.Split(string(data), "\n") {
+			line = strings.TrimSpace(line)
+			if line == "" || strings.HasPrefix(line, "#") {
+				continue
+			}
+			parts := strings.SplitN(line, " ", 2)
+			if len(parts) == 2 {
+				key := strings.TrimSpace(parts[0])
+				val := strings.TrimSpace(parts[1])
+				// Only include safe settings
+				switch key {
+				case "SOCKSPort", "ControlPort", "Log", "DataDirectory", "ExitNodes", "EntryNodes", "ExcludeNodes":
+					settings[key] = val
+				}
+			}
+		}
+	}
+	config["settings"] = settings
+
+	jsonResponse(w, http.StatusOK, config)
+}
+
+// getTorCircuitStatus gets circuit status from control port
+func (h *HALHandler) getTorCircuitStatus() string {
+	cmd := exec.Command("nsenter", "-t", "1", "-m", "-u", "-n", "-i", "/bin/sh", "-c",
+		`echo -e 'AUTHENTICATE ""\r\nGETINFO status/circuit-established\r\nQUIT\r\n' | nc -q 1 127.0.0.1 9051 2>/dev/null`)
+	output, err := cmd.Output()
+	if err != nil {
+		return "unknown"
+	}
+
+	if strings.Contains(string(output), "circuit-established=1") {
+		return "established"
+	} else if strings.Contains(string(output), "circuit-established=0") {
+		return "connecting"
+	}
+
+	return "unknown"
+}
+
+// getTorExitInfo gets exit node information
+func (h *HALHandler) getTorExitInfo() map[string]string {
+	info := map[string]string{
+		"exit_node":    "",
+		"exit_country": "",
+	}
+
+	// Try to get IP via Tor SOCKS proxy
+	cmd := exec.Command("nsenter", "-t", "1", "-m", "-u", "-n", "-i", "/bin/sh", "-c",
+		`curl -s --socks5 127.0.0.1:9050 --connect-timeout 5 https://check.torproject.org/api/ip 2>/dev/null`)
+	output, err := cmd.Output()
+	if err != nil {
+		return info
+	}
+
+	// Parse JSON response: {"IsTor":true,"IP":"xxx.xxx.xxx.xxx"}
+	var torCheck struct {
+		IsTor bool   `json:"IsTor"`
+		IP    string `json:"IP"`
+	}
+	if err := json.Unmarshal(output, &torCheck); err == nil {
+		if torCheck.IsTor {
+			info["exit_node"] = torCheck.IP
+		}
+	}
+
+	return info
+}
+
+// ============================================================================
 // AP Client Operations
 // ============================================================================
 
