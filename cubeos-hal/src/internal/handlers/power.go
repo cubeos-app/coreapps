@@ -48,17 +48,18 @@ const (
 
 // BatteryStatus represents current battery state
 type BatteryStatus struct {
-	Available       bool    `json:"available"`
-	Voltage         float64 `json:"voltage"`          // Volts
-	VoltageRaw      uint16  `json:"voltage_raw"`      // Raw register value
-	Percentage      float64 `json:"percentage"`       // 0-100
-	PercentageRaw   uint16  `json:"percentage_raw"`   // Raw register value
-	IsCharging      bool    `json:"is_charging"`      // Inferred from voltage trend
-	ChargingEnabled bool    `json:"charging_enabled"` // GPIO16 state
-	ACPresent       bool    `json:"ac_present"`       // GPIO6 state
-	IsLow           bool    `json:"is_low"`           // Below warning threshold
-	IsCritical      bool    `json:"is_critical"`      // Below critical threshold
-	LastUpdated     string  `json:"last_updated"`
+	Available           bool    `json:"available"`
+	Voltage             float64 `json:"voltage"`               // Volts
+	VoltageRaw          uint16  `json:"voltage_raw"`           // Raw register value
+	Percentage          float64 `json:"percentage"`            // 0-100 (from fuel gauge)
+	PercentageEstimated float64 `json:"percentage_estimated"`  // 0-100 (from voltage lookup, more reliable)
+	PercentageRaw       uint16  `json:"percentage_raw"`        // Raw register value
+	IsCharging          bool    `json:"is_charging"`           // Inferred from voltage trend
+	ChargingEnabled     bool    `json:"charging_enabled"`      // GPIO16 state
+	ACPresent           bool    `json:"ac_present"`            // GPIO6 state
+	IsLow               bool    `json:"is_low"`                // Below warning threshold
+	IsCritical          bool    `json:"is_critical"`           // Below critical threshold
+	LastUpdated         string  `json:"last_updated"`
 }
 
 // UPSInfo contains UPS hardware information
@@ -382,6 +383,9 @@ func (h *HALHandler) getBatteryStatus() BatteryStatus {
 	// MAX17040: 12-bit value, upper 12 bits, 1.25mV per bit
 	status.Voltage = float64(voltageRaw>>4) * 0.00125
 
+	// Calculate voltage-based SOC estimate (more reliable without calibration)
+	status.PercentageEstimated = estimateSOCFromVoltage(status.Voltage)
+
 	// Read SOC (register 0x04)
 	socRaw, err := bus.ReadWord(MAX17040Address, MAX17040RegSOC)
 	if err == nil {
@@ -419,6 +423,33 @@ func (h *HALHandler) getBatteryStatus() BatteryStatus {
 	powerMonitorMu.Unlock()
 
 	return status
+}
+
+// estimateSOCFromVoltage calculates battery percentage from voltage
+// This is more reliable than the fuel gauge without calibration
+// Li-ion discharge curve for single cell (nominal 3.7V, 4.2V max)
+func estimateSOCFromVoltage(voltage float64) float64 {
+	switch {
+	case voltage >= 4.20:
+		return 100.0
+	case voltage >= 4.00:
+		// 80-100% range
+		return 80.0 + (voltage-4.00)*100.0
+	case voltage >= 3.85:
+		// 65-80% range
+		return 65.0 + (voltage-3.85)*100.0
+	case voltage >= 3.70:
+		// 40-65% range
+		return 40.0 + (voltage-3.70)*166.67
+	case voltage >= 3.50:
+		// 15-40% range
+		return 15.0 + (voltage-3.50)*125.0
+	case voltage >= 3.30:
+		// 0-15% range
+		return (voltage - 3.30) * 75.0
+	default:
+		return 0.0
+	}
 }
 
 func (h *HALHandler) getUPSInfo() UPSInfo {
