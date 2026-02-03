@@ -96,6 +96,8 @@ func main() {
 		r.Post("/system/service/{name}/start", h.StartService)
 		r.Post("/system/service/{name}/stop", h.StopService)
 		r.Get("/system/service/{name}/status", h.ServiceStatus)
+		r.Get("/system/throttle", h.GetThrottleStatus)
+		r.Get("/system/temperature", h.GetCPUTemp)
 
 		// Mount operations
 		r.Post("/mounts/smb", h.MountSMB)

@@ -59,9 +59,9 @@ services:
       - /etc/hostapd:/etc/hostapd
       - /etc/wpa_supplicant:/etc/wpa_supplicant
       - /var/run/wpa_supplicant:/var/run/wpa_supplicant
-
-      # Hostapd control socket (for hostapd_cli)
-      - /var/run/hostapd:/var/run/hostapd
+      
+      # Hostapd control socket (for hostapd_cli disconnect/block)
+      - /run/hostapd:/var/run/hostapd
       
       # VPN configurations
       - /cubeos/config/vpn:/cubeos/config/vpn
@@ -78,10 +78,14 @@ services:
       
       # Bluetooth
       - /var/lib/bluetooth:/var/lib/bluetooth:rw
-
-      # Pi-hole DHCP leases (for AP client hostnames)
+      
+      # DHCP leases (Pi-hole v6)
       - /cubeos/coreapps/pihole/appdata/etc-pihole/dhcp.leases:/cubeos/coreapps/pihole/appdata/etc-pihole/dhcp.leases:ro
-
+      
+      # Raspberry Pi utilities (vcgencmd for throttle/temp)
+      - /usr/bin/vcgencmd:/usr/bin/vcgencmd:ro
+      - /opt/vc:/opt/vc:ro
+    
     devices:
       # I2C bus (UPS HAT, sensors)
       - /dev/i2c-1:/dev/i2c-1
@@ -93,6 +97,8 @@ services:
       - /dev/watchdog:/dev/watchdog
       # RTC
       - /dev/rtc0:/dev/rtc0
+      # VideoCore (for vcgencmd)
+      - /dev/vchiq:/dev/vchiq
     
     healthcheck:
       test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:6005/health"]

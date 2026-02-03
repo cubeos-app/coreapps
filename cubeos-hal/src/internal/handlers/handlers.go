@@ -594,6 +594,77 @@ func (h *HALHandler) getFirewallStatus() map[string]interface{} {
 }
 
 // ============================================================================
+// System Throttling/Temperature
+// ============================================================================
+
+// GetThrottleStatus returns Pi CPU/GPU throttling status
+func (h *HALHandler) GetThrottleStatus(w http.ResponseWriter, r *http.Request) {
+	cmd := exec.Command("vcgencmd", "get_throttled")
+	output, err := cmd.Output()
+	if err != nil {
+		errorResponse(w, http.StatusInternalServerError, "vcgencmd failed: "+err.Error())
+		return
+	}
+
+	// Parse "throttled=0x0" format
+	parts := strings.Split(strings.TrimSpace(string(output)), "=")
+	if len(parts) != 2 {
+		errorResponse(w, http.StatusInternalServerError, "unexpected vcgencmd output")
+		return
+	}
+
+	val, _ := strconv.ParseInt(strings.TrimPrefix(parts[1], "0x"), 16, 64)
+
+	status := map[string]interface{}{
+		"raw":                       parts[1],
+		"under_voltage":             val&0x1 != 0,
+		"freq_capped":               val&0x2 != 0,
+		"throttled":                 val&0x4 != 0,
+		"soft_temp_limit":           val&0x8 != 0,
+		"under_voltage_occurred":    val&0x10000 != 0,
+		"freq_capped_occurred":      val&0x20000 != 0,
+		"throttled_occurred":        val&0x40000 != 0,
+		"soft_temp_limit_occurred":  val&0x80000 != 0,
+	}
+
+	jsonResponse(w, http.StatusOK, status)
+}
+
+// GetCPUTemp returns CPU temperature
+func (h *HALHandler) GetCPUTemp(w http.ResponseWriter, r *http.Request) {
+	// Try vcgencmd first (Pi specific)
+	cmd := exec.Command("vcgencmd", "measure_temp")
+	if output, err := cmd.Output(); err == nil {
+		// Parse "temp=45.0'C" format
+		str := strings.TrimSpace(string(output))
+		str = strings.TrimPrefix(str, "temp=")
+		str = strings.TrimSuffix(str, "'C")
+		if temp, err := strconv.ParseFloat(str, 64); err == nil {
+			jsonResponse(w, http.StatusOK, map[string]interface{}{
+				"temperature": temp,
+				"unit":        "celsius",
+				"source":      "vcgencmd",
+			})
+			return
+		}
+	}
+
+	// Fallback to thermal zone
+	if data, err := os.ReadFile("/sys/class/thermal/thermal_zone0/temp"); err == nil {
+		if milliC, err := strconv.ParseInt(strings.TrimSpace(string(data)), 10, 64); err == nil {
+			jsonResponse(w, http.StatusOK, map[string]interface{}{
+				"temperature": float64(milliC) / 1000.0,
+				"unit":        "celsius",
+				"source":      "thermal_zone",
+			})
+			return
+		}
+	}
+
+	errorResponse(w, http.StatusInternalServerError, "unable to read CPU temperature")
+}
+
+// ============================================================================
 // AP Client Operations
 // ============================================================================
 
