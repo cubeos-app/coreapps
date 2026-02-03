@@ -101,6 +101,12 @@ func main() {
 		r.Get("/system/eeprom", h.GetEEPROMInfo)
 		r.Get("/system/bootconfig", h.GetBootConfig)
 
+		// Storage operations
+		r.Get("/storage/devices", h.GetStorageDevices)
+		r.Get("/storage/device/{device}", h.GetStorageDevice)
+		r.Get("/storage/smart/{device}", h.GetSmartInfo)
+		r.Get("/storage/usage", h.GetStorageUsage)
+
 		// Mount operations
 		r.Post("/mounts/smb", h.MountSMB)
 		r.Post("/mounts/nfs", h.MountNFS)

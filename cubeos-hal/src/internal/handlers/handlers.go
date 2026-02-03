@@ -821,6 +821,361 @@ func (h *HALHandler) GetBootConfig(w http.ResponseWriter, r *http.Request) {
 }
 
 // ============================================================================
+// Storage Operations
+// ============================================================================
+
+// StorageDevice represents a storage device
+type StorageDevice struct {
+	Name       string            `json:"name"`
+	Path       string            `json:"path"`
+	Size       int64             `json:"size"`        // bytes
+	SizeHuman  string            `json:"size_human"`  // "128GB"
+	Type       string            `json:"type"`        // disk, part, rom
+	Model      string            `json:"model,omitempty"`
+	Serial     string            `json:"serial,omitempty"`
+	Transport  string            `json:"transport,omitempty"` // usb, nvme, sata, mmc
+	Filesystem string            `json:"filesystem,omitempty"`
+	Mountpoint string            `json:"mountpoint,omitempty"`
+	Children   []StorageDevice   `json:"children,omitempty"`
+	Smart      *SmartInfo        `json:"smart,omitempty"`
+}
+
+// SmartInfo contains SMART health data
+type SmartInfo struct {
+	Available       bool    `json:"available"`
+	Healthy         bool    `json:"healthy"`
+	Temperature     int     `json:"temperature,omitempty"`      // Celsius
+	PowerOnHours    int     `json:"power_on_hours,omitempty"`
+	PowerCycles     int     `json:"power_cycles,omitempty"`
+	MediaErrors     int     `json:"media_errors,omitempty"`
+	PercentUsed     int     `json:"percent_used,omitempty"`     // NVMe wear
+	SpareAvailable  int     `json:"spare_available,omitempty"`  // NVMe spare %
+	RawData         string  `json:"raw_data,omitempty"`
+}
+
+// GetStorageDevices returns all storage devices
+func (h *HALHandler) GetStorageDevices(w http.ResponseWriter, r *http.Request) {
+	cmd := exec.Command("nsenter", "-t", "1", "-m", "-u", "-n", "-i", "/usr/bin/lsblk", "-J", "-b", "-o", "NAME,SIZE,TYPE,MOUNTPOINT,FSTYPE,MODEL,SERIAL,TRAN")
+	output, err := cmd.Output()
+	if err != nil {
+		errorResponse(w, http.StatusInternalServerError, "lsblk failed: "+err.Error())
+		return
+	}
+
+	var lsblkOutput struct {
+		Blockdevices []struct {
+			Name       string `json:"name"`
+			Size       int64  `json:"size"`
+			Type       string `json:"type"`
+			Mountpoint string `json:"mountpoint"`
+			Fstype     string `json:"fstype"`
+			Model      string `json:"model"`
+			Serial     string `json:"serial"`
+			Tran       string `json:"tran"`
+			Children   []struct {
+				Name       string `json:"name"`
+				Size       int64  `json:"size"`
+				Type       string `json:"type"`
+				Mountpoint string `json:"mountpoint"`
+				Fstype     string `json:"fstype"`
+			} `json:"children"`
+		} `json:"blockdevices"`
+	}
+
+	if err := json.Unmarshal(output, &lsblkOutput); err != nil {
+		errorResponse(w, http.StatusInternalServerError, "failed to parse lsblk: "+err.Error())
+		return
+	}
+
+	var devices []StorageDevice
+	for _, bd := range lsblkOutput.Blockdevices {
+		// Skip loop devices and ram disks
+		if strings.HasPrefix(bd.Name, "loop") || strings.HasPrefix(bd.Name, "ram") {
+			continue
+		}
+
+		dev := StorageDevice{
+			Name:       bd.Name,
+			Path:       "/dev/" + bd.Name,
+			Size:       bd.Size,
+			SizeHuman:  formatBytes(bd.Size),
+			Type:       bd.Type,
+			Model:      strings.TrimSpace(bd.Model),
+			Serial:     strings.TrimSpace(bd.Serial),
+			Transport:  bd.Tran,
+			Filesystem: bd.Fstype,
+			Mountpoint: bd.Mountpoint,
+		}
+
+		// Add children (partitions)
+		for _, child := range bd.Children {
+			dev.Children = append(dev.Children, StorageDevice{
+				Name:       child.Name,
+				Path:       "/dev/" + child.Name,
+				Size:       child.Size,
+				SizeHuman:  formatBytes(child.Size),
+				Type:       child.Type,
+				Filesystem: child.Fstype,
+				Mountpoint: child.Mountpoint,
+			})
+		}
+
+		devices = append(devices, dev)
+	}
+
+	jsonResponse(w, http.StatusOK, map[string]interface{}{
+		"devices": devices,
+		"count":   len(devices),
+	})
+}
+
+// GetStorageDevice returns details for a specific device
+func (h *HALHandler) GetStorageDevice(w http.ResponseWriter, r *http.Request) {
+	device := chi.URLParam(r, "device")
+	if device == "" {
+		errorResponse(w, http.StatusBadRequest, "device name required")
+		return
+	}
+
+	// Sanitize device name
+	device = strings.TrimPrefix(device, "/dev/")
+	devPath := "/dev/" + device
+
+	// Check device exists
+	if _, err := os.Stat(devPath); os.IsNotExist(err) {
+		errorResponse(w, http.StatusNotFound, "device not found: "+device)
+		return
+	}
+
+	cmd := exec.Command("nsenter", "-t", "1", "-m", "-u", "-n", "-i", "/usr/bin/lsblk", "-J", "-b", "-o", "NAME,SIZE,TYPE,MOUNTPOINT,FSTYPE,MODEL,SERIAL,TRAN,ROTA,RO", devPath)
+	output, err := cmd.Output()
+	if err != nil {
+		errorResponse(w, http.StatusInternalServerError, "lsblk failed: "+err.Error())
+		return
+	}
+
+	var lsblkOutput struct {
+		Blockdevices []struct {
+			Name       string `json:"name"`
+			Size       int64  `json:"size"`
+			Type       string `json:"type"`
+			Mountpoint string `json:"mountpoint"`
+			Fstype     string `json:"fstype"`
+			Model      string `json:"model"`
+			Serial     string `json:"serial"`
+			Tran       string `json:"tran"`
+			Rota       bool   `json:"rota"`
+			Ro         bool   `json:"ro"`
+			Children   []struct {
+				Name       string `json:"name"`
+				Size       int64  `json:"size"`
+				Type       string `json:"type"`
+				Mountpoint string `json:"mountpoint"`
+				Fstype     string `json:"fstype"`
+			} `json:"children"`
+		} `json:"blockdevices"`
+	}
+
+	if err := json.Unmarshal(output, &lsblkOutput); err != nil || len(lsblkOutput.Blockdevices) == 0 {
+		errorResponse(w, http.StatusInternalServerError, "failed to parse device info")
+		return
+	}
+
+	bd := lsblkOutput.Blockdevices[0]
+	dev := map[string]interface{}{
+		"name":       bd.Name,
+		"path":       devPath,
+		"size":       bd.Size,
+		"size_human": formatBytes(bd.Size),
+		"type":       bd.Type,
+		"model":      strings.TrimSpace(bd.Model),
+		"serial":     strings.TrimSpace(bd.Serial),
+		"transport":  bd.Tran,
+		"filesystem": bd.Fstype,
+		"mountpoint": bd.Mountpoint,
+		"rotational": bd.Rota,
+		"read_only":  bd.Ro,
+	}
+
+	// Add partitions
+	var children []map[string]interface{}
+	for _, child := range bd.Children {
+		children = append(children, map[string]interface{}{
+			"name":       child.Name,
+			"path":       "/dev/" + child.Name,
+			"size":       child.Size,
+			"size_human": formatBytes(child.Size),
+			"type":       child.Type,
+			"filesystem": child.Fstype,
+			"mountpoint": child.Mountpoint,
+		})
+	}
+	if len(children) > 0 {
+		dev["partitions"] = children
+	}
+
+	// Try to get SMART info
+	smart := h.getSmartInfo(devPath)
+	if smart.Available {
+		dev["smart"] = smart
+	}
+
+	jsonResponse(w, http.StatusOK, dev)
+}
+
+// GetSmartInfo returns SMART data for a device
+func (h *HALHandler) GetSmartInfo(w http.ResponseWriter, r *http.Request) {
+	device := chi.URLParam(r, "device")
+	if device == "" {
+		errorResponse(w, http.StatusBadRequest, "device name required")
+		return
+	}
+
+	device = strings.TrimPrefix(device, "/dev/")
+	devPath := "/dev/" + device
+
+	smart := h.getSmartInfo(devPath)
+	if !smart.Available {
+		errorResponse(w, http.StatusNotFound, "SMART not available for this device")
+		return
+	}
+
+	jsonResponse(w, http.StatusOK, smart)
+}
+
+// GetStorageUsage returns filesystem usage information
+func (h *HALHandler) GetStorageUsage(w http.ResponseWriter, r *http.Request) {
+	cmd := exec.Command("nsenter", "-t", "1", "-m", "-u", "-n", "-i", "/usr/bin/df", "-B1", "--output=source,fstype,size,used,avail,pcent,target")
+	output, err := cmd.Output()
+	if err != nil {
+		errorResponse(w, http.StatusInternalServerError, "df failed: "+err.Error())
+		return
+	}
+
+	var filesystems []map[string]interface{}
+	lines := strings.Split(string(output), "\n")
+	for i, line := range lines {
+		if i == 0 || strings.TrimSpace(line) == "" {
+			continue // Skip header
+		}
+
+		fields := strings.Fields(line)
+		if len(fields) < 7 {
+			continue
+		}
+
+		// Skip pseudo filesystems
+		source := fields[0]
+		if !strings.HasPrefix(source, "/dev/") {
+			continue
+		}
+
+		size, _ := strconv.ParseInt(fields[2], 10, 64)
+		used, _ := strconv.ParseInt(fields[3], 10, 64)
+		avail, _ := strconv.ParseInt(fields[4], 10, 64)
+		pctStr := strings.TrimSuffix(fields[5], "%")
+		pct, _ := strconv.Atoi(pctStr)
+
+		filesystems = append(filesystems, map[string]interface{}{
+			"device":       source,
+			"filesystem":   fields[1],
+			"size":         size,
+			"size_human":   formatBytes(size),
+			"used":         used,
+			"used_human":   formatBytes(used),
+			"available":    avail,
+			"avail_human":  formatBytes(avail),
+			"percent_used": pct,
+			"mountpoint":   fields[6],
+		})
+	}
+
+	jsonResponse(w, http.StatusOK, map[string]interface{}{
+		"filesystems": filesystems,
+		"count":       len(filesystems),
+	})
+}
+
+// getSmartInfo retrieves SMART data for a device
+func (h *HALHandler) getSmartInfo(devPath string) SmartInfo {
+	info := SmartInfo{}
+
+	// Try smartctl via nsenter (runs on host)
+	cmd := exec.Command("nsenter", "-t", "1", "-m", "-u", "-n", "-i", "/usr/sbin/smartctl", "-a", "-j", devPath)
+	output, err := cmd.Output()
+	if err != nil {
+		// smartctl returns non-zero for various reasons, try to parse anyway
+		if output == nil || len(output) == 0 {
+			return info
+		}
+	}
+
+	var smartData struct {
+		SmartStatus struct {
+			Passed bool `json:"passed"`
+		} `json:"smart_status"`
+		Temperature struct {
+			Current int `json:"current"`
+		} `json:"temperature"`
+		PowerOnTime struct {
+			Hours int `json:"hours"`
+		} `json:"power_on_time"`
+		PowerCycleCount int `json:"power_cycle_count"`
+		NvmeSmartHealthInformationLog struct {
+			Temperature         int `json:"temperature"`
+			AvailableSpare      int `json:"available_spare"`
+			PercentageUsed      int `json:"percentage_used"`
+			PowerOnHours        int `json:"power_on_hours"`
+			PowerCycles         int `json:"power_cycles"`
+			MediaErrors         int `json:"media_errors"`
+		} `json:"nvme_smart_health_information_log"`
+	}
+
+	if err := json.Unmarshal(output, &smartData); err != nil {
+		// Try non-JSON output
+		info.RawData = string(output)
+		if strings.Contains(string(output), "SMART") {
+			info.Available = true
+		}
+		return info
+	}
+
+	info.Available = true
+	info.Healthy = smartData.SmartStatus.Passed
+
+	// NVMe specific
+	if smartData.NvmeSmartHealthInformationLog.Temperature > 0 {
+		info.Temperature = smartData.NvmeSmartHealthInformationLog.Temperature
+		info.PowerOnHours = smartData.NvmeSmartHealthInformationLog.PowerOnHours
+		info.PowerCycles = smartData.NvmeSmartHealthInformationLog.PowerCycles
+		info.MediaErrors = smartData.NvmeSmartHealthInformationLog.MediaErrors
+		info.PercentUsed = smartData.NvmeSmartHealthInformationLog.PercentageUsed
+		info.SpareAvailable = smartData.NvmeSmartHealthInformationLog.AvailableSpare
+	} else {
+		// Regular SATA/SAS
+		info.Temperature = smartData.Temperature.Current
+		info.PowerOnHours = smartData.PowerOnTime.Hours
+		info.PowerCycles = smartData.PowerCycleCount
+	}
+
+	return info
+}
+
+// formatBytes converts bytes to human-readable format
+func formatBytes(bytes int64) string {
+	const unit = 1024
+	if bytes < unit {
+		return fmt.Sprintf("%d B", bytes)
+	}
+	div, exp := int64(unit), 0
+	for n := bytes / unit; n >= unit; n /= unit {
+		div *= unit
+		exp++
+	}
+	return fmt.Sprintf("%.1f %cB", float64(bytes)/float64(div), "KMGTPE"[exp])
+}
+
+// ============================================================================
 // AP Client Operations
 // ============================================================================
 
