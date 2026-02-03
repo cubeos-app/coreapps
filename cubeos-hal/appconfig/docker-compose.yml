@@ -75,7 +75,10 @@ services:
       
       # Bluetooth
       - /var/lib/bluetooth:/var/lib/bluetooth:rw
-    
+
+      # Pi-hole DHCP leases (for AP client hostnames)
+      - /cubeos/coreapps/pihole/appdata/etc-pihole/dhcp.leases:/cubeos/coreapps/pihole/appdata/etc-pihole/dhcp.leases:ro
+
     devices:
       # I2C bus (UPS HAT, sensors)
       - /dev/i2c-1:/dev/i2c-1

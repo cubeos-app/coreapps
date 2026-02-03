@@ -554,6 +554,7 @@ func parseDHCPLeases() map[string]DHCPLease {
 
 	// Try Pi-hole DHCP leases first
 	leasePaths := []string{
+	 	"/cubeos/coreapps/pihole/appdata/etc-pihole/dhcp.leases", // CubeOS Pi-hole v6
 		"/etc/pihole/dhcp.leases",
 		"/var/lib/misc/dnsmasq.leases",
 		"/var/lib/dhcp/dhcpd.leases",
