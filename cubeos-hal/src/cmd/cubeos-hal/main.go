@@ -85,6 +85,11 @@ func main() {
 		r.Post("/vpn/tor/newcircuit", h.NewTorCircuit)
 		r.Get("/vpn/tor/config", h.GetTorConfig)
 
+		// GPS (NMEA over USB serial)
+		r.Get("/gps/devices", h.GetGPSDevices)
+		r.Get("/gps/status", h.GetGPSStatus)
+		r.Get("/gps/position", h.GetGPSPosition)
+
 		// USB operations
 		r.Get("/usb/devices", h.ListUSBDevices)
 		r.Post("/usb/mount/{device}", h.MountUSB)

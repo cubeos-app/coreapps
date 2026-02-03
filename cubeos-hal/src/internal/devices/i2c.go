@@ -198,11 +198,11 @@ type GPIOChip struct {
 
 // GPIO ioctl structures and constants
 const (
-	GPIO_GET_LINEHANDLE_IOCTL = 0xC16CB403
-	GPIO_GET_LINEEVENT_IOCTL  = 0xC030B404
+	GPIO_GET_LINEHANDLE_IOCTL        = 0xC16CB403
+	GPIO_GET_LINEEVENT_IOCTL         = 0xC030B404
 	GPIOHANDLE_SET_LINE_VALUES_IOCTL = 0xC040B409
 	GPIOHANDLE_GET_LINE_VALUES_IOCTL = 0xC040B408
-	
+
 	GPIOHANDLE_REQUEST_INPUT  = 1 << 0
 	GPIOHANDLE_REQUEST_OUTPUT = 1 << 1
 )
@@ -253,17 +253,17 @@ func (g *GPIOChip) RequestLine(offset uint32, output bool, defaultValue uint8, c
 		lines: 1,
 	}
 	req.lineOffsets[0] = offset
-	
+
 	if output {
 		req.flags = GPIOHANDLE_REQUEST_OUTPUT
 		req.defaultValues[0] = defaultValue
 	} else {
 		req.flags = GPIOHANDLE_REQUEST_INPUT
 	}
-	
+
 	// Copy consumer label
 	copy(req.consumerLabel[:], consumer)
-	
+
 	_, _, errno := syscall.Syscall(
 		syscall.SYS_IOCTL,
 		g.file.Fd(),
@@ -273,7 +273,7 @@ func (g *GPIOChip) RequestLine(offset uint32, output bool, defaultValue uint8, c
 	if errno != 0 {
 		return nil, fmt.Errorf("failed to request GPIO line %d: %v", offset, errno)
 	}
-	
+
 	return &GPIOLine{
 		fd:     int(req.fd),
 		offset: offset,
@@ -284,7 +284,7 @@ func (g *GPIOChip) RequestLine(offset uint32, output bool, defaultValue uint8, c
 // GetValue reads the current value of the GPIO line
 func (l *GPIOLine) GetValue() (uint8, error) {
 	data := gpioHandleData{}
-	
+
 	_, _, errno := syscall.Syscall(
 		syscall.SYS_IOCTL,
 		uintptr(l.fd),
@@ -294,7 +294,7 @@ func (l *GPIOLine) GetValue() (uint8, error) {
 	if errno != 0 {
 		return 0, fmt.Errorf("failed to get GPIO value: %v", errno)
 	}
-	
+
 	return data.values[0], nil
 }
 
@@ -303,10 +303,10 @@ func (l *GPIOLine) SetValue(value uint8) error {
 	if !l.output {
 		return fmt.Errorf("cannot set value on input line")
 	}
-	
+
 	data := gpioHandleData{}
 	data.values[0] = value
-	
+
 	_, _, errno := syscall.Syscall(
 		syscall.SYS_IOCTL,
 		uintptr(l.fd),
@@ -316,7 +316,7 @@ func (l *GPIOLine) SetValue(value uint8) error {
 	if errno != 0 {
 		return fmt.Errorf("failed to set GPIO value: %v", errno)
 	}
-	
+
 	return nil
 }
 

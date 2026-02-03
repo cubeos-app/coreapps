@@ -625,15 +625,15 @@ func (h *HALHandler) GetThrottleStatus(w http.ResponseWriter, r *http.Request) {
 	val, _ := strconv.ParseInt(strings.TrimPrefix(parts[1], "0x"), 16, 64)
 
 	status := map[string]interface{}{
-		"raw":                       parts[1],
-		"under_voltage":             val&0x1 != 0,
-		"freq_capped":               val&0x2 != 0,
-		"throttled":                 val&0x4 != 0,
-		"soft_temp_limit":           val&0x8 != 0,
-		"under_voltage_occurred":    val&0x10000 != 0,
-		"freq_capped_occurred":      val&0x20000 != 0,
-		"throttled_occurred":        val&0x40000 != 0,
-		"soft_temp_limit_occurred":  val&0x80000 != 0,
+		"raw":                      parts[1],
+		"under_voltage":            val&0x1 != 0,
+		"freq_capped":              val&0x2 != 0,
+		"throttled":                val&0x4 != 0,
+		"soft_temp_limit":          val&0x8 != 0,
+		"under_voltage_occurred":   val&0x10000 != 0,
+		"freq_capped_occurred":     val&0x20000 != 0,
+		"throttled_occurred":       val&0x40000 != 0,
+		"soft_temp_limit_occurred": val&0x80000 != 0,
 	}
 
 	jsonResponse(w, http.StatusOK, status)
@@ -828,31 +828,31 @@ func (h *HALHandler) GetBootConfig(w http.ResponseWriter, r *http.Request) {
 
 // StorageDevice represents a storage device
 type StorageDevice struct {
-	Name       string            `json:"name"`
-	Path       string            `json:"path"`
-	Size       int64             `json:"size"`        // bytes
-	SizeHuman  string            `json:"size_human"`  // "128GB"
-	Type       string            `json:"type"`        // disk, part, rom
-	Model      string            `json:"model,omitempty"`
-	Serial     string            `json:"serial,omitempty"`
-	Transport  string            `json:"transport,omitempty"` // usb, nvme, sata, mmc
-	Filesystem string            `json:"filesystem,omitempty"`
-	Mountpoint string            `json:"mountpoint,omitempty"`
-	Children   []StorageDevice   `json:"children,omitempty"`
-	Smart      *SmartInfo        `json:"smart,omitempty"`
+	Name       string          `json:"name"`
+	Path       string          `json:"path"`
+	Size       int64           `json:"size"`       // bytes
+	SizeHuman  string          `json:"size_human"` // "128GB"
+	Type       string          `json:"type"`       // disk, part, rom
+	Model      string          `json:"model,omitempty"`
+	Serial     string          `json:"serial,omitempty"`
+	Transport  string          `json:"transport,omitempty"` // usb, nvme, sata, mmc
+	Filesystem string          `json:"filesystem,omitempty"`
+	Mountpoint string          `json:"mountpoint,omitempty"`
+	Children   []StorageDevice `json:"children,omitempty"`
+	Smart      *SmartInfo      `json:"smart,omitempty"`
 }
 
 // SmartInfo contains SMART health data
 type SmartInfo struct {
-	Available       bool    `json:"available"`
-	Healthy         bool    `json:"healthy"`
-	Temperature     int     `json:"temperature,omitempty"`      // Celsius
-	PowerOnHours    int     `json:"power_on_hours,omitempty"`
-	PowerCycles     int     `json:"power_cycles,omitempty"`
-	MediaErrors     int     `json:"media_errors,omitempty"`
-	PercentUsed     int     `json:"percent_used,omitempty"`     // NVMe wear
-	SpareAvailable  int     `json:"spare_available,omitempty"`  // NVMe spare %
-	RawData         string  `json:"raw_data,omitempty"`
+	Available      bool   `json:"available"`
+	Healthy        bool   `json:"healthy"`
+	Temperature    int    `json:"temperature,omitempty"` // Celsius
+	PowerOnHours   int    `json:"power_on_hours,omitempty"`
+	PowerCycles    int    `json:"power_cycles,omitempty"`
+	MediaErrors    int    `json:"media_errors,omitempty"`
+	PercentUsed    int    `json:"percent_used,omitempty"`    // NVMe wear
+	SpareAvailable int    `json:"spare_available,omitempty"` // NVMe spare %
+	RawData        string `json:"raw_data,omitempty"`
 }
 
 // GetStorageDevices returns all storage devices
@@ -1122,14 +1122,14 @@ func (h *HALHandler) getSmartInfo(devPath string) SmartInfo {
 		PowerOnTime struct {
 			Hours int `json:"hours"`
 		} `json:"power_on_time"`
-		PowerCycleCount int `json:"power_cycle_count"`
+		PowerCycleCount               int `json:"power_cycle_count"`
 		NvmeSmartHealthInformationLog struct {
-			Temperature         int `json:"temperature"`
-			AvailableSpare      int `json:"available_spare"`
-			PercentageUsed      int `json:"percentage_used"`
-			PowerOnHours        int `json:"power_on_hours"`
-			PowerCycles         int `json:"power_cycles"`
-			MediaErrors         int `json:"media_errors"`
+			Temperature    int `json:"temperature"`
+			AvailableSpare int `json:"available_spare"`
+			PercentageUsed int `json:"percentage_used"`
+			PowerOnHours   int `json:"power_on_hours"`
+			PowerCycles    int `json:"power_cycles"`
+			MediaErrors    int `json:"media_errors"`
 		} `json:"nvme_smart_health_information_log"`
 	}
 
@@ -1189,9 +1189,9 @@ func (h *HALHandler) GetKernelLogs(w http.ResponseWriter, r *http.Request) {
 	}
 
 	level := r.URL.Query().Get("level") // err, warn, info
-	
+
 	args := []string{"-t", "1", "-m", "-u", "-n", "-i", "/usr/bin/dmesg", "--time-format=iso", "-T"}
-	
+
 	if level != "" {
 		args = append(args, "--level="+level)
 	}
@@ -1230,14 +1230,14 @@ func (h *HALHandler) GetJournalLogs(w http.ResponseWriter, r *http.Request) {
 	if lines == "" {
 		lines = "200"
 	}
-	
-	unit := r.URL.Query().Get("unit")     // e.g., hostapd, docker
-	since := r.URL.Query().Get("since")   // e.g., "1h", "24h", "7d"
+
+	unit := r.URL.Query().Get("unit")         // e.g., hostapd, docker
+	since := r.URL.Query().Get("since")       // e.g., "1h", "24h", "7d"
 	priority := r.URL.Query().Get("priority") // 0-7 (emerg to debug)
-	grep := r.URL.Query().Get("grep")     // search pattern
+	grep := r.URL.Query().Get("grep")         // search pattern
 
 	args := []string{"-t", "1", "-m", "-u", "-n", "-i", "/usr/bin/journalctl", "--no-pager", "-o", "short-iso", "-n", lines}
-	
+
 	if unit != "" {
 		args = append(args, "-u", unit)
 	}
@@ -1285,12 +1285,12 @@ func (h *HALHandler) GetHardwareLogs(w http.ResponseWriter, r *http.Request) {
 	}
 
 	filters := map[string][]string{
-		"i2c":  {"i2c", "I2C"},
-		"gpio": {"gpio", "GPIO", "pinctrl", "gpiochip"},
-		"usb":  {"usb", "USB", "xhci", "dwc"},
-		"pcie": {"pcie", "PCIe", "nvme", "NVMe"},
-		"mmc":  {"mmc", "MMC", "sdhost", "sdhci"},
-		"net":  {"wlan", "eth", "wifi", "hostapd", "dhcp"},
+		"i2c":   {"i2c", "I2C"},
+		"gpio":  {"gpio", "GPIO", "pinctrl", "gpiochip"},
+		"usb":   {"usb", "USB", "xhci", "dwc"},
+		"pcie":  {"pcie", "PCIe", "nvme", "NVMe"},
+		"mmc":   {"mmc", "MMC", "sdhost", "sdhci"},
+		"net":   {"wlan", "eth", "wifi", "hostapd", "dhcp"},
 		"power": {"voltage", "throttl", "temperature", "thermal"},
 	}
 
@@ -1442,7 +1442,7 @@ func parseSinceTime(since string) string {
 	if since == "" {
 		return "24 hours ago"
 	}
-	
+
 	// Handle common formats
 	if strings.HasSuffix(since, "m") {
 		mins := strings.TrimSuffix(since, "m")
@@ -1456,7 +1456,7 @@ func parseSinceTime(since string) string {
 		days := strings.TrimSuffix(since, "d")
 		return days + " days ago"
 	}
-	
+
 	return since
 }
 
@@ -1860,6 +1860,381 @@ func (h *HALHandler) getTorExitInfo() map[string]string {
 }
 
 // ============================================================================
+// GPS Support (Direct NMEA Parsing)
+// ============================================================================
+
+// GPSDevice represents a detected GPS device
+type GPSDevice struct {
+	Path      string `json:"path"`
+	Name      string `json:"name,omitempty"`
+	VendorID  string `json:"vendor_id,omitempty"`
+	ProductID string `json:"product_id,omitempty"`
+	Driver    string `json:"driver,omitempty"`
+	Active    bool   `json:"active"`
+}
+
+// GPSPosition represents GPS position data
+type GPSPosition struct {
+	Valid       bool    `json:"valid"`
+	Latitude    float64 `json:"latitude"`
+	Longitude   float64 `json:"longitude"`
+	Altitude    float64 `json:"altitude"` // meters
+	Speed       float64 `json:"speed"`    // km/h
+	Course      float64 `json:"course"`   // degrees
+	Satellites  int     `json:"satellites"`
+	FixQuality  int     `json:"fix_quality"` // 0=invalid, 1=GPS, 2=DGPS
+	FixType     string  `json:"fix_type"`    // "none", "2D", "3D"
+	HDOP        float64 `json:"hdop"`        // Horizontal dilution of precision
+	Timestamp   string  `json:"timestamp"`   // UTC time from GPS
+	LastUpdated string  `json:"last_updated"`
+}
+
+// GPSStatus represents GPS device status
+type GPSStatus struct {
+	Available bool         `json:"available"`
+	Device    string       `json:"device,omitempty"`
+	HasFix    bool         `json:"has_fix"`
+	Position  *GPSPosition `json:"position,omitempty"`
+}
+
+// GetGPSDevices lists all detected GPS devices
+func (h *HALHandler) GetGPSDevices(w http.ResponseWriter, r *http.Request) {
+	devices := h.scanGPSDevices()
+
+	jsonResponse(w, http.StatusOK, map[string]interface{}{
+		"devices": devices,
+		"count":   len(devices),
+	})
+}
+
+// GetGPSStatus returns GPS device status
+func (h *HALHandler) GetGPSStatus(w http.ResponseWriter, r *http.Request) {
+	devices := h.scanGPSDevices()
+
+	status := GPSStatus{
+		Available: len(devices) > 0,
+	}
+
+	if len(devices) > 0 {
+		// Use first active device
+		for _, dev := range devices {
+			if dev.Active {
+				status.Device = dev.Path
+				pos := h.readGPSPosition(dev.Path)
+				status.HasFix = pos.Valid
+				status.Position = pos
+				break
+			}
+		}
+		// If no active, try first device anyway
+		if status.Device == "" {
+			status.Device = devices[0].Path
+			pos := h.readGPSPosition(devices[0].Path)
+			status.HasFix = pos.Valid
+			status.Position = pos
+		}
+	}
+
+	jsonResponse(w, http.StatusOK, status)
+}
+
+// GetGPSPosition returns current GPS position
+func (h *HALHandler) GetGPSPosition(w http.ResponseWriter, r *http.Request) {
+	device := r.URL.Query().Get("device")
+
+	if device == "" {
+		// Auto-detect
+		devices := h.scanGPSDevices()
+		if len(devices) == 0 {
+			errorResponse(w, http.StatusNotFound, "no GPS device found")
+			return
+		}
+		device = devices[0].Path
+	}
+
+	pos := h.readGPSPosition(device)
+	if pos == nil {
+		errorResponse(w, http.StatusInternalServerError, "failed to read GPS position")
+		return
+	}
+
+	jsonResponse(w, http.StatusOK, pos)
+}
+
+// scanGPSDevices scans for GPS devices on serial ports
+func (h *HALHandler) scanGPSDevices() []GPSDevice {
+	var devices []GPSDevice
+
+	// Known GPS vendor IDs
+	gpsVendors := map[string]string{
+		"1546": "u-blox",       // u-blox GPS
+		"067b": "Prolific",     // PL2303 (common GPS adapter)
+		"10c4": "Silicon Labs", // CP210x
+		"0403": "FTDI",         // FTDI (could be GPS)
+	}
+
+	// Scan ttyACM devices (native USB CDC)
+	acmDevices, _ := filepath.Glob("/dev/ttyACM*")
+	for _, dev := range acmDevices {
+		gps := h.probeGPSDevice(dev, gpsVendors)
+		if gps != nil {
+			devices = append(devices, *gps)
+		}
+	}
+
+	// Scan ttyUSB devices (USB-serial adapters)
+	usbDevices, _ := filepath.Glob("/dev/ttyUSB*")
+	for _, dev := range usbDevices {
+		gps := h.probeGPSDevice(dev, gpsVendors)
+		if gps != nil {
+			devices = append(devices, *gps)
+		}
+	}
+
+	return devices
+}
+
+// probeGPSDevice checks if a serial device is a GPS
+func (h *HALHandler) probeGPSDevice(devPath string, gpsVendors map[string]string) *GPSDevice {
+	// Get device name (e.g., ttyACM0)
+	devName := filepath.Base(devPath)
+
+	// Check vendor/product ID via sysfs
+	vendorPath := fmt.Sprintf("/sys/class/tty/%s/device/../idVendor", devName)
+	productPath := fmt.Sprintf("/sys/class/tty/%s/device/../idProduct", devName)
+
+	vendorID := ""
+	productID := ""
+
+	if data, err := os.ReadFile(vendorPath); err == nil {
+		vendorID = strings.TrimSpace(string(data))
+	}
+	if data, err := os.ReadFile(productPath); err == nil {
+		productID = strings.TrimSpace(string(data))
+	}
+
+	// Check if known GPS vendor
+	vendorName, isKnown := gpsVendors[vendorID]
+
+	// For u-blox, we're confident it's GPS
+	// For others, probe with NMEA
+	isGPS := vendorID == "1546" // u-blox is definitely GPS
+
+	if !isGPS && isKnown {
+		// Probe by reading NMEA sentences
+		isGPS = h.probeNMEA(devPath)
+	}
+
+	if !isGPS && !isKnown {
+		return nil
+	}
+
+	device := &GPSDevice{
+		Path:      devPath,
+		Name:      vendorName,
+		VendorID:  vendorID,
+		ProductID: productID,
+		Active:    true,
+	}
+
+	// Get driver name
+	driverPath := fmt.Sprintf("/sys/class/tty/%s/device/driver", devName)
+	if link, err := os.Readlink(driverPath); err == nil {
+		device.Driver = filepath.Base(link)
+	}
+
+	return device
+}
+
+// probeNMEA tries to read NMEA sentences from a device
+func (h *HALHandler) probeNMEA(devPath string) bool {
+	// Use stty and timeout to read a few lines
+	cmd := exec.Command("nsenter", "-t", "1", "-m", "-u", "-n", "-i", "/bin/sh", "-c",
+		fmt.Sprintf("stty -F %s 9600 raw -echo; timeout 2 head -c 500 %s 2>/dev/null", devPath, devPath))
+	output, _ := cmd.Output()
+
+	// Check for NMEA signature
+	return strings.Contains(string(output), "$GP") ||
+		strings.Contains(string(output), "$GN") ||
+		strings.Contains(string(output), "$GL")
+}
+
+// readGPSPosition reads current position from GPS device
+func (h *HALHandler) readGPSPosition(devPath string) *GPSPosition {
+	pos := &GPSPosition{
+		LastUpdated: time.Now().UTC().Format(time.RFC3339),
+	}
+
+	// Read NMEA sentences (timeout 3 seconds, read enough for full cycle)
+	cmd := exec.Command("nsenter", "-t", "1", "-m", "-u", "-n", "-i", "/bin/sh", "-c",
+		fmt.Sprintf("stty -F %s 9600 raw -echo 2>/dev/null; timeout 3 cat %s 2>/dev/null", devPath, devPath))
+	output, err := cmd.Output()
+	if err != nil {
+		return pos
+	}
+
+	lines := strings.Split(string(output), "\n")
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+
+		// Parse GPGGA (position + fix info)
+		if strings.HasPrefix(line, "$GPGGA") || strings.HasPrefix(line, "$GNGGA") {
+			h.parseGPGGA(line, pos)
+		}
+
+		// Parse GPRMC (position + speed + course)
+		if strings.HasPrefix(line, "$GPRMC") || strings.HasPrefix(line, "$GNRMC") {
+			h.parseGPRMC(line, pos)
+		}
+	}
+
+	return pos
+}
+
+// parseGPGGA parses GPGGA sentence
+// $GPGGA,092750.000,5321.6802,N,00630.3372,W,1,8,1.03,61.7,M,55.2,M,,*76
+func (h *HALHandler) parseGPGGA(sentence string, pos *GPSPosition) {
+	// Remove checksum
+	if idx := strings.Index(sentence, "*"); idx > 0 {
+		sentence = sentence[:idx]
+	}
+
+	fields := strings.Split(sentence, ",")
+	if len(fields) < 15 {
+		return
+	}
+
+	// Fix quality (field 6)
+	if fix, err := strconv.Atoi(fields[6]); err == nil {
+		pos.FixQuality = fix
+		pos.Valid = fix > 0
+		switch fix {
+		case 0:
+			pos.FixType = "none"
+		case 1:
+			pos.FixType = "GPS"
+		case 2:
+			pos.FixType = "DGPS"
+		case 4:
+			pos.FixType = "RTK"
+		case 5:
+			pos.FixType = "Float RTK"
+		default:
+			pos.FixType = "unknown"
+		}
+	}
+
+	// Time (field 1) - HHMMSS.sss
+	if fields[1] != "" {
+		pos.Timestamp = formatNMEATime(fields[1])
+	}
+
+	// Latitude (fields 2,3) - DDMM.MMMM,N/S
+	if fields[2] != "" && fields[3] != "" {
+		pos.Latitude = parseNMEACoord(fields[2], fields[3])
+	}
+
+	// Longitude (fields 4,5) - DDDMM.MMMM,E/W
+	if fields[4] != "" && fields[5] != "" {
+		pos.Longitude = parseNMEACoord(fields[4], fields[5])
+	}
+
+	// Satellites (field 7)
+	if sats, err := strconv.Atoi(fields[7]); err == nil {
+		pos.Satellites = sats
+	}
+
+	// HDOP (field 8)
+	if hdop, err := strconv.ParseFloat(fields[8], 64); err == nil {
+		pos.HDOP = hdop
+	}
+
+	// Altitude (field 9)
+	if alt, err := strconv.ParseFloat(fields[9], 64); err == nil {
+		pos.Altitude = alt
+	}
+}
+
+// parseGPRMC parses GPRMC sentence
+// $GPRMC,092750.000,A,5321.6802,N,00630.3372,W,0.02,31.66,280511,,,A*43
+func (h *HALHandler) parseGPRMC(sentence string, pos *GPSPosition) {
+	// Remove checksum
+	if idx := strings.Index(sentence, "*"); idx > 0 {
+		sentence = sentence[:idx]
+	}
+
+	fields := strings.Split(sentence, ",")
+	if len(fields) < 12 {
+		return
+	}
+
+	// Status (field 2) - A=valid, V=void
+	if fields[2] == "A" {
+		pos.Valid = true
+	}
+
+	// Latitude (fields 3,4)
+	if fields[3] != "" && fields[4] != "" && pos.Latitude == 0 {
+		pos.Latitude = parseNMEACoord(fields[3], fields[4])
+	}
+
+	// Longitude (fields 5,6)
+	if fields[5] != "" && fields[6] != "" && pos.Longitude == 0 {
+		pos.Longitude = parseNMEACoord(fields[5], fields[6])
+	}
+
+	// Speed in knots (field 7) -> convert to km/h
+	if speed, err := strconv.ParseFloat(fields[7], 64); err == nil {
+		pos.Speed = speed * 1.852 // knots to km/h
+	}
+
+	// Course (field 8)
+	if course, err := strconv.ParseFloat(fields[8], 64); err == nil {
+		pos.Course = course
+	}
+}
+
+// parseNMEACoord parses NMEA coordinate format (DDMM.MMMM or DDDMM.MMMM)
+func parseNMEACoord(coord string, dir string) float64 {
+	if coord == "" {
+		return 0
+	}
+
+	// Find decimal point
+	dotIdx := strings.Index(coord, ".")
+	if dotIdx < 2 {
+		return 0
+	}
+
+	// Degrees are before the last 2 digits before decimal
+	degStr := coord[:dotIdx-2]
+	minStr := coord[dotIdx-2:]
+
+	deg, err1 := strconv.ParseFloat(degStr, 64)
+	min, err2 := strconv.ParseFloat(minStr, 64)
+	if err1 != nil || err2 != nil {
+		return 0
+	}
+
+	result := deg + min/60.0
+
+	// Apply direction
+	if dir == "S" || dir == "W" {
+		result = -result
+	}
+
+	return result
+}
+
+// formatNMEATime formats NMEA time (HHMMSS.sss) to ISO format
+func formatNMEATime(t string) string {
+	if len(t) < 6 {
+		return t
+	}
+	return fmt.Sprintf("%s:%s:%s UTC", t[0:2], t[2:4], t[4:6])
+}
+
+// ============================================================================
 // AP Client Operations
 // ============================================================================
 
@@ -2053,7 +2428,7 @@ func parseDHCPLeases() map[string]DHCPLease {
 
 	// Try Pi-hole DHCP leases first
 	leasePaths := []string{
-	 	"/cubeos/coreapps/pihole/appdata/etc-pihole/dhcp.leases", // CubeOS Pi-hole v6
+		"/cubeos/coreapps/pihole/appdata/etc-pihole/dhcp.leases", // CubeOS Pi-hole v6
 		"/etc/pihole/dhcp.leases",
 		"/var/lib/misc/dnsmasq.leases",
 		"/var/lib/dhcp/dhcpd.leases",

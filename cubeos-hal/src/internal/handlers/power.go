@@ -33,8 +33,8 @@ const (
 	MAX17040RegCOMMAND = 0xFE // Command register
 
 	// GPIO pins (BCM numbering)
-	GPIOPowerLoss   = 6  // Input: HIGH = AC present, LOW = power lost
-	GPIOChargeCtrl  = 16 // Output: LOW = charging, HIGH = not charging
+	GPIOPowerLoss  = 6  // Input: HIGH = AC present, LOW = power lost
+	GPIOChargeCtrl = 16 // Output: LOW = charging, HIGH = not charging
 
 	// Thresholds
 	LowBatteryThreshold      = 15.0 // Percent - trigger warning
@@ -49,16 +49,16 @@ const (
 // BatteryStatus represents current battery state
 type BatteryStatus struct {
 	Available           bool    `json:"available"`
-	Voltage             float64 `json:"voltage"`               // Volts
-	VoltageRaw          uint16  `json:"voltage_raw"`           // Raw register value
-	Percentage          float64 `json:"percentage"`            // 0-100 (from fuel gauge)
-	PercentageEstimated float64 `json:"percentage_estimated"`  // 0-100 (from voltage lookup, more reliable)
-	PercentageRaw       uint16  `json:"percentage_raw"`        // Raw register value
-	IsCharging          bool    `json:"is_charging"`           // Inferred from voltage trend
-	ChargingEnabled     bool    `json:"charging_enabled"`      // GPIO16 state
-	ACPresent           bool    `json:"ac_present"`            // GPIO6 state
-	IsLow               bool    `json:"is_low"`                // Below warning threshold
-	IsCritical          bool    `json:"is_critical"`           // Below critical threshold
+	Voltage             float64 `json:"voltage"`              // Volts
+	VoltageRaw          uint16  `json:"voltage_raw"`          // Raw register value
+	Percentage          float64 `json:"percentage"`           // 0-100 (from fuel gauge)
+	PercentageEstimated float64 `json:"percentage_estimated"` // 0-100 (from voltage lookup, more reliable)
+	PercentageRaw       uint16  `json:"percentage_raw"`       // Raw register value
+	IsCharging          bool    `json:"is_charging"`          // Inferred from voltage trend
+	ChargingEnabled     bool    `json:"charging_enabled"`     // GPIO16 state
+	ACPresent           bool    `json:"ac_present"`           // GPIO6 state
+	IsLow               bool    `json:"is_low"`               // Below warning threshold
+	IsCritical          bool    `json:"is_critical"`          // Below critical threshold
 	LastUpdated         string  `json:"last_updated"`
 }
 
@@ -86,9 +86,9 @@ type PowerStatus struct {
 
 // UptimeInfo contains system uptime information
 type UptimeInfo struct {
-	Seconds     float64 `json:"seconds"`
-	Formatted   string  `json:"formatted"` // "5d 3h 22m 15s"
-	BootTime    string  `json:"boot_time"` // ISO timestamp
+	Seconds     float64   `json:"seconds"`
+	Formatted   string    `json:"formatted"` // "5d 3h 22m 15s"
+	BootTime    string    `json:"boot_time"` // ISO timestamp
 	LoadAverage []float64 `json:"load_average"`
 }
 
@@ -106,9 +106,9 @@ type RTCStatus struct {
 type WatchdogInfo struct {
 	Available bool   `json:"available"`
 	Active    bool   `json:"active"`
-	Timeout   int    `json:"timeout"`   // Seconds
-	Identity  string `json:"identity"`  // Driver name
-	Device    string `json:"device"`    // /dev/watchdog
+	Timeout   int    `json:"timeout"`  // Seconds
+	Identity  string `json:"identity"` // Driver name
+	Device    string `json:"device"`   // /dev/watchdog
 }
 
 // ============================================================================
@@ -116,13 +116,13 @@ type WatchdogInfo struct {
 // ============================================================================
 
 var (
-	powerMonitorOnce     sync.Once
-	powerMonitorCancel   context.CancelFunc
-	powerMonitorMu       sync.RWMutex
-	lastBatteryStatus    BatteryStatus
-	lastVoltage          float64 // For charging inference
-	voltageHistory       []float64
-	voltageHistoryMu     sync.Mutex
+	powerMonitorOnce   sync.Once
+	powerMonitorCancel context.CancelFunc
+	powerMonitorMu     sync.RWMutex
+	lastBatteryStatus  BatteryStatus
+	lastVoltage        float64 // For charging inference
+	voltageHistory     []float64
+	voltageHistoryMu   sync.Mutex
 )
 
 // ============================================================================
