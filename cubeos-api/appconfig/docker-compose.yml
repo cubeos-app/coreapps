@@ -30,6 +30,7 @@ services:
       - CUBEOS_PORT=6010
       - CUBEOS_DATA_DIR=/cubeos/data
       - CUBEOS_DB_PATH=/cubeos/data/cubeos.db
+      - HAL_URL=http://10.42.24.1:6005
     env_file:
       - /cubeos/config/defaults.env
     pid: "host"
