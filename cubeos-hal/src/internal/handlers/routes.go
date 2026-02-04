@@ -72,12 +72,16 @@ func SetupRoutes(r chi.Router, h *HALHandler) {
 		r.Post("/interface/{name}/up", h.BringInterfaceUp)
 		r.Post("/interface/{name}/down", h.BringInterfaceDown)
 		r.Get("/status", h.GetNetworkStatus)
-		r.Get("/traffic", h.GetTrafficStats) // NEW: Overall traffic stats
+		r.Get("/traffic", h.GetTrafficStats)
 
 		// WiFi
 		r.Get("/wifi/scan/{iface}", h.ScanWiFi)
 		r.Post("/wifi/connect", h.ConnectWiFi)
 		r.Post("/wifi/disconnect/{iface}", h.DisconnectWiFi)
+
+		// WiFi saved networks (NEW)
+		r.Get("/wifi/saved", h.GetSavedWiFiNetworks)
+		r.Delete("/wifi/saved/{ssid}", h.ForgetWiFiNetwork)
 
 		// Access Point
 		r.Get("/ap/status", h.GetAPStatus)
@@ -88,17 +92,17 @@ func SetupRoutes(r chi.Router, h *HALHandler) {
 
 	// Firewall
 	r.Route("/firewall", func(r chi.Router) {
-		r.Get("/status", h.GetFirewallStatus) // NEW: Overall status
 		r.Get("/rules", h.GetFirewallRules)
-		r.Get("/forwarding", h.GetForwardingStatus) // NEW: IP forwarding status
-		r.Get("/ipforward", h.GetIPForwardStatus)   // NEW: Alias
-		r.Get("/nat/status", h.GetNATStatus)        // NEW: NAT status
 		r.Post("/rule", h.AddFirewallRule)
 		r.Delete("/rule", h.DeleteFirewallRule)
 		r.Post("/nat/enable", h.EnableNAT)
 		r.Post("/nat/disable", h.DisableNAT)
 		r.Post("/forward/enable", h.EnableIPForward)
 		r.Post("/forward/disable", h.DisableIPForward)
+		r.Get("/forwarding", h.GetForwardingStatus)
+		r.Post("/ipforward/enable", h.EnableIPForward)
+		r.Post("/ipforward/disable", h.DisableIPForward)
+		r.Get("/status", h.GetFirewallStatus)
 	})
 
 	// VPN
@@ -126,6 +130,7 @@ func SetupRoutes(r chi.Router, h *HALHandler) {
 		r.Get("/devices", h.GetStorageDevices)
 		r.Get("/device/{device}", h.GetStorageDevice)
 		r.Get("/smart/{device}", h.GetSmartInfo)
+		r.Get("/devices/{device}/smart", h.GetSmartInfo) // Alias for API compatibility
 		r.Get("/usage", h.GetStorageUsage)
 
 		// USB Storage
