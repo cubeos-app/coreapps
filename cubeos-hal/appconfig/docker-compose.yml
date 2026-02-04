@@ -45,6 +45,7 @@ services:
       # Hardware features
       - HAL_I2C_BUS=1
       - HAL_GPIO_CHIP=gpiochip4
+      - LD_LIBRARY_PATH=/opt/vc/lib
     
     env_file:
       - /cubeos/config/defaults.env
