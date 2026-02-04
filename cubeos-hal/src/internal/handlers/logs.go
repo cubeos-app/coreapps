@@ -110,21 +110,24 @@ func (h *HALHandler) GetJournalLogs(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	args := []string{"-n", strconv.Itoa(lines), "--no-pager", "-o", "short-iso"}
+	journalArgs := []string{"-n", strconv.Itoa(lines), "--no-pager", "-o", "short-iso"}
 
 	if unit := r.URL.Query().Get("unit"); unit != "" {
-		args = append(args, "-u", unit)
+		journalArgs = append(journalArgs, "-u", unit)
 	}
 
 	if since := r.URL.Query().Get("since"); since != "" {
-		args = append(args, "--since", since)
+		journalArgs = append(journalArgs, "--since", since)
 	}
 
 	if priority := r.URL.Query().Get("priority"); priority != "" {
-		args = append(args, "-p", priority)
+		journalArgs = append(journalArgs, "-p", priority)
 	}
 
-	cmd := exec.Command("journalctl", args...)
+	// Use nsenter to access host's journalctl (Alpine doesn't have systemd)
+	// HAL runs with pid:host so nsenter -t 1 -m accesses host mount namespace
+	args := append([]string{"-t", "1", "-m", "--", "journalctl"}, journalArgs...)
+	cmd := exec.Command("nsenter", args...)
 	output, err := cmd.Output()
 	if err != nil {
 		errorResponse(w, http.StatusInternalServerError, "failed to get journal: "+err.Error())
@@ -254,13 +257,13 @@ func (h *HALHandler) GetSupportBundle(w http.ResponseWriter, r *http.Request) {
 
 	// Logs
 	h.addCommandOutput(zipWriter, "dmesg.txt", "dmesg", "-T")
-	h.addCommandOutput(zipWriter, "journalctl.txt", "journalctl", "-n", "2000", "--no-pager")
-	h.addCommandOutput(zipWriter, "journalctl-errors.txt", "journalctl", "-p", "err", "-n", "500", "--no-pager")
+	h.addHostCommandOutput(zipWriter, "journalctl.txt", "journalctl", "-n", "2000", "--no-pager")
+	h.addHostCommandOutput(zipWriter, "journalctl-errors.txt", "journalctl", "-p", "err", "-n", "500", "--no-pager")
 
 	// Services
-	h.addCommandOutput(zipWriter, "systemctl-status.txt", "systemctl", "status")
-	h.addCommandOutput(zipWriter, "systemctl-failed.txt", "systemctl", "--failed")
-	h.addCommandOutput(zipWriter, "systemctl-list-units.txt", "systemctl", "list-units", "--type=service")
+	h.addHostCommandOutput(zipWriter, "systemctl-status.txt", "systemctl", "status")
+	h.addHostCommandOutput(zipWriter, "systemctl-failed.txt", "systemctl", "--failed")
+	h.addHostCommandOutput(zipWriter, "systemctl-list-units.txt", "systemctl", "list-units", "--type=service")
 
 	// Docker
 	h.addCommandOutput(zipWriter, "docker-info.txt", "docker", "info")
@@ -298,6 +301,12 @@ func (h *HALHandler) addCommandOutput(zw *zip.Writer, filename string, cmdName s
 	}
 
 	f.Write(output)
+}
+
+// addHostCommandOutput runs a command on the host via nsenter (for journalctl, systemctl, etc.)
+func (h *HALHandler) addHostCommandOutput(zw *zip.Writer, filename string, cmdName string, args ...string) {
+	nsenterArgs := append([]string{"-t", "1", "-m", "--", cmdName}, args...)
+	h.addCommandOutput(zw, filename, "nsenter", nsenterArgs...)
 }
 
 func (h *HALHandler) addFileToZip(zw *zip.Writer, srcPath, dstName string) {
