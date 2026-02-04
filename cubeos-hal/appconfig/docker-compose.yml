@@ -45,7 +45,8 @@ services:
       # Hardware features
       - HAL_I2C_BUS=1
       - HAL_GPIO_CHIP=gpiochip4
-      - LD_LIBRARY_PATH=/opt/vc/lib
+      # Pi 5 vcgencmd libraries are in standard lib path
+      - LD_LIBRARY_PATH=/lib/aarch64-linux-gnu
     
     env_file:
       - /cubeos/config/defaults.env
@@ -85,7 +86,8 @@ services:
       
       # Raspberry Pi utilities (vcgencmd for throttle/temp)
       - /usr/bin/vcgencmd:/usr/bin/vcgencmd:ro
-      - /opt/vc:/opt/vc:ro
+      # Pi 5: vcgencmd libs are in /lib/aarch64-linux-gnu (not /opt/vc)
+      - /lib/aarch64-linux-gnu:/lib/aarch64-linux-gnu:ro
       
       # Boot config for EEPROM/config.txt access
       - /boot/firmware:/boot/firmware:ro
