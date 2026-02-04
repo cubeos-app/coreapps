@@ -45,8 +45,8 @@ services:
       # Hardware features
       - HAL_I2C_BUS=1
       - HAL_GPIO_CHIP=gpiochip4
-      # Pi 5 vcgencmd libraries are in standard lib path
-      - LD_LIBRARY_PATH=/lib/aarch64-linux-gnu
+      # NOTE: vcgencmd removed - HAL now uses sysfs for temperature/throttle
+      # which works in Alpine containers without glibc dependencies
     
     env_file:
       - /cubeos/config/defaults.env
@@ -84,13 +84,12 @@ services:
       # DHCP leases (Pi-hole v6)
       - /cubeos/coreapps/pihole/appdata/etc-pihole/dhcp.leases:/cubeos/coreapps/pihole/appdata/etc-pihole/dhcp.leases:ro
       
-      # Raspberry Pi utilities (vcgencmd for throttle/temp)
-      - /usr/bin/vcgencmd:/usr/bin/vcgencmd:ro
-      # Pi 5: vcgencmd libs are in /lib/aarch64-linux-gnu (not /opt/vc)
-      - /lib/aarch64-linux-gnu:/lib/aarch64-linux-gnu:ro
-      
       # Boot config for EEPROM/config.txt access
       - /boot/firmware:/boot/firmware:ro
+      
+      # NOTE: vcgencmd and /lib/aarch64-linux-gnu mounts REMOVED
+      # These break Alpine (musl) containers - glibc binaries can't run on musl
+      # HAL now uses sysfs for temperature/throttle which works everywhere
     
     devices:
       # I2C bus (UPS HAT, sensors)
@@ -103,7 +102,7 @@ services:
       - /dev/watchdog:/dev/watchdog
       # RTC
       - /dev/rtc0:/dev/rtc0
-      # VideoCore (for vcgencmd)
+      # VideoCore (for future use if needed)
       - /dev/vchiq:/dev/vchiq
     
     healthcheck:

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"os"
 	"os/exec"
 	"strconv"
 	"strings"
@@ -22,7 +23,7 @@ import (
 type TemperatureResponse struct {
 	Temperature float64 `json:"temperature" example:"56.5"`
 	Unit        string  `json:"unit" example:"celsius"`
-	Source      string  `json:"source" example:"vcgencmd"`
+	Source      string  `json:"source" example:"sysfs"`
 }
 
 // ThrottleStatus represents throttling status.
@@ -37,6 +38,7 @@ type ThrottleStatus struct {
 	ThrottledNow                 bool   `json:"throttled_now" example:"false"`
 	SoftTemperatureLimitNow      bool   `json:"soft_temperature_limit_now" example:"false"`
 	RawHex                       string `json:"raw_hex" example:"0x0"`
+	Source                       string `json:"source,omitempty" example:"sysfs"`
 }
 
 // EEPROMInfo represents Raspberry Pi EEPROM information.
@@ -115,7 +117,7 @@ func (h *HALHandler) Shutdown(w http.ResponseWriter, r *http.Request) {
 
 // GetCPUTemp returns CPU temperature.
 // @Summary Get CPU temperature
-// @Description Returns current CPU temperature from vcgencmd
+// @Description Returns current CPU temperature from sysfs thermal zone
 // @Tags System
 // @Accept json
 // @Produce json
@@ -123,29 +125,45 @@ func (h *HALHandler) Shutdown(w http.ResponseWriter, r *http.Request) {
 // @Failure 500 {object} ErrorResponse
 // @Router /system/temperature [get]
 func (h *HALHandler) GetCPUTemp(w http.ResponseWriter, r *http.Request) {
-	cmd := exec.Command("vcgencmd", "measure_temp")
-	output, err := cmd.Output()
-	if err != nil {
-		errorResponse(w, http.StatusInternalServerError, "failed to get temperature: "+err.Error())
-		return
+	// Read from sysfs thermal zone (works in containers without vcgencmd)
+	// Returns millidegrees, e.g., 57850 = 57.85°C
+	thermalPaths := []string{
+		"/sys/class/thermal/thermal_zone0/temp",
+		"/sys/devices/virtual/thermal/thermal_zone0/temp",
 	}
 
-	// Parse "temp=45.0'C"
-	tempStr := strings.TrimSpace(string(output))
-	tempStr = strings.TrimPrefix(tempStr, "temp=")
-	tempStr = strings.TrimSuffix(tempStr, "'C")
-	temp, _ := strconv.ParseFloat(tempStr, 64)
+	var temp float64
+	var source string
+	var found bool
+
+	for _, path := range thermalPaths {
+		data, err := os.ReadFile(path)
+		if err == nil {
+			milliTemp, parseErr := strconv.ParseInt(strings.TrimSpace(string(data)), 10, 64)
+			if parseErr == nil {
+				temp = float64(milliTemp) / 1000.0
+				source = "sysfs"
+				found = true
+				break
+			}
+		}
+	}
+
+	if !found {
+		errorResponse(w, http.StatusInternalServerError, "failed to read temperature from sysfs")
+		return
+	}
 
 	jsonResponse(w, http.StatusOK, TemperatureResponse{
 		Temperature: temp,
 		Unit:        "celsius",
-		Source:      "vcgencmd",
+		Source:      source,
 	})
 }
 
 // GetThrottleStatus returns throttling status.
 // @Summary Get throttle status
-// @Description Returns CPU throttling status flags from vcgencmd
+// @Description Returns CPU throttling status flags from sysfs
 // @Tags System
 // @Accept json
 // @Produce json
@@ -153,22 +171,41 @@ func (h *HALHandler) GetCPUTemp(w http.ResponseWriter, r *http.Request) {
 // @Failure 500 {object} ErrorResponse
 // @Router /system/throttle [get]
 func (h *HALHandler) GetThrottleStatus(w http.ResponseWriter, r *http.Request) {
-	cmd := exec.Command("vcgencmd", "get_throttled")
-	output, err := cmd.Output()
-	if err != nil {
-		errorResponse(w, http.StatusInternalServerError, "failed to get throttle status: "+err.Error())
+	// Try sysfs first (Raspberry Pi kernel exposes this)
+	throttlePaths := []string{
+		"/sys/devices/platform/soc/soc:firmware/get_throttled",
+		"/sys/class/hwmon/hwmon0/throttled",
+	}
+
+	var hexVal string
+	var source string
+	var found bool
+
+	for _, path := range throttlePaths {
+		data, err := os.ReadFile(path)
+		if err == nil {
+			hexVal = strings.TrimSpace(string(data))
+			source = "sysfs"
+			found = true
+			break
+		}
+	}
+
+	// If sysfs not available, return zeros (no throttling detected)
+	if !found {
+		// Return empty throttle status rather than error
+		// This allows the endpoint to work in containers/VMs
+		status := ThrottleStatus{
+			RawHex: "0x0",
+			Source: "unavailable",
+		}
+		jsonResponse(w, http.StatusOK, status)
 		return
 	}
 
-	// Parse "throttled=0x0"
-	line := strings.TrimSpace(string(output))
-	parts := strings.Split(line, "=")
-	hexVal := "0x0"
-	if len(parts) == 2 {
-		hexVal = parts[1]
-	}
-
-	val, _ := strconv.ParseInt(strings.TrimPrefix(hexVal, "0x"), 16, 64)
+	// Parse hex value (may be "0x0" or just "0")
+	hexVal = strings.TrimPrefix(hexVal, "0x")
+	val, _ := strconv.ParseInt(hexVal, 16, 64)
 
 	status := ThrottleStatus{
 		UnderVoltageOccurred:         val&(1<<16) != 0,
@@ -179,7 +216,8 @@ func (h *HALHandler) GetThrottleStatus(w http.ResponseWriter, r *http.Request) {
 		ArmFrequencyCappedNow:        val&(1<<1) != 0,
 		ThrottledNow:                 val&(1<<2) != 0,
 		SoftTemperatureLimitNow:      val&(1<<3) != 0,
-		RawHex:                       hexVal,
+		RawHex:                       "0x" + hexVal,
+		Source:                       source,
 	}
 
 	jsonResponse(w, http.StatusOK, status)
@@ -197,18 +235,14 @@ func (h *HALHandler) GetThrottleStatus(w http.ResponseWriter, r *http.Request) {
 func (h *HALHandler) GetEEPROMInfo(w http.ResponseWriter, r *http.Request) {
 	info := EEPROMInfo{}
 
-	// Get EEPROM version
-	cmd := exec.Command("vcgencmd", "bootloader_version")
-	if output, err := cmd.Output(); err == nil {
-		lines := strings.Split(string(output), "\n")
-		if len(lines) > 0 {
-			info.Version = strings.TrimSpace(lines[0])
-		}
+	// Try to get bootloader version from /proc/device-tree (works without vcgencmd)
+	if data, err := os.ReadFile("/proc/device-tree/system/linux,revision"); err == nil {
+		info.Revision = fmt.Sprintf("%x", data)
 	}
 
 	// Get model info from /proc/cpuinfo
-	if output, err := exec.Command("cat", "/proc/cpuinfo").Output(); err == nil {
-		lines := strings.Split(string(output), "\n")
+	if data, err := os.ReadFile("/proc/cpuinfo"); err == nil {
+		lines := strings.Split(string(data), "\n")
 		for _, line := range lines {
 			if strings.HasPrefix(line, "Model") {
 				parts := strings.SplitN(line, ":", 2)
@@ -229,6 +263,11 @@ func (h *HALHandler) GetEEPROMInfo(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 		}
+	}
+
+	// Try to get bootloader info from /proc/device-tree
+	if data, err := os.ReadFile("/proc/device-tree/chosen/bootloader/version"); err == nil {
+		info.Version = strings.TrimSpace(strings.TrimRight(string(data), "\x00"))
 	}
 
 	jsonResponse(w, http.StatusOK, info)
@@ -255,9 +294,9 @@ func (h *HALHandler) GetBootConfig(w http.ResponseWriter, r *http.Request) {
 	}
 
 	for _, path := range configPaths {
-		if output, err := exec.Command("cat", path).Output(); err == nil {
-			config.Raw = string(output)
-			lines := strings.Split(string(output), "\n")
+		if data, err := os.ReadFile(path); err == nil {
+			config.Raw = string(data)
+			lines := strings.Split(string(data), "\n")
 			for _, line := range lines {
 				line = strings.TrimSpace(line)
 				if line == "" || strings.HasPrefix(line, "#") {
