@@ -72,6 +72,7 @@ func SetupRoutes(r chi.Router, h *HALHandler) {
 		r.Post("/interface/{name}/up", h.BringInterfaceUp)
 		r.Post("/interface/{name}/down", h.BringInterfaceDown)
 		r.Get("/status", h.GetNetworkStatus)
+		r.Get("/traffic", h.GetTrafficStats) // NEW: Overall traffic stats
 
 		// WiFi
 		r.Get("/wifi/scan/{iface}", h.ScanWiFi)
@@ -87,7 +88,11 @@ func SetupRoutes(r chi.Router, h *HALHandler) {
 
 	// Firewall
 	r.Route("/firewall", func(r chi.Router) {
+		r.Get("/status", h.GetFirewallStatus) // NEW: Overall status
 		r.Get("/rules", h.GetFirewallRules)
+		r.Get("/forwarding", h.GetForwardingStatus) // NEW: IP forwarding status
+		r.Get("/ipforward", h.GetIPForwardStatus)   // NEW: Alias
+		r.Get("/nat/status", h.GetNATStatus)        // NEW: NAT status
 		r.Post("/rule", h.AddFirewallRule)
 		r.Delete("/rule", h.DeleteFirewallRule)
 		r.Post("/nat/enable", h.EnableNAT)
