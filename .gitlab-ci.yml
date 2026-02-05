@@ -6,8 +6,8 @@
 # - Automatic OpenAPI spec generation from swaggo annotations
 # - Multi-arch builds (ARM64 + AMD64)
 # - Swagger UI auto-updates on each deploy
-#
-# Fixed: Generated openapi.yaml is now properly copied into Docker build context
+# - Buildable coreapps (cubeos-docsindex) built on Pi during deploy
+# - Deleted apps automatically cleaned up from Pi
 #
 stages:
   - validate
@@ -22,7 +22,9 @@ variables:
   CUBEOS_DOMAIN: "cubeos.cube"
   # Service classification
   COMPOSE_SERVICES: "pihole npm cubeos-hal"
-  STACK_SERVICES: "registry cubeos-api cubeos-dashboard cubeos-filebrowser dozzle ollama chromadb"
+  STACK_SERVICES: "registry cubeos-api cubeos-dashboard cubeos-docsindex cubeos-filebrowser dozzle ollama chromadb"
+  # Buildable stacks: these have src/ directories and need local image build before deploy
+  BUILDABLE_STACKS: "cubeos-docsindex"
   # HAL image
   HAL_IMAGE: "ghcr.io/cubeos-app/hal"
   BUILDER_IMAGE: "ghcr.io/cubeos-app/api-builder:latest"
@@ -219,6 +221,46 @@ deploy:
       
       echo "📦 Changed apps: ${CHANGED_APPS:-none}"
       
+      # ──────────────────────────────────────────────────────────
+      # Clean up apps deleted from git but still on Pi
+      # ──────────────────────────────────────────────────────────
+      DELETED_APPS=""
+      for pidir in /cubeos/coreapps/*/; do
+        [ ! -d "$pidir" ] && continue
+        app=$(basename "$pidir")
+        # Skip non-app directories
+        case "$app" in scripts|watchdog) continue;; esac
+        # If dir exists on Pi but not in git, it was deleted
+        if [ ! -d "${app}" ] && [ -d "${pidir}appconfig" ]; then
+          DELETED_APPS="$DELETED_APPS $app"
+          echo "🗑️  Removing deleted app: $app"
+          # Stop compose container if running
+          (cd "${pidir}appconfig" 2>/dev/null && docker compose down --remove-orphans 2>/dev/null) || true
+          # Remove swarm stack if exists
+          docker stack rm "$app" 2>/dev/null || true
+          # Wait for stack removal
+          sleep 3
+          # Remove directory
+          rm -rf "$pidir"
+          echo "  ✅ Cleaned up $app"
+        fi
+      done
+      [ -n "$DELETED_APPS" ] && echo "🗑️  Deleted apps:$DELETED_APPS" || echo "🗑️  No deleted apps"
+      
+      # Filter deleted apps out of CHANGED_APPS (they no longer exist)
+      if [ -n "$DELETED_APPS" ]; then
+        FILTERED=""
+        for app in $CHANGED_APPS; do
+          STILL_EXISTS=true
+          for del in $DELETED_APPS; do
+            [ "$app" = "$del" ] && STILL_EXISTS=false && break
+          done
+          [ "$STILL_EXISTS" = "true" ] && FILTERED="$FILTERED $app"
+        done
+        CHANGED_APPS=$(echo "$FILTERED" | xargs)
+        echo "📦 Changed apps (after cleanup): ${CHANGED_APPS:-none}"
+      fi
+      
       # Sync ALL configs and source (idempotent)
       for dir in */; do
         if [ -d "${dir}appconfig" ]; then
@@ -367,7 +409,7 @@ restart-changed:
           npm|cubeos-hal)
             COMPOSE_APPS="$COMPOSE_APPS $app"
             ;;
-          registry|cubeos-api|cubeos-dashboard|cubeos-filebrowser|dozzle|ollama|chromadb)
+          registry|cubeos-api|cubeos-dashboard|cubeos-docsindex|cubeos-filebrowser|dozzle|ollama|chromadb)
             STACK_APPS="$STACK_APPS $app"
             ;;
           *)
@@ -426,7 +468,7 @@ restart-changed:
       done
       
       # ──────────────────────────────────────────────────────────
-      # Deploy SWARM stacks
+      # Deploy SWARM stacks (with local build for buildable apps)
       # ──────────────────────────────────────────────────────────
       for app in $STACK_APPS; do
         COMPOSE_FILE="/cubeos/coreapps/${app}/appconfig/docker-compose.yml"
@@ -436,6 +478,25 @@ restart-changed:
         fi
         
         echo "── $app (swarm) ──"
+        
+        # ── Build local image if this is a buildable app ──
+        SRC_DIR="/cubeos/coreapps/${app}/src"
+        if [ -d "$SRC_DIR" ] && [ -f "$SRC_DIR/Dockerfile" ]; then
+          echo "  🔨 Building local image..."
+          LOCAL_IMAGE="${app}:${CI_COMMIT_SHORT_SHA}"
+          LOCAL_IMAGE_LATEST="${app}:latest"
+          
+          docker build -t "$LOCAL_IMAGE" -t "$LOCAL_IMAGE_LATEST" "$SRC_DIR"
+          
+          # Also tag as the GHCR name so compose image: reference resolves locally
+          GHCR_IMAGE=$(grep -oP 'image:\s*\K\S+' "$COMPOSE_FILE" | head -1)
+          if [ -n "$GHCR_IMAGE" ]; then
+            docker tag "$LOCAL_IMAGE" "$GHCR_IMAGE"
+            echo "  ✅ Built and tagged: $LOCAL_IMAGE -> $GHCR_IMAGE"
+          else
+            echo "  ✅ Built: $LOCAL_IMAGE"
+          fi
+        fi
         
         # Remove existing stack and stale networks
         echo "  🛑 Removing existing stack..."
