@@ -1,0 +1,65 @@
+# CubeOS Document Indexer
+# Port: 6032
+# Syncs documentation from Git, indexes into ChromaDB for RAG,
+# and serves docs API for the dashboard.
+
+services:
+  cubeos-docsindex:
+    build:
+      context: ../src
+      dockerfile: Dockerfile
+    image: ghcr.io/cubeos-app/cubeos-docsindex:latest
+    ports:
+      - "6032:8080"
+    volumes:
+      - /cubeos/docs:/cubeos/docs
+    environment:
+      - TZ=${TZ:-UTC}
+      - LISTEN_ADDR=:8080
+      - DOCS_REPO_URL=${DOCS_REPO_URL:-https://github.com/cubeos-app/docs.git}
+      - DOCS_LOCAL_PATH=/cubeos/docs
+      - OLLAMA_HOST=${OLLAMA_HOST:-10.42.24.1}
+      - OLLAMA_PORT=${OLLAMA_PORT:-6030}
+      - EMBEDDING_MODEL=${EMBEDDING_MODEL:-nomic-embed-text}
+      - CHROMADB_HOST=${CHROMADB_HOST:-10.42.24.1}
+      - CHROMADB_PORT=${CHROMADB_PORT:-6031}
+      - COLLECTION_NAME=${COLLECTION_NAME:-cubeos_docs}
+      - SYNC_INTERVAL_HOURS=${SYNC_INTERVAL_HOURS:-6}
+      - CHUNK_SIZE=${CHUNK_SIZE:-500}
+      - CHUNK_OVERLAP=${CHUNK_OVERLAP:-50}
+    env_file:
+      - /cubeos/config/defaults.env
+    networks:
+      - cubeos-network
+    deploy:
+      replicas: 1
+      placement:
+        constraints:
+          - node.role == manager
+      resources:
+        limits:
+          memory: 256M
+        reservations:
+          memory: 64M
+      restart_policy:
+        condition: on-failure
+        delay: 10s
+        max_attempts: 5
+        window: 60s
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    labels:
+      cubeos.type: "ai"
+      cubeos.category: "ai"
+      cubeos.port: "6032"
+      cubeos.description: "CubeOS Document Indexer"
+      cubeos.fqdn: "docs.cubeos.cube"
+      cubeos.deployment: "swarm"
+
+networks:
+  cubeos-network:
+    external: true
