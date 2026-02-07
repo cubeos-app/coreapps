@@ -3,6 +3,8 @@ package handlers
 import (
 	_ "embed"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 )
 
@@ -36,13 +38,30 @@ func (h *HALHandler) ServeSwaggerUI(w http.ResponseWriter, r *http.Request) {
 		basePath = "/hal"
 	}
 
+	// Check if local swagger-ui assets exist (offline-first)
+	swaggerDir := os.Getenv("HAL_SWAGGER_DIR")
+	if swaggerDir == "" {
+		swaggerDir = "/app/swagger-ui"
+	}
+
+	cssURL := "https://unpkg.com/swagger-ui-dist@5/swagger-ui.css"
+	bundleURL := "https://unpkg.com/swagger-ui-dist@5/swagger-ui-bundle.js"
+	presetURL := "https://unpkg.com/swagger-ui-dist@5/swagger-ui-standalone-preset.js"
+
+	// Use local assets if available
+	if _, err := os.Stat(filepath.Join(swaggerDir, "swagger-ui.css")); err == nil {
+		cssURL = basePath + "/docs/swagger-ui/swagger-ui.css"
+		bundleURL = basePath + "/docs/swagger-ui/swagger-ui-bundle.js"
+		presetURL = basePath + "/docs/swagger-ui/swagger-ui-standalone-preset.js"
+	}
+
 	html := `<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>CubeOS HAL API Documentation</title>
-    <link rel="stylesheet" type="text/css" href="https://unpkg.com/swagger-ui-dist@5/swagger-ui.css">
+    <link rel="stylesheet" type="text/css" href="` + cssURL + `">
     <style>
         html { box-sizing: border-box; overflow-y: scroll; }
         *, *:before, *:after { box-sizing: inherit; }
@@ -54,8 +73,8 @@ func (h *HALHandler) ServeSwaggerUI(w http.ResponseWriter, r *http.Request) {
 </head>
 <body>
     <div id="swagger-ui"></div>
-    <script src="https://unpkg.com/swagger-ui-dist@5/swagger-ui-bundle.js"></script>
-    <script src="https://unpkg.com/swagger-ui-dist@5/swagger-ui-standalone-preset.js"></script>
+    <script src="` + bundleURL + `"></script>
+    <script src="` + presetURL + `"></script>
     <script>
         window.onload = function() {
             window.ui = SwaggerUIBundle({
@@ -85,6 +104,49 @@ func (h *HALHandler) ServeSwaggerUI(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Write([]byte(html))
+}
+
+// ServeSwaggerAsset serves bundled Swagger UI static files for offline-first operation.
+func (h *HALHandler) ServeSwaggerAsset(w http.ResponseWriter, r *http.Request) {
+	swaggerDir := os.Getenv("HAL_SWAGGER_DIR")
+	if swaggerDir == "" {
+		swaggerDir = "/app/swagger-ui"
+	}
+
+	// Extract filename from URL path (e.g., /hal/docs/swagger-ui/swagger-ui.css -> swagger-ui.css)
+	requestedFile := filepath.Base(r.URL.Path)
+
+	// Only serve known swagger-ui files
+	allowedFiles := map[string]string{
+		"swagger-ui.css":                      "text/css; charset=utf-8",
+		"swagger-ui-bundle.js":                "application/javascript; charset=utf-8",
+		"swagger-ui-standalone-preset.js":     "application/javascript; charset=utf-8",
+	}
+
+	contentType, ok := allowedFiles[requestedFile]
+	if !ok {
+		http.NotFound(w, r)
+		return
+	}
+
+	filePath := filepath.Join(swaggerDir, requestedFile)
+
+	// Prevent path traversal
+	absPath, err := filepath.Abs(filePath)
+	if err != nil || !strings.HasPrefix(absPath, swaggerDir) {
+		http.NotFound(w, r)
+		return
+	}
+
+	data, err := os.ReadFile(absPath)
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+
+	w.Header().Set("Content-Type", contentType)
+	w.Header().Set("Cache-Control", "public, max-age=86400")
+	w.Write(data)
 }
 
 // HealthCheck returns health status.

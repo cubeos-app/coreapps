@@ -11,6 +11,7 @@ services:
     image: ghcr.io/cubeos-app/hal:latest
     container_name: cubeos-hal
     restart: unless-stopped
+    stop_grace_period: 15s
     
     # CRITICAL: Host network mode for direct interface access
     network_mode: host
@@ -33,7 +34,7 @@ services:
     
     environment:
       - HAL_PORT=6005
-      - HAL_HOST=0.0.0.0
+      - HAL_HOST=127.0.0.1
       - TZ=${TZ:-UTC}
       - DBUS_SYSTEM_BUS_ADDRESS=unix:path=/run/dbus/system_bus_socket
       # UPS/Power management
@@ -45,6 +46,11 @@ services:
       # Hardware features
       - HAL_I2C_BUS=1
       - HAL_GPIO_CHIP=gpiochip4
+      # Network service ports
+      - TOR_CONTROL_PORT=9051
+      # Camera/media streaming
+      - STREAM_HOST=cubeos.cube
+      - STREAM_PORT=8080
       # NOTE: vcgencmd removed - HAL now uses sysfs for temperature/throttle
       # which works in Alpine containers without glibc dependencies
     
@@ -58,6 +64,9 @@ services:
       - /dev:/dev:rw
       
       # Network configuration
+      # SECURITY NOTE: These contain credentials (AP passphrase, WiFi passwords).
+      # The support bundle (logs.go) must redact sensitive fields before inclusion.
+      # See HF-03 G02 for the Go-level redaction fix.
       - /etc/hostapd:/etc/hostapd
       - /etc/wpa_supplicant:/etc/wpa_supplicant
       - /var/run/wpa_supplicant:/var/run/wpa_supplicant

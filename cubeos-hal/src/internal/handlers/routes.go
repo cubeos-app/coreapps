@@ -19,6 +19,7 @@ func SetupRoutes(r chi.Router, h *HALHandler) {
 	r.Get("/docs", h.ServeSwaggerUI)
 	r.Get("/docs/", h.ServeSwaggerUI)
 	r.Get("/docs/openapi.yaml", h.ServeOpenAPISpec)
+	r.Get("/docs/swagger-ui/*", h.ServeSwaggerAsset)
 
 	// System
 	r.Route("/system", func(r chi.Router) {
