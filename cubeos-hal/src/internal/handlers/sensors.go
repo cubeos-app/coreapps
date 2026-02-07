@@ -1,11 +1,11 @@
 package handlers
 
 import (
+	"context"
 	"encoding/json"
 
 	"net/http"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -99,14 +99,14 @@ func (h *HALHandler) Get1WireDevices(w http.ResponseWriter, r *http.Request) {
 // @Router /sensors/1wire/device/{id} [get]
 func (h *HALHandler) Read1WireDevice(w http.ResponseWriter, r *http.Request) {
 	deviceID := chi.URLParam(r, "id")
-	if deviceID == "" {
-		errorResponse(w, http.StatusBadRequest, "device ID required")
+	if err := validate1WireDeviceID(deviceID); err != nil {
+		errorResponse(w, http.StatusBadRequest, err.Error())
 		return
 	}
 
 	device := h.read1WireDevice(deviceID)
 	if device.ID == "" {
-		errorResponse(w, http.StatusNotFound, "device not found: "+deviceID)
+		errorResponse(w, http.StatusNotFound, "device not found")
 		return
 	}
 
@@ -166,10 +166,23 @@ func (h *HALHandler) ReadBME280(w http.ResponseWriter, r *http.Request) {
 	if address == "" {
 		address = "0x76"
 	}
+	if err := validateI2CAddress(address); err != nil {
+		errorResponse(w, http.StatusBadRequest, err.Error())
+		return
+	}
 
 	bus := 1
 	if busParam := r.URL.Query().Get("bus"); busParam != "" {
-		bus, _ = strconv.Atoi(busParam)
+		var err error
+		bus, err = strconv.Atoi(busParam)
+		if err != nil {
+			errorResponse(w, http.StatusBadRequest, "invalid bus number")
+			return
+		}
+	}
+	if err := validateI2CBus(bus); err != nil {
+		errorResponse(w, http.StatusBadRequest, err.Error())
+		return
 	}
 
 	reading := h.readBME280(bus, address)
@@ -195,7 +208,16 @@ func (h *HALHandler) ReadBME280(w http.ResponseWriter, r *http.Request) {
 func (h *HALHandler) DetectBME280(w http.ResponseWriter, r *http.Request) {
 	bus := 1
 	if busParam := r.URL.Query().Get("bus"); busParam != "" {
-		bus, _ = strconv.Atoi(busParam)
+		var err error
+		bus, err = strconv.Atoi(busParam)
+		if err != nil {
+			errorResponse(w, http.StatusBadRequest, "invalid bus number")
+			return
+		}
+	}
+	if err := validateI2CBus(bus); err != nil {
+		errorResponse(w, http.StatusBadRequest, err.Error())
+		return
 	}
 
 	var found []map[string]interface{}
@@ -395,11 +417,12 @@ func (h *HALHandler) readBME280(bus int, address string) BME280Reading {
 		Timestamp:  time.Now().UTC().Format(time.RFC3339),
 	}
 
+	ctx := context.Background()
+
 	// Try using bme280 tool if available
-	cmd := exec.Command("bme280", "-a", address, "-b", strconv.Itoa(bus), "-j")
-	if output, err := cmd.Output(); err == nil {
+	if output, err := execWithTimeout(ctx, "bme280", "-a", address, "-b", strconv.Itoa(bus), "-j"); err == nil {
 		var data map[string]interface{}
-		if json.Unmarshal(output, &data) == nil {
+		if json.Unmarshal([]byte(output), &data) == nil {
 			reading.Available = true
 			if v, ok := data["temperature"].(float64); ok {
 				reading.Temperature = v
@@ -432,10 +455,9 @@ print(json.dumps({
 }))
 `
 
-	cmd = exec.Command("python3", "-c", pythonScript, strconv.Itoa(bus), address)
-	if output, err := cmd.Output(); err == nil {
+	if output, err := execWithTimeout(ctx, "python3", "-c", pythonScript, strconv.Itoa(bus), address); err == nil {
 		var data map[string]interface{}
-		if json.Unmarshal(output, &data) == nil {
+		if json.Unmarshal([]byte(output), &data) == nil {
 			reading.Available = true
 			if v, ok := data["temperature"].(float64); ok {
 				reading.Temperature = v

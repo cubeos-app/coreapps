@@ -3,16 +3,20 @@ package handlers
 import (
 	"context"
 	"fmt"
+	"log"
 	"net/http"
 	"os"
-	"os/exec"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/coreos/go-systemd/v22/dbus"
 	"github.com/go-chi/chi/v5"
 )
+
+// powerActionInProgress guards against double-invocation of reboot/shutdown.
+var powerActionInProgress atomic.Bool
 
 // ============================================================================
 // System Types
@@ -87,10 +91,17 @@ type ServiceStatus struct {
 // @Failure 500 {object} ErrorResponse
 // @Router /system/reboot [post]
 func (h *HALHandler) Reboot(w http.ResponseWriter, r *http.Request) {
+	if !powerActionInProgress.CompareAndSwap(false, true) {
+		errorResponse(w, http.StatusConflict, "power action already in progress")
+		return
+	}
 	successResponse(w, "system rebooting...")
 	go func() {
 		time.Sleep(1 * time.Second)
-		exec.Command("systemctl", "reboot").Run()
+		if _, err := execWithTimeout(context.Background(), "systemctl", "reboot"); err != nil {
+			log.Printf("reboot command failed: %v", err)
+			powerActionInProgress.Store(false) // Reset on failure so retry is possible
+		}
 	}()
 }
 
@@ -104,10 +115,17 @@ func (h *HALHandler) Reboot(w http.ResponseWriter, r *http.Request) {
 // @Failure 500 {object} ErrorResponse
 // @Router /system/shutdown [post]
 func (h *HALHandler) Shutdown(w http.ResponseWriter, r *http.Request) {
+	if !powerActionInProgress.CompareAndSwap(false, true) {
+		errorResponse(w, http.StatusConflict, "power action already in progress")
+		return
+	}
 	successResponse(w, "system shutting down...")
 	go func() {
 		time.Sleep(1 * time.Second)
-		exec.Command("systemctl", "poweroff").Run()
+		if _, err := execWithTimeout(context.Background(), "systemctl", "poweroff"); err != nil {
+			log.Printf("shutdown command failed: %v", err)
+			powerActionInProgress.Store(false)
+		}
 	}()
 }
 
@@ -205,7 +223,11 @@ func (h *HALHandler) GetThrottleStatus(w http.ResponseWriter, r *http.Request) {
 
 	// Parse hex value (may be "0x0" or just "0")
 	hexVal = strings.TrimPrefix(hexVal, "0x")
-	val, _ := strconv.ParseInt(hexVal, 16, 64)
+	val, err := strconv.ParseInt(hexVal, 16, 64)
+	if err != nil {
+		errorResponse(w, http.StatusInternalServerError, "failed to parse throttle status")
+		return
+	}
 
 	status := ThrottleStatus{
 		UnderVoltageOccurred:         val&(1<<16) != 0,
@@ -331,8 +353,8 @@ func (h *HALHandler) GetBootConfig(w http.ResponseWriter, r *http.Request) {
 // @Router /system/service/{name}/status [get]
 func (h *HALHandler) ServiceStatus(w http.ResponseWriter, r *http.Request) {
 	name := chi.URLParam(r, "name")
-	if name == "" {
-		errorResponse(w, http.StatusBadRequest, "service name required")
+	if err := validateServiceName(name); err != nil {
+		errorResponse(w, http.StatusBadRequest, err.Error())
 		return
 	}
 
@@ -344,7 +366,8 @@ func (h *HALHandler) ServiceStatus(w http.ResponseWriter, r *http.Request) {
 	ctx := context.Background()
 	conn, err := dbus.NewWithContext(ctx)
 	if err != nil {
-		errorResponse(w, http.StatusInternalServerError, "failed to connect to systemd: "+err.Error())
+		log.Printf("ServiceStatus: dbus connection failed: %v", err)
+		errorResponse(w, http.StatusInternalServerError, "failed to connect to system manager")
 		return
 	}
 	defer conn.Close()
@@ -354,7 +377,8 @@ func (h *HALHandler) ServiceStatus(w http.ResponseWriter, r *http.Request) {
 	// Get unit properties
 	props, err := conn.GetUnitPropertiesContext(ctx, name)
 	if err != nil {
-		errorResponse(w, http.StatusInternalServerError, "failed to get service status: "+err.Error())
+		log.Printf("ServiceStatus: GetUnitProperties failed for %s: %v", name, err)
+		errorResponse(w, http.StatusInternalServerError, "failed to get service status")
 		return
 	}
 
@@ -377,9 +401,8 @@ func (h *HALHandler) ServiceStatus(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Check if enabled using systemctl
-	cmdEnabled := exec.Command("systemctl", "is-enabled", name)
-	if enabledOutput, err := cmdEnabled.Output(); err == nil {
-		status.Enabled = strings.TrimSpace(string(enabledOutput)) == "enabled"
+	if enabledOutput, err := execWithTimeout(r.Context(), "systemctl", "is-enabled", name); err == nil {
+		status.Enabled = strings.TrimSpace(enabledOutput) == "enabled"
 	}
 
 	jsonResponse(w, http.StatusOK, status)
@@ -398,8 +421,8 @@ func (h *HALHandler) ServiceStatus(w http.ResponseWriter, r *http.Request) {
 // @Router /system/service/{name}/restart [post]
 func (h *HALHandler) RestartService(w http.ResponseWriter, r *http.Request) {
 	name := chi.URLParam(r, "name")
-	if name == "" {
-		errorResponse(w, http.StatusBadRequest, "service name required")
+	if err := validateServiceName(name); err != nil {
+		errorResponse(w, http.StatusBadRequest, err.Error())
 		return
 	}
 
@@ -410,7 +433,8 @@ func (h *HALHandler) RestartService(w http.ResponseWriter, r *http.Request) {
 	ctx := context.Background()
 	conn, err := dbus.NewWithContext(ctx)
 	if err != nil {
-		errorResponse(w, http.StatusInternalServerError, "failed to connect to systemd: "+err.Error())
+		log.Printf("RestartService: dbus connection failed: %v", err)
+		errorResponse(w, http.StatusInternalServerError, "failed to connect to system manager")
 		return
 	}
 	defer conn.Close()
@@ -418,13 +442,14 @@ func (h *HALHandler) RestartService(w http.ResponseWriter, r *http.Request) {
 	resultChan := make(chan string, 1)
 	_, err = conn.RestartUnitContext(ctx, name, "replace", resultChan)
 	if err != nil {
-		errorResponse(w, http.StatusInternalServerError, "failed to restart service: "+err.Error())
+		log.Printf("RestartService: RestartUnit failed for %s: %v", name, err)
+		errorResponse(w, http.StatusInternalServerError, "failed to restart service")
 		return
 	}
 
 	result := <-resultChan
 	if result != "done" {
-		errorResponse(w, http.StatusInternalServerError, "service restart failed: "+result)
+		errorResponse(w, http.StatusInternalServerError, "service restart failed")
 		return
 	}
 
@@ -444,8 +469,8 @@ func (h *HALHandler) RestartService(w http.ResponseWriter, r *http.Request) {
 // @Router /system/service/{name}/start [post]
 func (h *HALHandler) StartService(w http.ResponseWriter, r *http.Request) {
 	name := chi.URLParam(r, "name")
-	if name == "" {
-		errorResponse(w, http.StatusBadRequest, "service name required")
+	if err := validateServiceName(name); err != nil {
+		errorResponse(w, http.StatusBadRequest, err.Error())
 		return
 	}
 
@@ -456,7 +481,8 @@ func (h *HALHandler) StartService(w http.ResponseWriter, r *http.Request) {
 	ctx := context.Background()
 	conn, err := dbus.NewWithContext(ctx)
 	if err != nil {
-		errorResponse(w, http.StatusInternalServerError, "failed to connect to systemd: "+err.Error())
+		log.Printf("StartService: dbus connection failed: %v", err)
+		errorResponse(w, http.StatusInternalServerError, "failed to connect to system manager")
 		return
 	}
 	defer conn.Close()
@@ -464,13 +490,14 @@ func (h *HALHandler) StartService(w http.ResponseWriter, r *http.Request) {
 	resultChan := make(chan string, 1)
 	_, err = conn.StartUnitContext(ctx, name, "replace", resultChan)
 	if err != nil {
-		errorResponse(w, http.StatusInternalServerError, "failed to start service: "+err.Error())
+		log.Printf("StartService: StartUnit failed for %s: %v", name, err)
+		errorResponse(w, http.StatusInternalServerError, "failed to start service")
 		return
 	}
 
 	result := <-resultChan
 	if result != "done" {
-		errorResponse(w, http.StatusInternalServerError, "service start failed: "+result)
+		errorResponse(w, http.StatusInternalServerError, "service start failed")
 		return
 	}
 
@@ -490,8 +517,8 @@ func (h *HALHandler) StartService(w http.ResponseWriter, r *http.Request) {
 // @Router /system/service/{name}/stop [post]
 func (h *HALHandler) StopService(w http.ResponseWriter, r *http.Request) {
 	name := chi.URLParam(r, "name")
-	if name == "" {
-		errorResponse(w, http.StatusBadRequest, "service name required")
+	if err := validateServiceName(name); err != nil {
+		errorResponse(w, http.StatusBadRequest, err.Error())
 		return
 	}
 
@@ -502,7 +529,8 @@ func (h *HALHandler) StopService(w http.ResponseWriter, r *http.Request) {
 	ctx := context.Background()
 	conn, err := dbus.NewWithContext(ctx)
 	if err != nil {
-		errorResponse(w, http.StatusInternalServerError, "failed to connect to systemd: "+err.Error())
+		log.Printf("StopService: dbus connection failed: %v", err)
+		errorResponse(w, http.StatusInternalServerError, "failed to connect to system manager")
 		return
 	}
 	defer conn.Close()
@@ -510,13 +538,14 @@ func (h *HALHandler) StopService(w http.ResponseWriter, r *http.Request) {
 	resultChan := make(chan string, 1)
 	_, err = conn.StopUnitContext(ctx, name, "replace", resultChan)
 	if err != nil {
-		errorResponse(w, http.StatusInternalServerError, "failed to stop service: "+err.Error())
+		log.Printf("StopService: StopUnit failed for %s: %v", name, err)
+		errorResponse(w, http.StatusInternalServerError, "failed to stop service")
 		return
 	}
 
 	result := <-resultChan
 	if result != "done" {
-		errorResponse(w, http.StatusInternalServerError, "service stop failed: "+result)
+		errorResponse(w, http.StatusInternalServerError, "service stop failed")
 		return
 	}
 

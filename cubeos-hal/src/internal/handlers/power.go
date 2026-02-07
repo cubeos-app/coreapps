@@ -1,11 +1,11 @@
 package handlers
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"os"
-	"os/exec"
 	"strconv"
 	"strings"
 	"time"
@@ -180,9 +180,10 @@ func (h *HALHandler) GetUPSInfo(w http.ResponseWriter, r *http.Request) {
 // @Failure 500 {object} ErrorResponse
 // @Router /power/charging [post]
 func (h *HALHandler) SetChargingEnabled(w http.ResponseWriter, r *http.Request) {
+	r = limitBody(r, 1<<20) // 1MB
 	var req ChargingRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		errorResponse(w, http.StatusBadRequest, "invalid request: "+err.Error())
+		errorResponse(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
 
@@ -192,9 +193,8 @@ func (h *HALHandler) SetChargingEnabled(w http.ResponseWriter, r *http.Request) 
 		value = 1
 	}
 
-	cmd := exec.Command("gpioset", "gpiochip4", fmt.Sprintf("%d=%d", GPIOChargeCtrl, value))
-	if err := cmd.Run(); err != nil {
-		errorResponse(w, http.StatusInternalServerError, "failed to set charging state: "+err.Error())
+	if _, err := execWithTimeout(r.Context(), "gpioset", "gpiochip4", fmt.Sprintf("%d=%d", GPIOChargeCtrl, value)); err != nil {
+		errorResponse(w, http.StatusInternalServerError, sanitizeExecError("set charging state", err))
 		return
 	}
 
@@ -215,9 +215,8 @@ func (h *HALHandler) SetChargingEnabled(w http.ResponseWriter, r *http.Request) 
 // @Failure 500 {object} ErrorResponse
 // @Router /power/battery/quickstart [post]
 func (h *HALHandler) QuickStartBattery(w http.ResponseWriter, r *http.Request) {
-	cmd := exec.Command("i2cset", "-y", "1", "0x36", "0x06", "0x40", "0x00", "i")
-	if err := cmd.Run(); err != nil {
-		errorResponse(w, http.StatusInternalServerError, "quick-start failed: "+err.Error())
+	if _, err := execWithTimeout(r.Context(), "i2cset", "-y", "1", "0x36", "0x06", "0x40", "0x00", "i"); err != nil {
+		errorResponse(w, http.StatusInternalServerError, sanitizeExecError("battery quick-start", err))
 		return
 	}
 
@@ -226,26 +225,26 @@ func (h *HALHandler) QuickStartBattery(w http.ResponseWriter, r *http.Request) {
 
 // StartPowerMonitor starts power monitoring.
 // @Summary Start power monitor
-// @Description Starts background power monitoring
+// @Description Starts background power monitoring (not yet implemented)
 // @Tags Power
 // @Accept json
 // @Produce json
-// @Success 200 {object} SuccessResponse
+// @Success 501 {object} ErrorResponse
 // @Router /power/monitor/start [post]
 func (h *HALHandler) StartPowerMonitor(w http.ResponseWriter, r *http.Request) {
-	successResponse(w, "power monitoring started")
+	errorResponse(w, http.StatusNotImplemented, "power monitoring not yet implemented")
 }
 
 // StopPowerMonitor stops power monitoring.
 // @Summary Stop power monitor
-// @Description Stops background power monitoring
+// @Description Stops background power monitoring (not yet implemented)
 // @Tags Power
 // @Accept json
 // @Produce json
-// @Success 200 {object} SuccessResponse
+// @Success 501 {object} ErrorResponse
 // @Router /power/monitor/stop [post]
 func (h *HALHandler) StopPowerMonitor(w http.ResponseWriter, r *http.Request) {
-	successResponse(w, "power monitoring stopped")
+	errorResponse(w, http.StatusNotImplemented, "power monitoring not yet implemented")
 }
 
 // ============================================================================
@@ -294,9 +293,8 @@ func (h *HALHandler) GetRTCStatus(w http.ResponseWriter, r *http.Request) {
 // @Failure 500 {object} ErrorResponse
 // @Router /rtc/sync-to-rtc [post]
 func (h *HALHandler) SetRTCTime(w http.ResponseWriter, r *http.Request) {
-	cmd := exec.Command("hwclock", "-w")
-	if output, err := cmd.CombinedOutput(); err != nil {
-		errorResponse(w, http.StatusInternalServerError, fmt.Sprintf("failed to set RTC: %s - %s", err, string(output)))
+	if _, err := execWithTimeout(r.Context(), "hwclock", "-w"); err != nil {
+		errorResponse(w, http.StatusInternalServerError, sanitizeExecError("set RTC time", err))
 		return
 	}
 
@@ -313,9 +311,8 @@ func (h *HALHandler) SetRTCTime(w http.ResponseWriter, r *http.Request) {
 // @Failure 500 {object} ErrorResponse
 // @Router /rtc/sync-from-rtc [post]
 func (h *HALHandler) SyncTimeFromRTC(w http.ResponseWriter, r *http.Request) {
-	cmd := exec.Command("hwclock", "-s")
-	if output, err := cmd.CombinedOutput(); err != nil {
-		errorResponse(w, http.StatusInternalServerError, fmt.Sprintf("failed to sync from RTC: %s - %s", err, string(output)))
+	if _, err := execWithTimeout(r.Context(), "hwclock", "-s"); err != nil {
+		errorResponse(w, http.StatusInternalServerError, sanitizeExecError("sync time from RTC", err))
 		return
 	}
 
@@ -334,9 +331,10 @@ func (h *HALHandler) SyncTimeFromRTC(w http.ResponseWriter, r *http.Request) {
 // @Failure 500 {object} ErrorResponse
 // @Router /rtc/wakealarm [post]
 func (h *HALHandler) SetWakeAlarm(w http.ResponseWriter, r *http.Request) {
+	r = limitBody(r, 1<<20) // 1MB
 	var req WakeAlarmRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		errorResponse(w, http.StatusBadRequest, "invalid request: "+err.Error())
+		errorResponse(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
 
@@ -488,10 +486,11 @@ func (h *HALHandler) getBatteryStatus() BatteryStatus {
 		LastUpdated: time.Now().UTC().Format(time.RFC3339),
 	}
 
+	ctx := context.Background()
+
 	// Read voltage from MAX17040
-	cmd := exec.Command("i2cget", "-y", "1", "0x36", "0x02", "w")
-	if output, err := cmd.Output(); err == nil {
-		valStr := strings.TrimSpace(string(output))
+	if output, err := execWithTimeout(ctx, "i2cget", "-y", "1", "0x36", "0x02", "w"); err == nil {
+		valStr := strings.TrimSpace(output)
 		if val, err := strconv.ParseInt(strings.TrimPrefix(valStr, "0x"), 16, 64); err == nil {
 			swapped := ((val & 0xFF) << 8) | ((val >> 8) & 0xFF)
 			status.VoltageRaw = uint16(swapped)
@@ -501,9 +500,8 @@ func (h *HALHandler) getBatteryStatus() BatteryStatus {
 	}
 
 	// Read SOC
-	cmd = exec.Command("i2cget", "-y", "1", "0x36", "0x04", "w")
-	if output, err := cmd.Output(); err == nil {
-		valStr := strings.TrimSpace(string(output))
+	if output, err := execWithTimeout(ctx, "i2cget", "-y", "1", "0x36", "0x04", "w"); err == nil {
+		valStr := strings.TrimSpace(output)
 		if val, err := strconv.ParseInt(strings.TrimPrefix(valStr, "0x"), 16, 64); err == nil {
 			swapped := ((val & 0xFF) << 8) | ((val >> 8) & 0xFF)
 			status.PercentageRaw = uint16(swapped)
@@ -512,15 +510,13 @@ func (h *HALHandler) getBatteryStatus() BatteryStatus {
 	}
 
 	// Check GPIO for AC present
-	cmd = exec.Command("gpioget", "gpiochip4", "6")
-	if output, err := cmd.Output(); err == nil {
-		status.ACPresent = strings.TrimSpace(string(output)) == "1"
+	if output, err := execWithTimeout(ctx, "gpioget", "gpiochip4", "6"); err == nil {
+		status.ACPresent = strings.TrimSpace(output) == "1"
 	}
 
 	// Check GPIO for charging enabled
-	cmd = exec.Command("gpioget", "gpiochip4", "16")
-	if output, err := cmd.Output(); err == nil {
-		status.ChargingEnabled = strings.TrimSpace(string(output)) == "0"
+	if output, err := execWithTimeout(ctx, "gpioget", "gpiochip4", "16"); err == nil {
+		status.ChargingEnabled = strings.TrimSpace(output) == "0"
 	}
 
 	status.IsLow = status.Percentage < LowBatteryThreshold
@@ -539,9 +535,8 @@ func (h *HALHandler) getUPSInfo() UPSInfo {
 		PiVersion:  5,
 	}
 
-	cmd := exec.Command("i2cget", "-y", "1", "0x36", "0x08", "w")
-	if output, err := cmd.Output(); err == nil {
-		valStr := strings.TrimSpace(string(output))
+	if output, err := execWithTimeout(context.Background(), "i2cget", "-y", "1", "0x36", "0x08", "w"); err == nil {
+		valStr := strings.TrimSpace(output)
 		if val, err := strconv.ParseInt(strings.TrimPrefix(valStr, "0x"), 16, 64); err == nil {
 			info.ChipVersion = uint16(val)
 			info.Detected = true
@@ -560,9 +555,8 @@ func (h *HALHandler) getRTCStatus() RTCStatus {
 	if _, err := os.Stat("/dev/rtc0"); err == nil {
 		status.Available = true
 
-		cmd := exec.Command("hwclock", "-r")
-		if output, err := cmd.Output(); err == nil {
-			status.Time = strings.TrimSpace(string(output))
+		if output, err := execWithTimeout(context.Background(), "hwclock", "-r"); err == nil {
+			status.Time = strings.TrimSpace(output)
 		}
 
 		status.Synchronized = true
