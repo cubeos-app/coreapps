@@ -20,7 +20,13 @@ var openapiSpec []byte
 // @Router /docs/openapi.yaml [get]
 func (h *HALHandler) ServeOpenAPISpec(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/yaml; charset=utf-8")
-	w.Header().Set("Access-Control-Allow-Origin", "*")
+	// Restrict CORS to localhost origins only (HAL is not internet-facing)
+	origin := r.Header.Get("Origin")
+	if origin != "" && (strings.HasPrefix(origin, "http://127.0.0.1") ||
+		strings.HasPrefix(origin, "http://localhost") ||
+		strings.HasPrefix(origin, "http://cubeos.cube")) {
+		w.Header().Set("Access-Control-Allow-Origin", origin)
+	}
 	w.Write(openapiSpec)
 }
 
@@ -158,9 +164,13 @@ func (h *HALHandler) ServeSwaggerAsset(w http.ResponseWriter, r *http.Request) {
 // @Success 200 {object} map[string]interface{}
 // @Router /health [get]
 func (h *HALHandler) HealthCheck(w http.ResponseWriter, r *http.Request) {
+	version := os.Getenv("HAL_VERSION")
+	if version == "" {
+		version = "1.1.0"
+	}
 	jsonResponse(w, http.StatusOK, map[string]interface{}{
 		"status":  "healthy",
 		"service": "cubeos-hal",
-		"version": "1.1.0",
+		"version": version,
 	})
 }
