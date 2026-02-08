@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"math"
+	"strings"
 	"sync"
 	"time"
 )
@@ -58,6 +59,11 @@ type MeshtasticDriver struct {
 	// Configuration
 	serialBaud int
 	serialPort string // Preferred port (empty = auto-detect)
+	bleAddress string // Preferred BLE address (empty = auto-scan)
+	bleAdapter string // BlueZ adapter (default: hci0)
+
+	// BLE reconnect manager
+	reconnector *BLEReconnector
 }
 
 // MeshNode represents a node in the Meshtastic mesh network.
@@ -127,22 +133,32 @@ type MeshtasticTransport interface {
 
 // NewMeshtasticDriver creates a new Meshtastic driver instance.
 func NewMeshtasticDriver() *MeshtasticDriver {
-	return &MeshtasticDriver{
+	d := &MeshtasticDriver{
 		nodes:        make(map[uint32]*MeshNode),
 		messages:     make([]*MeshMessage, 0, 1000),
 		msgBufSize:   1000,
 		eventClients: make(map[uint64]chan MeshEvent),
 		serialBaud:   115200,
+		bleAdapter:   "hci0",
 	}
+	// Start BLE reconnector (monitors connection, auto-reconnects BLE on drop)
+	d.reconnector = NewBLEReconnector(d, DefaultBLEReconnectConfig())
+	d.reconnector.Start()
+	return d
 }
 
 // ============================================================================
 // Connection Management
 // ============================================================================
 
-// Connect establishes a connection to a Meshtastic device via the specified
-// port (or auto-detect if empty). It performs the config handshake to download
-// the NodeDB from the device.
+// Connect establishes a connection to a Meshtastic device.
+// The port parameter controls transport selection:
+//   - "" (empty)              → auto-detect: try serial first, then BLE
+//   - "/dev/ttyACM0"          → explicit serial port
+//   - "ble://AA:BB:CC:DD:EE:FF" → explicit BLE address
+//   - "ble://"                → BLE auto-scan (skip serial)
+//
+// It performs the config handshake to download the NodeDB from the device.
 func (d *MeshtasticDriver) Connect(ctx context.Context, port string) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -150,18 +166,90 @@ func (d *MeshtasticDriver) Connect(ctx context.Context, port string) error {
 	// Close existing connection if any
 	d.disconnectLocked()
 
-	// Create serial transport (Phase 2a — serial only)
-	if port == "" {
-		port = d.serialPort
+	// Determine transport based on port parameter
+	var transport MeshtasticTransport
+	var transportErr error
+
+	switch {
+	case IsBLEAddress(port):
+		// Explicit BLE: "ble://AA:BB:CC:DD:EE:FF" or "ble://" (auto-scan)
+		addr := strings.TrimPrefix(port, "ble://")
+		adapter, _ := sanitizeBLEAdapterName(d.bleAdapter)
+		transport = NewBLETransport(addr, adapter)
+		log.Printf("meshtastic: connecting via BLE (address=%q, adapter=%s)", addr, adapter)
+
+	case port != "":
+		// Explicit serial port
+		transport = NewSerialTransport(port, d.serialBaud)
+		log.Printf("meshtastic: connecting via serial (port=%s)", port)
+
+	default:
+		// Auto-detect: try serial first, then BLE fallback
+		serialPort := d.serialPort
+		if serialPort == "" {
+			// Check if serial candidates exist
+			candidates := findSerialCandidates()
+			for _, c := range candidates {
+				if isMeshtasticVIDPID(c) {
+					serialPort = c
+					break
+				}
+			}
+			if serialPort == "" && len(candidates) > 0 {
+				// Try first ACM device
+				for _, c := range candidates {
+					if strings.Contains(c, "ttyACM") {
+						serialPort = c
+						break
+					}
+				}
+			}
+		}
+
+		if serialPort != "" {
+			log.Printf("meshtastic: auto-detect trying serial %s", serialPort)
+			serialTransport := NewSerialTransport(serialPort, d.serialBaud)
+			if err := serialTransport.Connect(ctx); err == nil {
+				transport = serialTransport
+			} else {
+				log.Printf("meshtastic: serial failed (%v), trying BLE", err)
+				transportErr = err
+			}
+		}
+
+		if transport == nil {
+			// Try BLE fallback
+			if IsBLEAvailable(d.bleAdapter) {
+				log.Printf("meshtastic: auto-detect trying BLE")
+				adapter, _ := sanitizeBLEAdapterName(d.bleAdapter)
+				bleTransport := NewBLETransport(d.bleAddress, adapter)
+				if err := bleTransport.Connect(ctx); err == nil {
+					transport = bleTransport
+				} else {
+					if transportErr != nil {
+						transportErr = fmt.Errorf("serial: %v; BLE: %w", transportErr, err)
+					} else {
+						transportErr = fmt.Errorf("BLE: %w", err)
+					}
+				}
+			} else if transportErr == nil {
+				transportErr = fmt.Errorf("no serial devices found and BLE not available")
+			}
+		}
+
+		if transport == nil {
+			return fmt.Errorf("auto-detect failed: %w", transportErr)
+		}
 	}
-	transport := NewSerialTransport(port, d.serialBaud)
+
+	// Connect transport (if not already connected during auto-detect)
+	if !transport.IsConnected() {
+		if err := transport.Connect(ctx); err != nil {
+			return fmt.Errorf("transport connect failed: %w", err)
+		}
+	}
+
 	d.transport = transport
-
-	// Connect transport
-	if err := transport.Connect(ctx); err != nil {
-		return fmt.Errorf("transport connect failed: %w", err)
-	}
-
 	d.connected = true
 	d.configComplete = false
 	d.nodes = make(map[uint32]*MeshNode)
@@ -201,7 +289,7 @@ func (d *MeshtasticDriver) Connect(ctx context.Context, port string) error {
 			d.mu.Unlock()
 			d.emitEvent(MeshEvent{
 				Type:    "connected",
-				Message: fmt.Sprintf("connected to %s (config timeout, partial NodeDB)", d.transport.DeviceAddress()),
+				Message: fmt.Sprintf("connected to %s via %s (config timeout, partial NodeDB)", d.transport.DeviceAddress(), d.transport.TransportType()),
 				Time:    time.Now().UTC().Format(time.RFC3339),
 			})
 			return nil
@@ -212,7 +300,7 @@ func (d *MeshtasticDriver) Connect(ctx context.Context, port string) error {
 			if complete {
 				d.emitEvent(MeshEvent{
 					Type:    "connected",
-					Message: fmt.Sprintf("connected to %s (%d nodes)", d.transport.DeviceAddress(), len(d.nodes)),
+					Message: fmt.Sprintf("connected to %s via %s (%d nodes)", d.transport.DeviceAddress(), d.transport.TransportType(), len(d.nodes)),
 					Time:    time.Now().UTC().Format(time.RFC3339),
 				})
 				return nil
@@ -566,20 +654,29 @@ func (d *MeshtasticDriver) GetPosition() *MeshNode {
 // Device Scanning (stateless — does not affect persistent connection)
 // ============================================================================
 
-// ScanDevices scans for Meshtastic devices on serial ports.
+// ScanDevices scans for Meshtastic devices on serial ports and BLE.
 // This is independent of the persistent connection.
 func (d *MeshtasticDriver) ScanDevices(ctx context.Context) []MeshtasticDeviceInfo {
-	return scanMeshtasticPorts(ctx)
+	// Scan serial ports
+	devices := scanMeshtasticPorts(ctx)
+
+	// Scan BLE devices (best effort — may fail if BlueZ unavailable)
+	adapter, _ := sanitizeBLEAdapterName(d.bleAdapter)
+	bleDevices := ScanBLEDevices(ctx, adapter)
+	devices = append(devices, bleDevices...)
+
+	return devices
 }
 
 // MeshtasticDeviceInfo holds info about a detected Meshtastic device.
 // @Description Detected Meshtastic device
 type MeshtasticDeviceInfo struct {
-	Port        string `json:"port" example:"/dev/ttyACM0"`
-	Description string `json:"description,omitempty" example:"Heltec LoRa V4"`
-	VID         string `json:"vid,omitempty" example:"303a"`
-	PID         string `json:"pid,omitempty" example:"1001"`
-	Responding  bool   `json:"responding" example:"true"`
+	Port          string `json:"port" example:"/dev/ttyACM0"`
+	Description   string `json:"description,omitempty" example:"Heltec LoRa V4"`
+	VID           string `json:"vid,omitempty" example:"303a"`
+	PID           string `json:"pid,omitempty" example:"1001"`
+	Responding    bool   `json:"responding" example:"true"`
+	TransportType string `json:"transport_type,omitempty" example:"serial"`
 }
 
 // ============================================================================

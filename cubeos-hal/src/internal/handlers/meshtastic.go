@@ -15,9 +15,9 @@ import (
 // Meshtastic REST Handlers
 // ============================================================================
 
-// GetMeshtasticDevices scans for Meshtastic devices on serial ports.
+// GetMeshtasticDevices scans for Meshtastic devices on serial ports and BLE.
 // @Summary List Meshtastic devices
-// @Description Scans USB serial ports for Meshtastic-compatible LoRa radios (VID:PID matching). Independent of active connection.
+// @Description Scans USB serial ports (VID:PID matching) and Bluetooth Low Energy (Meshtastic service UUID) for Meshtastic-compatible LoRa radios. Independent of active connection.
 // @Tags Meshtastic
 // @Produce json
 // @Success 200 {object} map[string]interface{}
@@ -131,19 +131,21 @@ func (h *HALHandler) GetMeshtasticPosition(w http.ResponseWriter, r *http.Reques
 
 // ConnectMeshtastic establishes a connection to a Meshtastic device.
 // @Summary Connect to Meshtastic device
-// @Description Connects to a Meshtastic device via USB serial and downloads the NodeDB
+// @Description Connects to a Meshtastic device via USB serial or BLE and downloads the NodeDB. Transport is selected automatically or can be specified explicitly.
 // @Tags Meshtastic
 // @Accept json
 // @Produce json
-// @Param request body object false "Connection parameters"
+// @Param request body object false "Connection parameters: port (serial path), address (BLE MAC), transport (auto/serial/ble)"
 // @Success 200 {object} map[string]interface{}
 // @Failure 400 {object} ErrorResponse
 // @Failure 500 {object} ErrorResponse
 // @Router /hal/meshtastic/connect [post]
 func (h *HALHandler) ConnectMeshtastic(w http.ResponseWriter, r *http.Request) {
-	// Parse optional port parameter
+	// Parse optional connection parameters
 	var req struct {
-		Port string `json:"port"`
+		Port      string `json:"port"`      // Serial port path (e.g., "/dev/ttyACM0")
+		Address   string `json:"address"`   // BLE MAC address (e.g., "AA:BB:CC:DD:EE:FF")
+		Transport string `json:"transport"` // "auto" (default), "serial", or "ble"
 	}
 
 	// Body is optional — empty body means auto-detect
@@ -155,19 +157,61 @@ func (h *HALHandler) ConnectMeshtastic(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Validate port if provided
-	if req.Port != "" {
-		if err := validateSerialPort(req.Port); err != nil {
-			errorResponse(w, http.StatusBadRequest, err.Error())
-			return
+	// Default transport to auto
+	if req.Transport == "" {
+		req.Transport = "auto"
+	}
+
+	// Build the connect target string based on transport selection
+	var connectTarget string
+	switch req.Transport {
+	case "serial":
+		if req.Port != "" {
+			if err := validateSerialPort(req.Port); err != nil {
+				errorResponse(w, http.StatusBadRequest, err.Error())
+				return
+			}
 		}
+		connectTarget = req.Port // Empty = serial auto-detect
+
+	case "ble":
+		if req.Address != "" {
+			if err := validateBLEAddress(req.Address); err != nil {
+				errorResponse(w, http.StatusBadRequest, err.Error())
+				return
+			}
+			connectTarget = "ble://" + req.Address
+		} else {
+			connectTarget = "ble://" // BLE auto-scan
+		}
+
+	case "auto":
+		// Backwards-compatible: if port is specified, use it as-is
+		if req.Port != "" {
+			if err := validateSerialPort(req.Port); err != nil {
+				errorResponse(w, http.StatusBadRequest, err.Error())
+				return
+			}
+			connectTarget = req.Port
+		} else if req.Address != "" {
+			if err := validateBLEAddress(req.Address); err != nil {
+				errorResponse(w, http.StatusBadRequest, err.Error())
+				return
+			}
+			connectTarget = "ble://" + req.Address
+		}
+		// Empty connectTarget = full auto-detect (serial → BLE)
+
+	default:
+		errorResponse(w, http.StatusBadRequest, "transport must be 'auto', 'serial', or 'ble'")
+		return
 	}
 
 	// Connect with a generous timeout for config download
 	ctx, cancel := getConnectContext(r.Context(), 30*time.Second)
 	defer cancel()
 
-	if err := h.meshtastic.Connect(ctx, req.Port); err != nil {
+	if err := h.meshtastic.Connect(ctx, connectTarget); err != nil {
 		log.Printf("meshtastic: connect failed: %v", err)
 		errorResponse(w, http.StatusInternalServerError, fmt.Sprintf("connection failed: %v", err))
 		return
@@ -184,6 +228,13 @@ func (h *HALHandler) ConnectMeshtastic(w http.ResponseWriter, r *http.Request) {
 	if myNode := d.GetMyNode(); myNode != nil {
 		response["node_name"] = myNode.LongName
 	}
+	// Report which transport was actually used
+	d.mu.RLock()
+	if d.transport != nil {
+		response["transport"] = d.transport.TransportType()
+		response["address"] = d.transport.DeviceAddress()
+	}
+	d.mu.RUnlock()
 
 	jsonResponse(w, http.StatusOK, response)
 }

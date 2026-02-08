@@ -374,7 +374,8 @@ func scanMeshtasticPorts(ctx context.Context) []MeshtasticDeviceInfo {
 		}
 
 		info := MeshtasticDeviceInfo{
-			Port: port,
+			Port:          port,
+			TransportType: "serial",
 		}
 
 		// Get VID:PID
