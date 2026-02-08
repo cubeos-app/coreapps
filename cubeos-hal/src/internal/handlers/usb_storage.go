@@ -1,11 +1,12 @@
 package handlers
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"os"
-	"os/exec"
 	"strings"
 )
 
@@ -78,14 +79,35 @@ func (h *HALHandler) GetUSBStorageDevices(w http.ResponseWriter, r *http.Request
 // @Failure 500 {object} ErrorResponse
 // @Router /storage/usb/mount [post]
 func (h *HALHandler) MountUSBStorage(w http.ResponseWriter, r *http.Request) {
+	r = limitBody(r, 1<<20) // 1MB
 	var req USBMountRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		errorResponse(w, http.StatusBadRequest, "invalid request: "+err.Error())
+		errorResponse(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
 
-	if req.Device == "" {
-		errorResponse(w, http.StatusBadRequest, "device required")
+	// Validate device path
+	if err := validateBlockDevice(req.Device); err != nil {
+		errorResponse(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	// Verify device exists
+	if _, err := os.Stat(req.Device); os.IsNotExist(err) {
+		errorResponse(w, http.StatusNotFound, "device not found")
+		return
+	}
+
+	// Verify device is removable via lsblk
+	ctx := r.Context()
+	checkOut, err := execWithTimeout(ctx, "lsblk", "-ndo", "RM", req.Device)
+	if err != nil {
+		log.Printf("MountUSBStorage: lsblk check failed: %v", err)
+		errorResponse(w, http.StatusInternalServerError, "failed to verify device")
+		return
+	}
+	if strings.TrimSpace(checkOut) != "1" {
+		errorResponse(w, http.StatusBadRequest, "device is not removable")
 		return
 	}
 
@@ -96,22 +118,34 @@ func (h *HALHandler) MountUSBStorage(w http.ResponseWriter, r *http.Request) {
 		mountpoint = "/mnt/" + devName
 	}
 
-	// Create mountpoint
-	if err := os.MkdirAll(mountpoint, 0755); err != nil {
-		errorResponse(w, http.StatusInternalServerError, "failed to create mountpoint: "+err.Error())
+	// Validate mountpoint is under /mnt/ or /media/
+	if err := validateMountpoint(mountpoint); err != nil {
+		errorResponse(w, http.StatusBadRequest, err.Error())
 		return
 	}
 
-	// Build mount options
+	// Validate mount options
 	options := "rw,noatime"
 	if req.Options != "" {
+		if err := validateMountOptions(req.Options); err != nil {
+			errorResponse(w, http.StatusBadRequest, err.Error())
+			return
+		}
 		options = req.Options
 	}
 
-	// Mount
-	cmd := exec.Command("mount", "-o", options, req.Device, mountpoint)
-	if output, err := cmd.CombinedOutput(); err != nil {
-		errorResponse(w, http.StatusInternalServerError, fmt.Sprintf("mount failed: %s - %s", err, string(output)))
+	// Create mountpoint
+	if err := os.MkdirAll(mountpoint, 0755); err != nil {
+		log.Printf("MountUSBStorage: mkdir failed: %v", err)
+		errorResponse(w, http.StatusInternalServerError, "failed to create mountpoint")
+		return
+	}
+
+	// Mount with timeout
+	out, err := execWithTimeout(ctx, "mount", "-o", options, req.Device, mountpoint)
+	if err != nil {
+		log.Printf("MountUSBStorage: mount failed: %s: %v", out, err)
+		errorResponse(w, http.StatusInternalServerError, sanitizeExecError("mount", err))
 		return
 	}
 
@@ -130,9 +164,10 @@ func (h *HALHandler) MountUSBStorage(w http.ResponseWriter, r *http.Request) {
 // @Failure 500 {object} ErrorResponse
 // @Router /storage/usb/unmount [post]
 func (h *HALHandler) UnmountUSBStorage(w http.ResponseWriter, r *http.Request) {
+	r = limitBody(r, 1<<20) // 1MB
 	var req USBMountRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		errorResponse(w, http.StatusBadRequest, "invalid request: "+err.Error())
+		errorResponse(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
 
@@ -145,12 +180,31 @@ func (h *HALHandler) UnmountUSBStorage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Sync before unmount
-	exec.Command("sync").Run()
+	// If it looks like a mountpoint path, validate it's under /mnt/ or /media/
+	if strings.HasPrefix(target, "/") && !strings.HasPrefix(target, "/dev/") {
+		if err := validateMountpoint(target); err != nil {
+			errorResponse(w, http.StatusBadRequest, err.Error())
+			return
+		}
+	} else {
+		// It's a device path — validate it
+		if err := validateBlockDevice(target); err != nil {
+			errorResponse(w, http.StatusBadRequest, err.Error())
+			return
+		}
+	}
 
-	cmd := exec.Command("umount", target)
-	if output, err := cmd.CombinedOutput(); err != nil {
-		errorResponse(w, http.StatusInternalServerError, fmt.Sprintf("unmount failed: %s - %s", err, string(output)))
+	ctx := r.Context()
+
+	// Sync before unmount
+	if _, err := execWithTimeout(ctx, "sync"); err != nil {
+		log.Printf("UnmountUSBStorage: sync warning: %v", err)
+	}
+
+	out, err := execWithTimeout(ctx, "umount", target)
+	if err != nil {
+		log.Printf("UnmountUSBStorage: umount failed: %s: %v", out, err)
+		errorResponse(w, http.StatusInternalServerError, sanitizeExecError("unmount", err))
 		return
 	}
 
@@ -169,9 +223,10 @@ func (h *HALHandler) UnmountUSBStorage(w http.ResponseWriter, r *http.Request) {
 // @Failure 500 {object} ErrorResponse
 // @Router /storage/usb/eject [post]
 func (h *HALHandler) EjectUSBStorage(w http.ResponseWriter, r *http.Request) {
+	r = limitBody(r, 1<<20) // 1MB
 	var req USBMountRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		errorResponse(w, http.StatusBadRequest, "invalid request: "+err.Error())
+		errorResponse(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
 
@@ -180,24 +235,51 @@ func (h *HALHandler) EjectUSBStorage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Validate device name — strip /dev/ prefix if present, validate the base name
+	devName := strings.TrimPrefix(req.Device, "/dev/")
+	// Get base device (e.g., "sda" from "sda1")
+	baseDev := strings.TrimRight(devName, "0123456789")
+	if err := validateDeviceName(baseDev); err != nil {
+		errorResponse(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	ctx := r.Context()
+
 	// Sync first
-	exec.Command("sync").Run()
+	if _, err := execWithTimeout(ctx, "sync"); err != nil {
+		log.Printf("EjectUSBStorage: sync warning: %v", err)
+	}
 
-	// Get base device (sda from sda1)
-	baseDev := strings.TrimRight(req.Device, "0123456789")
-	baseDev = strings.TrimPrefix(baseDev, "/dev/")
-
-	// Try to unmount all partitions first
-	cmd := exec.Command("bash", "-c", fmt.Sprintf("umount /dev/%s* 2>/dev/null || true", baseDev))
-	cmd.Run()
+	// Find all partitions for this device via lsblk (replaces bash -c glob)
+	lsblkOut, err := execWithTimeout(ctx, "lsblk", "-nlo", "NAME,MOUNTPOINT", "/dev/"+baseDev)
+	if err != nil {
+		log.Printf("EjectUSBStorage: lsblk failed: %v", err)
+		// Continue anyway — device might not have partitions
+	} else {
+		// Unmount each mounted partition individually
+		for _, line := range strings.Split(strings.TrimSpace(lsblkOut), "\n") {
+			fields := strings.Fields(line)
+			if len(fields) >= 2 && fields[1] != "" {
+				mountpoint := fields[1]
+				out, err := execWithTimeout(ctx, "umount", mountpoint)
+				if err != nil {
+					log.Printf("EjectUSBStorage: umount %s: %s: %v", mountpoint, out, err)
+					// Continue — try to unmount others
+				}
+			}
+		}
+	}
 
 	// Eject
-	cmd = exec.Command("eject", "/dev/"+baseDev)
-	if output, err := cmd.CombinedOutput(); err != nil {
+	out, err := execWithTimeout(ctx, "eject", "/dev/"+baseDev)
+	if err != nil {
+		log.Printf("EjectUSBStorage: eject failed: %s: %v", out, err)
 		// Try udisks2 as fallback
-		cmd = exec.Command("udisksctl", "power-off", "-b", "/dev/"+baseDev)
-		if output2, err2 := cmd.CombinedOutput(); err2 != nil {
-			errorResponse(w, http.StatusInternalServerError, fmt.Sprintf("eject failed: %s - %s / %s", err, string(output), string(output2)))
+		out2, err2 := execWithTimeout(ctx, "udisksctl", "power-off", "-b", "/dev/"+baseDev)
+		if err2 != nil {
+			log.Printf("EjectUSBStorage: udisksctl fallback failed: %s: %v", out2, err2)
+			errorResponse(w, http.StatusInternalServerError, sanitizeExecError("eject", err))
 			return
 		}
 	}
@@ -213,8 +295,9 @@ func (h *HALHandler) scanUSBStorage() []USBStorageDevice {
 	var devices []USBStorageDevice
 
 	// Use lsblk to get block devices with detailed info
-	cmd := exec.Command("lsblk", "-J", "-b", "-o", "NAME,SIZE,TYPE,VENDOR,MODEL,SERIAL,FSTYPE,LABEL,MOUNTPOINT,RM,TRAN,PATH")
-	output, err := cmd.Output()
+	ctx, cancel := context.WithTimeout(context.Background(), defaultExecTimeout)
+	defer cancel()
+	output, err := execWithTimeout(ctx, "lsblk", "-J", "-b", "-o", "NAME,SIZE,TYPE,VENDOR,MODEL,SERIAL,FSTYPE,LABEL,MOUNTPOINT,RM,TRAN,PATH")
 	if err != nil {
 		return devices
 	}
@@ -245,7 +328,7 @@ func (h *HALHandler) scanUSBStorage() []USBStorageDevice {
 		} `json:"blockdevices"`
 	}
 
-	if err := json.Unmarshal(output, &result); err != nil {
+	if err := json.Unmarshal([]byte(output), &result); err != nil {
 		return devices
 	}
 

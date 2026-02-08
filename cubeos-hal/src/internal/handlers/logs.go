@@ -2,11 +2,12 @@ package handlers
 
 import (
 	"archive/zip"
+	"context"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"os"
-	"os/exec"
 	"strconv"
 	"strings"
 )
@@ -53,22 +54,30 @@ func (h *HALHandler) GetKernelLogs(w http.ResponseWriter, r *http.Request) {
 			lines = n
 		}
 	}
+	// HF03-22: Cap lines at 10000
+	if lines > 10000 {
+		lines = 10000
+	}
 
 	args := []string{"-T"}
 
-	// Add level filter if specified
+	// HF03-19: Validate level parameter
 	if level := r.URL.Query().Get("level"); level != "" {
+		if err := validateLogLevel(level); err != nil {
+			errorResponse(w, http.StatusBadRequest, err.Error())
+			return
+		}
 		args = append(args, "-l", level)
 	}
 
-	cmd := exec.Command("dmesg", args...)
-	output, err := cmd.Output()
+	output, err := execWithTimeout(r.Context(), "dmesg", args...)
 	if err != nil {
-		errorResponse(w, http.StatusInternalServerError, "failed to get kernel logs: "+err.Error())
+		log.Printf("GetKernelLogs: dmesg failed: %v", err)
+		errorResponse(w, http.StatusInternalServerError, sanitizeExecError("get kernel logs", err))
 		return
 	}
 
-	allLines := strings.Split(string(output), "\n")
+	allLines := strings.Split(output, "\n")
 
 	// Remove empty last line
 	if len(allLines) > 0 && allLines[len(allLines)-1] == "" {
@@ -109,32 +118,51 @@ func (h *HALHandler) GetJournalLogs(w http.ResponseWriter, r *http.Request) {
 			lines = n
 		}
 	}
+	// HF03-22: Cap lines at 10000
+	if lines > 10000 {
+		lines = 10000
+	}
 
 	journalArgs := []string{"-n", strconv.Itoa(lines), "--no-pager", "-o", "short-iso"}
 
+	// HF03-20: Validate unit name
 	if unit := r.URL.Query().Get("unit"); unit != "" {
+		if err := validateUnitName(unit); err != nil {
+			errorResponse(w, http.StatusBadRequest, err.Error())
+			return
+		}
 		journalArgs = append(journalArgs, "-u", unit)
 	}
 
+	// HF03-20: Validate since parameter
 	if since := r.URL.Query().Get("since"); since != "" {
+		if err := validateJournalSince(since); err != nil {
+			errorResponse(w, http.StatusBadRequest, err.Error())
+			return
+		}
 		journalArgs = append(journalArgs, "--since", since)
 	}
 
+	// HF03-20: Validate priority (0-7)
 	if priority := r.URL.Query().Get("priority"); priority != "" {
+		if err := validateJournalPriority(priority); err != nil {
+			errorResponse(w, http.StatusBadRequest, err.Error())
+			return
+		}
 		journalArgs = append(journalArgs, "-p", priority)
 	}
 
 	// Use nsenter to access host's journalctl (Alpine doesn't have systemd)
 	// HAL runs with pid:host so nsenter -t 1 -m accesses host mount namespace
 	args := append([]string{"-t", "1", "-m", "--", "journalctl"}, journalArgs...)
-	cmd := exec.Command("nsenter", args...)
-	output, err := cmd.Output()
+	output, err := execWithTimeout(r.Context(), "nsenter", args...)
 	if err != nil {
-		errorResponse(w, http.StatusInternalServerError, "failed to get journal: "+err.Error())
+		log.Printf("GetJournalLogs: journalctl failed: %v", err)
+		errorResponse(w, http.StatusInternalServerError, sanitizeExecError("get journal", err))
 		return
 	}
 
-	logLines := strings.Split(strings.TrimSpace(string(output)), "\n")
+	logLines := strings.Split(strings.TrimSpace(output), "\n")
 
 	jsonResponse(w, http.StatusOK, map[string]interface{}{
 		"lines": logLines,
@@ -158,10 +186,16 @@ func (h *HALHandler) GetHardwareLogs(w http.ResponseWriter, r *http.Request) {
 		category = "all"
 	}
 
-	cmd := exec.Command("dmesg", "-T")
-	output, err := cmd.Output()
+	// Validate category
+	if err := validateHardwareLogCategory(category); err != nil {
+		errorResponse(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	output, err := execWithTimeout(r.Context(), "dmesg", "-T")
 	if err != nil {
-		errorResponse(w, http.StatusInternalServerError, "failed to get logs: "+err.Error())
+		log.Printf("GetHardwareLogs: dmesg failed: %v", err)
+		errorResponse(w, http.StatusInternalServerError, sanitizeExecError("get hardware logs", err))
 		return
 	}
 
@@ -177,7 +211,7 @@ func (h *HALHandler) GetHardwareLogs(w http.ResponseWriter, r *http.Request) {
 		"thermal": {"thermal", "temperature", "throttl", "overheat"},
 	}
 
-	lines := strings.Split(string(output), "\n")
+	lines := strings.Split(output, "\n")
 	var entries []string
 
 	if category == "all" {
@@ -189,10 +223,6 @@ func (h *HALHandler) GetHardwareLogs(w http.ResponseWriter, r *http.Request) {
 		entries = lines[start:]
 	} else {
 		patterns := filters[category]
-		if patterns == nil {
-			errorResponse(w, http.StatusBadRequest, "invalid category: "+category)
-			return
-		}
 
 		for _, line := range lines {
 			for _, pattern := range patterns {
@@ -272,12 +302,12 @@ func (h *HALHandler) GetSupportBundle(w http.ResponseWriter, r *http.Request) {
 	h.addCommandOutput(zipWriter, "docker-swarm-nodes.txt", "docker", "node", "ls")
 	h.addCommandOutput(zipWriter, "docker-swarm-services.txt", "docker", "service", "ls")
 
-	// Config files
+	// Config files (sensitive values redacted)
 	h.addFileToZip(zipWriter, "/boot/firmware/config.txt", "config/boot-config.txt")
 	h.addFileToZip(zipWriter, "/boot/config.txt", "config/boot-config-alt.txt")
-	h.addFileToZip(zipWriter, "/etc/hostapd/hostapd.conf", "config/hostapd.conf")
+	h.addSanitizedFileToZip(zipWriter, "/etc/hostapd/hostapd.conf", "config/hostapd.conf")
 	h.addFileToZip(zipWriter, "/etc/dnsmasq.conf", "config/dnsmasq.conf")
-	h.addFileToZip(zipWriter, "/etc/tor/torrc", "config/torrc")
+	h.addSanitizedFileToZip(zipWriter, "/etc/tor/torrc", "config/torrc")
 	h.addFileToZip(zipWriter, "/etc/netplan/01-netcfg.yaml", "config/netplan.yaml")
 	h.addFileToZip(zipWriter, "/var/lib/misc/dnsmasq.leases", "config/dhcp-leases.txt")
 }
@@ -287,8 +317,9 @@ func (h *HALHandler) GetSupportBundle(w http.ResponseWriter, r *http.Request) {
 // ============================================================================
 
 func (h *HALHandler) addCommandOutput(zw *zip.Writer, filename string, cmdName string, args ...string) {
-	cmd := exec.Command(cmdName, args...)
-	output, err := cmd.CombinedOutput()
+	ctx, cancel := context.WithTimeout(context.Background(), defaultExecTimeout)
+	defer cancel()
+	output, err := execWithTimeout(ctx, cmdName, args...)
 
 	f, err2 := zw.Create(filename)
 	if err2 != nil {
@@ -296,11 +327,11 @@ func (h *HALHandler) addCommandOutput(zw *zip.Writer, filename string, cmdName s
 	}
 
 	if err != nil {
-		f.Write([]byte(fmt.Sprintf("Command failed: %s\nOutput:\n%s", err.Error(), string(output))))
+		f.Write([]byte(fmt.Sprintf("Command failed: %s\nOutput:\n%s", sanitizeExecError(cmdName, err), output)))
 		return
 	}
 
-	f.Write(output)
+	f.Write([]byte(output))
 }
 
 // addHostCommandOutput runs a command on the host via nsenter (for journalctl, systemctl, etc.)
@@ -323,4 +354,37 @@ func (h *HALHandler) addFileToZip(zw *zip.Writer, srcPath, dstName string) {
 	}
 
 	io.Copy(f, srcFile)
+}
+
+// addSanitizedFileToZip adds a file to the ZIP with sensitive fields masked.
+// Masks lines containing sensitive keywords (passwords, secrets, keys).
+func (h *HALHandler) addSanitizedFileToZip(zw *zip.Writer, srcPath, dstName string) {
+	data, err := os.ReadFile(srcPath)
+	if err != nil {
+		return
+	}
+
+	f, err := zw.Create(dstName)
+	if err != nil {
+		return
+	}
+
+	sensitiveKeys := []string{"wpa_passphrase", "password", "secret", "key", "HashedControlPassword", "CookieAuthentication"}
+	lines := strings.Split(string(data), "\n")
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(strings.ToLower(line))
+		masked := false
+		for _, key := range sensitiveKeys {
+			if strings.Contains(trimmed, strings.ToLower(key)) && strings.Contains(line, "=") {
+				// Mask the value after the = sign
+				parts := strings.SplitN(line, "=", 2)
+				f.Write([]byte(parts[0] + "=<REDACTED>\n"))
+				masked = true
+				break
+			}
+		}
+		if !masked {
+			f.Write([]byte(line + "\n"))
+		}
+	}
 }

@@ -380,6 +380,61 @@ func validateLogLevel(level string) error {
 	return nil
 }
 
+// validateUnitName validates a systemd unit name for journalctl -u filtering.
+// Unlike validateServiceName, this does not check the allowlist — it only ensures
+// the name is syntactically safe (no shell metacharacters or path traversal).
+func validateUnitName(name string) error {
+	if name == "" {
+		return fmt.Errorf("unit name is required")
+	}
+	if len(name) > 256 {
+		return fmt.Errorf("unit name too long (max 256)")
+	}
+	if !reServiceName.MatchString(name) {
+		return fmt.Errorf("invalid unit name")
+	}
+	return nil
+}
+
+// validateJournalSince validates a journalctl --since parameter.
+// Accepts date/time formats like "2024-01-01", "1 hour ago", "today", "yesterday".
+// Rejects shell metacharacters, path separators, and other dangerous characters.
+var reJournalSince = regexp.MustCompile(`^[a-zA-Z0-9 :._+-]+$`)
+
+func validateJournalSince(since string) error {
+	if since == "" {
+		return fmt.Errorf("since value is required")
+	}
+	if len(since) > 64 {
+		return fmt.Errorf("since value too long (max 64)")
+	}
+	if !reJournalSince.MatchString(since) {
+		return fmt.Errorf("invalid since value")
+	}
+	return nil
+}
+
+// validateJournalPriority validates a journalctl -p priority level (0-7).
+func validateJournalPriority(priority string) error {
+	n, err := strconv.Atoi(priority)
+	if err != nil || n < 0 || n > 7 {
+		return fmt.Errorf("invalid priority (must be 0-7)")
+	}
+	return nil
+}
+
+// validateHardwareLogCategory validates a hardware log category.
+func validateHardwareLogCategory(category string) error {
+	allowed := map[string]bool{
+		"all": true, "i2c": true, "gpio": true, "usb": true,
+		"pcie": true, "mmc": true, "net": true, "power": true, "thermal": true,
+	}
+	if !allowed[category] {
+		return fmt.Errorf("invalid hardware log category")
+	}
+	return nil
+}
+
 // validate1WireDeviceID validates a 1-Wire device identifier (e.g., "28-0123456789ab").
 func validate1WireDeviceID(id string) error {
 	if id == "" {

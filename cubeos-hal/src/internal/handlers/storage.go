@@ -2,9 +2,9 @@ package handlers
 
 import (
 	"encoding/json"
+	"log"
 	"net/http"
 	"os"
-	"os/exec"
 	"strconv"
 	"strings"
 
@@ -83,10 +83,10 @@ type SMARTInfo struct {
 // @Failure 500 {object} ErrorResponse
 // @Router /storage/devices [get]
 func (h *HALHandler) GetStorageDevices(w http.ResponseWriter, r *http.Request) {
-	cmd := exec.Command("lsblk", "-J", "-b", "-o", "NAME,SIZE,TYPE,MODEL,SERIAL,VENDOR,RM,PATH")
-	output, err := cmd.Output()
+	output, err := execWithTimeout(r.Context(), "lsblk", "-J", "-b", "-o", "NAME,SIZE,TYPE,MODEL,SERIAL,VENDOR,RM,PATH")
 	if err != nil {
-		errorResponse(w, http.StatusInternalServerError, "failed to list devices: "+err.Error())
+		log.Printf("GetStorageDevices: lsblk failed: %v", err)
+		errorResponse(w, http.StatusInternalServerError, sanitizeExecError("list devices", err))
 		return
 	}
 
@@ -109,8 +109,8 @@ func (h *HALHandler) GetStorageDevices(w http.ResponseWriter, r *http.Request) {
 		} `json:"blockdevices"`
 	}
 
-	if err := json.Unmarshal(output, &result); err != nil {
-		errorResponse(w, http.StatusInternalServerError, "failed to parse lsblk output: "+err.Error())
+	if err := json.Unmarshal([]byte(output), &result); err != nil {
+		errorResponse(w, http.StatusInternalServerError, "failed to parse device list")
 		return
 	}
 
@@ -167,21 +167,21 @@ func (h *HALHandler) GetStorageDevices(w http.ResponseWriter, r *http.Request) {
 // @Router /storage/device/{device} [get]
 func (h *HALHandler) GetStorageDevice(w http.ResponseWriter, r *http.Request) {
 	device := chi.URLParam(r, "device")
-	if device == "" {
-		errorResponse(w, http.StatusBadRequest, "device name required")
+	if err := validateDeviceName(device); err != nil {
+		errorResponse(w, http.StatusBadRequest, err.Error())
 		return
 	}
 
 	devPath := "/dev/" + device
 	if _, err := os.Stat(devPath); os.IsNotExist(err) {
-		errorResponse(w, http.StatusNotFound, "device not found: "+device)
+		errorResponse(w, http.StatusNotFound, "device not found")
 		return
 	}
 
-	cmd := exec.Command("lsblk", "-J", "-b", "-o", "NAME,SIZE,TYPE,MODEL,SERIAL,VENDOR,RM,PATH", devPath)
-	output, err := cmd.Output()
+	output, err := execWithTimeout(r.Context(), "lsblk", "-J", "-b", "-o", "NAME,SIZE,TYPE,MODEL,SERIAL,VENDOR,RM,PATH", devPath)
 	if err != nil {
-		errorResponse(w, http.StatusInternalServerError, "failed to get device info: "+err.Error())
+		log.Printf("GetStorageDevice: lsblk failed for %s: %v", device, err)
+		errorResponse(w, http.StatusInternalServerError, sanitizeExecError("get device info", err))
 		return
 	}
 
@@ -198,8 +198,8 @@ func (h *HALHandler) GetStorageDevice(w http.ResponseWriter, r *http.Request) {
 		} `json:"blockdevices"`
 	}
 
-	if err := json.Unmarshal(output, &result); err != nil {
-		errorResponse(w, http.StatusInternalServerError, "failed to parse output: "+err.Error())
+	if err := json.Unmarshal([]byte(output), &result); err != nil {
+		errorResponse(w, http.StatusInternalServerError, "failed to parse device info")
 		return
 	}
 
@@ -235,8 +235,8 @@ func (h *HALHandler) GetStorageDevice(w http.ResponseWriter, r *http.Request) {
 // @Router /storage/smart/{device} [get]
 func (h *HALHandler) GetSmartInfo(w http.ResponseWriter, r *http.Request) {
 	device := chi.URLParam(r, "device")
-	if device == "" {
-		errorResponse(w, http.StatusBadRequest, "device name required")
+	if err := validateDeviceName(device); err != nil {
+		errorResponse(w, http.StatusBadRequest, err.Error())
 		return
 	}
 
@@ -255,23 +255,23 @@ func (h *HALHandler) GetSmartInfo(w http.ResponseWriter, r *http.Request) {
 
 	// Check if device exists
 	if _, err := os.Stat(devPath); os.IsNotExist(err) {
-		errorResponse(w, http.StatusNotFound, "device not found: "+device)
+		errorResponse(w, http.StatusNotFound, "device not found")
 		return
 	}
 
-	cmd := exec.Command("smartctl", "-j", "-a", devPath)
-	output, err := cmd.Output()
+	output, err := execWithTimeout(r.Context(), "smartctl", "-j", "-a", devPath)
 	if err != nil {
 		// smartctl returns non-zero for various reasons, try to parse anyway
-		if len(output) == 0 {
-			errorResponse(w, http.StatusInternalServerError, "SMART data unavailable: "+err.Error())
+		if output == "" {
+			log.Printf("GetSmartInfo: smartctl failed for %s: %v", device, err)
+			errorResponse(w, http.StatusInternalServerError, "SMART data unavailable")
 			return
 		}
 	}
 
 	var smartData map[string]interface{}
-	if err := json.Unmarshal(output, &smartData); err != nil {
-		errorResponse(w, http.StatusInternalServerError, "failed to parse SMART data: "+err.Error())
+	if err := json.Unmarshal([]byte(output), &smartData); err != nil {
+		errorResponse(w, http.StatusInternalServerError, "failed to parse SMART data")
 		return
 	}
 
@@ -325,15 +325,15 @@ func (h *HALHandler) GetSmartInfo(w http.ResponseWriter, r *http.Request) {
 // @Failure 500 {object} ErrorResponse
 // @Router /storage/usage [get]
 func (h *HALHandler) GetStorageUsage(w http.ResponseWriter, r *http.Request) {
-	cmd := exec.Command("df", "-B1", "--output=target,source,size,used,avail,pcent")
-	output, err := cmd.Output()
+	output, err := execWithTimeout(r.Context(), "df", "-B1", "--output=target,source,size,used,avail,pcent")
 	if err != nil {
-		errorResponse(w, http.StatusInternalServerError, "failed to get disk usage: "+err.Error())
+		log.Printf("GetStorageUsage: df failed: %v", err)
+		errorResponse(w, http.StatusInternalServerError, sanitizeExecError("get disk usage", err))
 		return
 	}
 
 	var filesystems []FilesystemUsage
-	lines := strings.Split(string(output), "\n")
+	lines := strings.Split(output, "\n")
 	for i, line := range lines {
 		if i == 0 || strings.TrimSpace(line) == "" {
 			continue // Skip header
