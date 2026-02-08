@@ -2,431 +2,474 @@ package handlers
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"log"
 	"net/http"
-	"os"
 	"strconv"
-	"strings"
+	"time"
 )
 
 // ============================================================================
-// Meshtastic Types
+// Meshtastic REST Handlers
 // ============================================================================
 
-// MeshtasticDevice represents a Meshtastic device.
-// @Description Meshtastic LoRa device information
-type MeshtasticDevice struct {
-	Port      string `json:"port" example:"/dev/ttyUSB0"`
-	Name      string `json:"name" example:"Meshtastic"`
-	NodeID    string `json:"node_id,omitempty" example:"!abcd1234"`
-	LongName  string `json:"long_name,omitempty" example:"CubeOS Node"`
-	ShortName string `json:"short_name,omitempty" example:"CUBE"`
-	HWModel   string `json:"hw_model,omitempty" example:"TBEAM"`
-	Firmware  string `json:"firmware,omitempty" example:"2.0.0"`
-	Connected bool   `json:"connected" example:"true"`
-}
-
-// MeshtasticStatus represents Meshtastic status.
-// @Description Meshtastic network status
-type MeshtasticStatus struct {
-	Available  bool              `json:"available" example:"true"`
-	Connected  bool              `json:"connected" example:"true"`
-	Device     *MeshtasticDevice `json:"device,omitempty"`
-	NodeCount  int               `json:"node_count" example:"5"`
-	ChannelURL string            `json:"channel_url,omitempty"`
-}
-
-// MeshtasticNode represents a node in the mesh.
-// @Description Meshtastic mesh network node
-type MeshtasticNode struct {
-	NodeID       string  `json:"node_id" example:"!abcd1234"`
-	LongName     string  `json:"long_name" example:"Remote Node"`
-	ShortName    string  `json:"short_name" example:"REM"`
-	HWModel      string  `json:"hw_model,omitempty" example:"TBEAM"`
-	SNR          float64 `json:"snr,omitempty" example:"10.5"`
-	LastHeard    string  `json:"last_heard,omitempty" example:"2026-02-03T16:30:00Z"`
-	Hops         int     `json:"hops,omitempty" example:"1"`
-	BatteryLevel int     `json:"battery_level,omitempty" example:"85"`
-	Latitude     float64 `json:"latitude,omitempty" example:"52.3676"`
-	Longitude    float64 `json:"longitude,omitempty" example:"4.9041"`
-	Altitude     float64 `json:"altitude,omitempty" example:"10.0"`
-}
-
-// MeshtasticPosition represents local position.
-// @Description Meshtastic local position
-type MeshtasticPosition struct {
-	Latitude  float64 `json:"latitude" example:"52.3676"`
-	Longitude float64 `json:"longitude" example:"4.9041"`
-	Altitude  float64 `json:"altitude,omitempty" example:"10.0"`
-	Timestamp string  `json:"timestamp" example:"2026-02-03T16:30:00Z"`
-	Valid     bool    `json:"valid" example:"true"`
-}
-
-// MeshtasticMessage represents a message to send.
-// @Description Meshtastic message parameters
-type MeshtasticMessage struct {
-	Text        string `json:"text" example:"Hello mesh!"`
-	Destination string `json:"destination,omitempty" example:"!abcd1234"`
-	Channel     int    `json:"channel,omitempty" example:"0"`
-}
-
-// ============================================================================
-// Meshtastic Handlers
-// ============================================================================
-
-// GetMeshtasticDevices lists Meshtastic devices.
+// GetMeshtasticDevices scans for Meshtastic devices on serial ports.
 // @Summary List Meshtastic devices
-// @Description Returns list of connected Meshtastic LoRa devices
+// @Description Scans USB serial ports for Meshtastic-compatible LoRa radios (VID:PID matching). Independent of active connection.
 // @Tags Meshtastic
-// @Accept json
 // @Produce json
 // @Success 200 {object} map[string]interface{}
-// @Failure 500 {object} ErrorResponse
 // @Router /hal/meshtastic/devices [get]
 func (h *HALHandler) GetMeshtasticDevices(w http.ResponseWriter, r *http.Request) {
-	devices := h.scanMeshtasticDevices(r.Context())
+	devices := h.meshtastic.ScanDevices(r.Context())
 	jsonResponse(w, http.StatusOK, map[string]interface{}{
 		"count":   len(devices),
 		"devices": devices,
 	})
 }
 
-// GetMeshtasticStatus returns Meshtastic status.
+// GetMeshtasticStatus returns Meshtastic connection and radio status.
 // @Summary Get Meshtastic status
-// @Description Returns Meshtastic network and device status
+// @Description Returns connection state, transport type, local node info, and node count
 // @Tags Meshtastic
-// @Accept json
 // @Produce json
-// @Param port query string false "Serial port" default(/dev/ttyUSB0)
-// @Success 200 {object} MeshtasticStatus
-// @Failure 400 {object} ErrorResponse
-// @Failure 500 {object} ErrorResponse
+// @Success 200 {object} map[string]interface{}
 // @Router /hal/meshtastic/status [get]
 func (h *HALHandler) GetMeshtasticStatus(w http.ResponseWriter, r *http.Request) {
-	port := r.URL.Query().Get("port")
-	if port == "" {
-		port = "/dev/ttyUSB0"
+	connected := h.meshtastic.IsConnected()
+
+	status := map[string]interface{}{
+		"connected": connected,
+		"transport": "",
+		"address":   "",
+		"node_id":   "",
+		"node_name": "",
+		"num_nodes": 0,
 	}
 
-	// HF05-01: Validate serial port path
-	if err := validateSerialPort(port); err != nil {
-		errorResponse(w, http.StatusBadRequest, err.Error())
-		return
-	}
+	if connected {
+		d := h.meshtastic
+		d.mu.RLock()
+		if d.transport != nil {
+			status["transport"] = d.transport.TransportType()
+			status["address"] = d.transport.DeviceAddress()
+		}
+		status["num_nodes"] = len(d.nodes)
+		d.mu.RUnlock()
 
-	ctx := r.Context()
-	status := MeshtasticStatus{
-		Available: false,
-	}
-
-	// Check if meshtastic CLI is available
-	if _, err := execWithTimeout(ctx, "which", "meshtastic"); err != nil {
-		jsonResponse(w, http.StatusOK, status)
-		return
-	}
-
-	// Check if port exists
-	if _, err := os.Stat(port); err != nil {
-		jsonResponse(w, http.StatusOK, status)
-		return
-	}
-
-	status.Available = true
-
-	// HF05-11: Get device info with timeout
-	output, err := execWithTimeout(ctx, "meshtastic", "--port", port, "--info")
-	if err == nil {
-		status.Connected = true
-		device := h.parseMeshtasticInfo(output, port)
-		status.Device = &device
-	}
-
-	// Get node count
-	nodesOutput, err := execWithTimeout(ctx, "meshtastic", "--port", port, "--nodes")
-	if err == nil {
-		nodes := h.parseMeshtasticNodes(nodesOutput)
-		status.NodeCount = len(nodes)
+		if myNode := d.GetMyNode(); myNode != nil {
+			status["node_id"] = nodeIDStr(myNode.Num)
+			status["node_name"] = myNode.LongName
+			status["hw_model"] = myNode.HWModelName
+		} else if myNum := d.GetMyNodeNum(); myNum != 0 {
+			status["node_id"] = nodeIDStr(myNum)
+		}
 	}
 
 	jsonResponse(w, http.StatusOK, status)
 }
 
-// GetMeshtasticNodes returns mesh nodes.
+// GetMeshtasticNodes returns all known mesh nodes.
 // @Summary Get mesh nodes
-// @Description Returns list of nodes in the Meshtastic mesh network
+// @Description Returns list of nodes in the Meshtastic mesh network (from NodeDB)
 // @Tags Meshtastic
-// @Accept json
 // @Produce json
-// @Param port query string false "Serial port" default(/dev/ttyUSB0)
 // @Success 200 {object} map[string]interface{}
-// @Failure 400 {object} ErrorResponse
-// @Failure 500 {object} ErrorResponse
 // @Router /hal/meshtastic/nodes [get]
 func (h *HALHandler) GetMeshtasticNodes(w http.ResponseWriter, r *http.Request) {
-	port := r.URL.Query().Get("port")
-	if port == "" {
-		port = "/dev/ttyUSB0"
+	nodes := h.meshtastic.GetNodes()
+
+	// Format node IDs as !hex strings for display
+	type nodeResponse struct {
+		*MeshNode
+		NodeIDStr string `json:"node_id_str"`
+	}
+	out := make([]nodeResponse, len(nodes))
+	for i, n := range nodes {
+		out[i] = nodeResponse{MeshNode: n, NodeIDStr: nodeIDStr(n.Num)}
 	}
 
-	// HF05-01: Validate serial port path
-	if err := validateSerialPort(port); err != nil {
-		errorResponse(w, http.StatusBadRequest, err.Error())
-		return
-	}
-
-	// HF05-11: Use execWithTimeout
-	output, err := execWithTimeout(r.Context(), "meshtastic", "--port", port, "--nodes")
-	if err != nil {
-		log.Printf("meshtastic: failed to get nodes: %v", err)
-		errorResponse(w, http.StatusInternalServerError, sanitizeExecError("get mesh nodes", err))
-		return
-	}
-
-	nodes := h.parseMeshtasticNodes(output)
 	jsonResponse(w, http.StatusOK, map[string]interface{}{
-		"count": len(nodes),
-		"nodes": nodes,
+		"count": len(out),
+		"nodes": out,
 	})
 }
 
-// GetMeshtasticPosition returns local position.
+// GetMeshtasticPosition returns the local node's GPS position.
 // @Summary Get Meshtastic position
-// @Description Returns the local Meshtastic node's GPS position
+// @Description Returns the local Meshtastic node's GPS position from the NodeDB
 // @Tags Meshtastic
-// @Accept json
 // @Produce json
-// @Param port query string false "Serial port" default(/dev/ttyUSB0)
-// @Success 200 {object} MeshtasticPosition
-// @Failure 400 {object} ErrorResponse
-// @Failure 500 {object} ErrorResponse
+// @Success 200 {object} map[string]interface{}
 // @Router /hal/meshtastic/position [get]
 func (h *HALHandler) GetMeshtasticPosition(w http.ResponseWriter, r *http.Request) {
-	port := r.URL.Query().Get("port")
-	if port == "" {
-		port = "/dev/ttyUSB0"
-	}
+	myNode := h.meshtastic.GetMyNode()
 
-	// HF05-01: Validate serial port path
-	if err := validateSerialPort(port); err != nil {
-		errorResponse(w, http.StatusBadRequest, err.Error())
+	if myNode == nil || (myNode.Latitude == 0 && myNode.Longitude == 0) {
+		jsonResponse(w, http.StatusOK, map[string]interface{}{
+			"valid":     false,
+			"latitude":  0,
+			"longitude": 0,
+			"altitude":  0,
+			"sats":      0,
+			"timestamp": "",
+		})
 		return
 	}
 
-	position := MeshtasticPosition{
-		Valid: false,
-	}
-
-	// HF05-11: Use execWithTimeout
-	output, err := execWithTimeout(r.Context(), "meshtastic", "--port", port, "--info")
-	if err != nil {
-		jsonResponse(w, http.StatusOK, position)
-		return
-	}
-
-	// Parse position from info output
-	lines := strings.Split(output, "\n")
-	for _, line := range lines {
-		line = strings.TrimSpace(line)
-		if strings.HasPrefix(line, "latitude:") {
-			val := strings.TrimSpace(strings.TrimPrefix(line, "latitude:"))
-			position.Latitude, _ = strconv.ParseFloat(val, 64)
-		}
-		if strings.HasPrefix(line, "longitude:") {
-			val := strings.TrimSpace(strings.TrimPrefix(line, "longitude:"))
-			position.Longitude, _ = strconv.ParseFloat(val, 64)
-		}
-		if strings.HasPrefix(line, "altitude:") {
-			val := strings.TrimSpace(strings.TrimPrefix(line, "altitude:"))
-			position.Altitude, _ = strconv.ParseFloat(val, 64)
-		}
-	}
-
-	if position.Latitude != 0 || position.Longitude != 0 {
-		position.Valid = true
-	}
-
-	jsonResponse(w, http.StatusOK, position)
+	jsonResponse(w, http.StatusOK, map[string]interface{}{
+		"valid":     true,
+		"latitude":  myNode.Latitude,
+		"longitude": myNode.Longitude,
+		"altitude":  myNode.Altitude,
+		"sats":      myNode.Sats,
+		"timestamp": myNode.LastHeardStr,
+	})
 }
 
-// SendMeshtasticMessage sends a message via Meshtastic.
-// @Summary Send Meshtastic message
-// @Description Sends a text message via the Meshtastic mesh network
+// ConnectMeshtastic establishes a connection to a Meshtastic device.
+// @Summary Connect to Meshtastic device
+// @Description Connects to a Meshtastic device via USB serial and downloads the NodeDB
 // @Tags Meshtastic
 // @Accept json
 // @Produce json
-// @Param port query string false "Serial port" default(/dev/ttyUSB0)
-// @Param request body MeshtasticMessage true "Message parameters"
+// @Param request body object false "Connection parameters"
+// @Success 200 {object} map[string]interface{}
+// @Failure 400 {object} ErrorResponse
+// @Failure 500 {object} ErrorResponse
+// @Router /hal/meshtastic/connect [post]
+func (h *HALHandler) ConnectMeshtastic(w http.ResponseWriter, r *http.Request) {
+	// Parse optional port parameter
+	var req struct {
+		Port string `json:"port"`
+	}
+
+	// Body is optional — empty body means auto-detect
+	if r.ContentLength > 0 {
+		r = limitBody(r, 1<<10) // 1KB max
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			errorResponse(w, http.StatusBadRequest, "invalid request body")
+			return
+		}
+	}
+
+	// Validate port if provided
+	if req.Port != "" {
+		if err := validateSerialPort(req.Port); err != nil {
+			errorResponse(w, http.StatusBadRequest, err.Error())
+			return
+		}
+	}
+
+	// Connect with a generous timeout for config download
+	ctx, cancel := getConnectContext(r.Context(), 30*time.Second)
+	defer cancel()
+
+	if err := h.meshtastic.Connect(ctx, req.Port); err != nil {
+		log.Printf("meshtastic: connect failed: %v", err)
+		errorResponse(w, http.StatusInternalServerError, fmt.Sprintf("connection failed: %v", err))
+		return
+	}
+
+	d := h.meshtastic
+	response := map[string]interface{}{
+		"status":    "connected",
+		"num_nodes": len(d.GetNodes()),
+	}
+	if d.GetMyNodeNum() != 0 {
+		response["node_id"] = nodeIDStr(d.GetMyNodeNum())
+	}
+	if myNode := d.GetMyNode(); myNode != nil {
+		response["node_name"] = myNode.LongName
+	}
+
+	jsonResponse(w, http.StatusOK, response)
+}
+
+// DisconnectMeshtastic closes the Meshtastic connection.
+// @Summary Disconnect from Meshtastic device
+// @Description Closes the connection to the Meshtastic device
+// @Tags Meshtastic
+// @Produce json
+// @Success 200 {object} SuccessResponse
+// @Router /hal/meshtastic/disconnect [post]
+func (h *HALHandler) DisconnectMeshtastic(w http.ResponseWriter, r *http.Request) {
+	h.meshtastic.Disconnect()
+	successResponse(w, "disconnected from Meshtastic device")
+}
+
+// SendMeshtasticMessage sends a text message via the Meshtastic mesh.
+// @Summary Send Meshtastic message
+// @Description Sends a text message via the Meshtastic mesh network. Auto-connects if not connected.
+// @Tags Meshtastic
+// @Accept json
+// @Produce json
+// @Param request body MeshtasticSendRequest true "Message parameters"
 // @Success 200 {object} SuccessResponse
 // @Failure 400 {object} ErrorResponse
 // @Failure 500 {object} ErrorResponse
-// @Router /hal/meshtastic/send [post]
+// @Router /hal/meshtastic/messages/send [post]
 func (h *HALHandler) SendMeshtasticMessage(w http.ResponseWriter, r *http.Request) {
-	port := r.URL.Query().Get("port")
-	if port == "" {
-		port = "/dev/ttyUSB0"
-	}
+	r = limitBody(r, 1<<10) // 1KB max
 
-	// HF05-01: Validate serial port path
-	if err := validateSerialPort(port); err != nil {
-		errorResponse(w, http.StatusBadRequest, err.Error())
-		return
-	}
-
-	// HF05-09: Apply body limit
-	r = limitBody(r, 1<<20)
-
-	var req MeshtasticMessage
+	var req MeshtasticSendRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		errorResponse(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
 
-	// HF05-05: Validate message text (exec.Command array prevents injection,
-	// but validate for correctness — Meshtastic max 228 chars, no leading dash)
+	// Validate input BEFORE checking connection (Phase 1 pattern: validate → connect → execute)
 	if err := validateMeshtasticText(req.Text); err != nil {
 		errorResponse(w, http.StatusBadRequest, err.Error())
 		return
 	}
 
-	// HF05-05: Validate destination node ID if provided
-	if err := validateMeshtasticNodeID(req.Destination); err != nil {
-		errorResponse(w, http.StatusBadRequest, err.Error())
-		return
+	// Parse destination
+	var to uint32 = 0xFFFFFFFF // Default: broadcast
+	if req.To != "" && req.To != "broadcast" {
+		if err := validateMeshtasticNodeID(req.To); err != nil {
+			errorResponse(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		// Parse hex node ID (strip leading !)
+		hexStr := req.To
+		if len(hexStr) > 0 && hexStr[0] == '!' {
+			hexStr = hexStr[1:]
+		}
+		parsed, err := strconv.ParseUint(hexStr, 16, 32)
+		if err != nil {
+			errorResponse(w, http.StatusBadRequest, "invalid node ID format")
+			return
+		}
+		to = uint32(parsed)
 	}
 
-	args := []string{"--port", port, "--sendtext", req.Text}
-
-	if req.Destination != "" {
-		args = append(args, "--dest", req.Destination)
+	// Auto-connect if needed
+	if !h.meshtastic.IsConnected() {
+		ctx, cancel := getConnectContext(r.Context(), 30*time.Second)
+		defer cancel()
+		if err := h.meshtastic.Connect(ctx, ""); err != nil {
+			errorResponse(w, http.StatusInternalServerError, "not connected and auto-connect failed")
+			return
+		}
 	}
 
-	if req.Channel > 0 {
-		args = append(args, "--ch-index", strconv.Itoa(req.Channel))
-	}
-
-	// HF05-11: Use execWithTimeout
-	if _, err := execWithTimeout(r.Context(), "meshtastic", args...); err != nil {
+	if err := h.meshtastic.SendText(r.Context(), req.Text, to, uint32(req.Channel)); err != nil {
 		log.Printf("meshtastic: send failed: %v", err)
-		errorResponse(w, http.StatusInternalServerError, sanitizeExecError("send mesh message", err))
+		errorResponse(w, http.StatusInternalServerError, fmt.Sprintf("send failed: %v", err))
 		return
 	}
 
 	successResponse(w, "message sent via Meshtastic")
 }
 
-// ============================================================================
-// Helper Functions
-// ============================================================================
+// SendMeshtasticRaw sends a raw payload with a specified portnum.
+// @Summary Send raw Meshtastic packet
+// @Description Sends a raw payload with arbitrary portnum to the mesh network
+// @Tags Meshtastic
+// @Accept json
+// @Produce json
+// @Param request body MeshtasticRawRequest true "Raw packet parameters"
+// @Success 200 {object} SuccessResponse
+// @Failure 400 {object} ErrorResponse
+// @Failure 500 {object} ErrorResponse
+// @Router /hal/meshtastic/messages/send_raw [post]
+func (h *HALHandler) SendMeshtasticRaw(w http.ResponseWriter, r *http.Request) {
+	r = limitBody(r, 1<<16) // 64KB max
 
-func (h *HALHandler) scanMeshtasticDevices(ctx context.Context) []MeshtasticDevice {
-	var devices []MeshtasticDevice
-
-	// Check common serial ports
-	ports := []string{
-		"/dev/ttyUSB0", "/dev/ttyUSB1", "/dev/ttyUSB2",
-		"/dev/ttyACM0", "/dev/ttyACM1",
+	var req MeshtasticRawRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		errorResponse(w, http.StatusBadRequest, "invalid request body")
+		return
 	}
 
-	for _, port := range ports {
-		if _, err := os.Stat(port); err == nil {
-			// Try to identify as Meshtastic device
-			device := MeshtasticDevice{
-				Port: port,
-				Name: "Meshtastic Device",
-			}
+	// Validate input before checking connection
+	if req.Payload == "" {
+		errorResponse(w, http.StatusBadRequest, "payload is required (base64-encoded)")
+		return
+	}
 
-			// HF05-11: Try to get device info with timeout
-			output, err := execWithTimeout(ctx, "meshtastic", "--port", port, "--info")
-			if err == nil {
-				device.Connected = true
-				info := h.parseMeshtasticInfo(output, port)
-				device.NodeID = info.NodeID
-				device.LongName = info.LongName
-				device.ShortName = info.ShortName
-				device.HWModel = info.HWModel
-				device.Firmware = info.Firmware
-				devices = append(devices, device)
-			}
+	payload, err := base64.StdEncoding.DecodeString(req.Payload)
+	if err != nil {
+		errorResponse(w, http.StatusBadRequest, "invalid base64 payload")
+		return
+	}
+
+	if len(payload) == 0 || len(payload) > 237 {
+		errorResponse(w, http.StatusBadRequest, "payload must be 1-237 bytes")
+		return
+	}
+
+	if req.PortNum <= 0 || req.PortNum > 65535 {
+		errorResponse(w, http.StatusBadRequest, "portnum must be 1-65535")
+		return
+	}
+
+	// Parse destination
+	var to uint32 = 0xFFFFFFFF
+	if req.To != "" && req.To != "broadcast" {
+		hexStr := req.To
+		if len(hexStr) > 0 && hexStr[0] == '!' {
+			hexStr = hexStr[1:]
+		}
+		parsed, err := strconv.ParseUint(hexStr, 16, 32)
+		if err != nil {
+			errorResponse(w, http.StatusBadRequest, "invalid destination node ID")
+			return
+		}
+		to = uint32(parsed)
+	}
+
+	// Auto-connect if needed
+	if !h.meshtastic.IsConnected() {
+		ctx, cancel := getConnectContext(r.Context(), 30*time.Second)
+		defer cancel()
+		if err := h.meshtastic.Connect(ctx, ""); err != nil {
+			errorResponse(w, http.StatusInternalServerError, "not connected and auto-connect failed")
+			return
 		}
 	}
 
-	return devices
+	if err := h.meshtastic.SendRaw(r.Context(), payload, req.PortNum, to, uint32(req.Channel), req.WantAck); err != nil {
+		log.Printf("meshtastic: raw send failed: %v", err)
+		errorResponse(w, http.StatusInternalServerError, fmt.Sprintf("send failed: %v", err))
+		return
+	}
+
+	successResponse(w, "raw packet sent via Meshtastic")
 }
 
-func (h *HALHandler) parseMeshtasticInfo(output string, port string) MeshtasticDevice {
-	device := MeshtasticDevice{
-		Port:      port,
-		Connected: true,
-	}
-
-	lines := strings.Split(output, "\n")
-	for _, line := range lines {
-		line = strings.TrimSpace(line)
-
-		if strings.HasPrefix(line, "Owner:") {
-			device.LongName = strings.TrimSpace(strings.TrimPrefix(line, "Owner:"))
-		}
-		if strings.HasPrefix(line, "My info:") {
-			// Extract node ID from "My info: { 'num': 123, 'user': {...} }"
-			if idx := strings.Index(line, "'num':"); idx != -1 {
-				numStr := line[idx+6:]
-				if endIdx := strings.Index(numStr, ","); endIdx != -1 {
-					numStr = strings.TrimSpace(numStr[:endIdx])
-					if num, err := strconv.Atoi(numStr); err == nil {
-						device.NodeID = strings.ToLower(strconv.FormatInt(int64(num), 16))
-						device.NodeID = "!" + device.NodeID
-					}
-				}
-			}
-		}
-		if strings.HasPrefix(line, "Hardware model:") {
-			device.HWModel = strings.TrimSpace(strings.TrimPrefix(line, "Hardware model:"))
-		}
-		if strings.HasPrefix(line, "Firmware version:") {
-			device.Firmware = strings.TrimSpace(strings.TrimPrefix(line, "Firmware version:"))
+// GetMeshtasticMessages returns recent mesh messages from the ring buffer.
+// @Summary Get recent mesh messages
+// @Description Returns recent Meshtastic messages from the in-memory ring buffer
+// @Tags Meshtastic
+// @Produce json
+// @Param limit query int false "Maximum messages to return" default(50)
+// @Success 200 {object} map[string]interface{}
+// @Router /hal/meshtastic/messages [get]
+func (h *HALHandler) GetMeshtasticMessages(w http.ResponseWriter, r *http.Request) {
+	limit := 50
+	if v := r.URL.Query().Get("limit"); v != "" {
+		if parsed, err := strconv.Atoi(v); err == nil && parsed > 0 && parsed <= 1000 {
+			limit = parsed
 		}
 	}
 
-	return device
+	messages := h.meshtastic.GetMessages(limit)
+	jsonResponse(w, http.StatusOK, map[string]interface{}{
+		"count":    len(messages),
+		"messages": messages,
+	})
 }
 
-func (h *HALHandler) parseMeshtasticNodes(output string) []MeshtasticNode {
-	var nodes []MeshtasticNode
-
-	lines := strings.Split(output, "\n")
-	for _, line := range lines {
-		line = strings.TrimSpace(line)
-
-		// Skip header and empty lines
-		if line == "" || strings.HasPrefix(line, "╔") || strings.HasPrefix(line, "║") ||
-			strings.HasPrefix(line, "╚") || strings.Contains(line, "User") {
-			continue
-		}
-
-		// Parse table row (format varies by meshtastic CLI version)
-		if strings.Contains(line, "!") {
-			node := MeshtasticNode{}
-
-			// Try to extract node ID (starts with !)
-			if idx := strings.Index(line, "!"); idx != -1 {
-				nodeIDEnd := strings.Index(line[idx:], " ")
-				if nodeIDEnd == -1 {
-					node.NodeID = line[idx:]
-				} else {
-					node.NodeID = line[idx : idx+nodeIDEnd]
-				}
-			}
-
-			nodes = append(nodes, node)
-		}
+// StreamMeshtasticEvents streams real-time mesh events via Server-Sent Events.
+// @Summary Stream Meshtastic events (SSE)
+// @Description Real-time SSE stream of mesh messages, node updates, and connection events
+// @Tags Meshtastic
+// @Produce text/event-stream
+// @Success 200 {string} string "SSE event stream"
+// @Router /hal/meshtastic/events [get]
+func (h *HALHandler) StreamMeshtasticEvents(w http.ResponseWriter, r *http.Request) {
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		errorResponse(w, http.StatusInternalServerError, "streaming not supported")
+		return
 	}
 
-	return nodes
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("X-Accel-Buffering", "no")
+
+	// Send initial connected event
+	initialData, _ := json.Marshal(map[string]interface{}{
+		"type":    "connected_to_stream",
+		"message": "subscribed to Meshtastic event stream",
+		"time":    time.Now().UTC().Format(time.RFC3339),
+	})
+	fmt.Fprintf(w, "event: connected_to_stream\ndata: %s\n\n", initialData)
+	flusher.Flush()
+
+	// Subscribe to events
+	eventCh, unsubscribe := h.meshtastic.SubscribeEvents()
+	defer unsubscribe()
+
+	ctx := r.Context()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case event, ok := <-eventCh:
+			if !ok {
+				return // Channel closed
+			}
+			data, err := json.Marshal(event)
+			if err != nil {
+				continue
+			}
+			fmt.Fprintf(w, "event: %s\ndata: %s\n\n", event.Type, data)
+			flusher.Flush()
+		}
+	}
 }
 
-// SetMeshtasticChannel sets the Meshtastic channel.
+// SetMeshtasticChannel configures a Meshtastic channel.
+// @Summary Set Meshtastic channel
+// @Description Configures a Meshtastic channel (not yet implemented — requires radio config protobuf)
+// @Tags Meshtastic
+// @Produce json
+// @Failure 501 {object} ErrorResponse
 // @Router /hal/meshtastic/channel [post]
 func (h *HALHandler) SetMeshtasticChannel(w http.ResponseWriter, r *http.Request) {
-	errorResponse(w, http.StatusNotImplemented, "Meshtastic channel configuration not yet implemented")
+	errorResponse(w, http.StatusNotImplemented, "Meshtastic channel configuration not yet implemented (requires config protobuf, deferred to Phase 2b)")
+}
+
+// GetMeshtasticConfig returns the current radio config.
+// @Summary Get Meshtastic config
+// @Description Returns the current Meshtastic radio configuration (not yet implemented)
+// @Tags Meshtastic
+// @Produce json
+// @Failure 501 {object} ErrorResponse
+// @Router /hal/meshtastic/config [get]
+func (h *HALHandler) GetMeshtasticConfig(w http.ResponseWriter, r *http.Request) {
+	errorResponse(w, http.StatusNotImplemented, "Meshtastic config read not yet implemented (deferred to Phase 2b)")
+}
+
+// ============================================================================
+// Request/Response Types
+// ============================================================================
+
+// MeshtasticSendRequest represents a text message send request.
+// @Description Meshtastic text message parameters
+type MeshtasticSendRequest struct {
+	Text    string `json:"text" example:"Hello mesh!"`
+	To      string `json:"to,omitempty" example:"!a1b2c3d4"`
+	Channel int    `json:"channel,omitempty" example:"0"`
+}
+
+// MeshtasticRawRequest represents a raw packet send request.
+// @Description Meshtastic raw packet parameters
+type MeshtasticRawRequest struct {
+	To      string `json:"to,omitempty" example:"!a1b2c3d4"`
+	PortNum int    `json:"portnum" example:"256"`
+	Payload string `json:"payload" example:"SGVsbG8="`
+	Channel int    `json:"channel,omitempty" example:"0"`
+	WantAck bool   `json:"want_ack,omitempty" example:"false"`
+}
+
+// ============================================================================
+// Helpers
+// ============================================================================
+
+// getConnectContext creates a context with a timeout for connection operations.
+// If the parent context already has a deadline shorter than maxTimeout, it's used as-is.
+func getConnectContext(parent context.Context, maxTimeout time.Duration) (context.Context, context.CancelFunc) {
+	if deadline, ok := parent.Deadline(); ok {
+		if time.Until(deadline) < maxTimeout {
+			return context.WithCancel(parent) // Parent deadline is shorter
+		}
+	}
+	return context.WithTimeout(parent, maxTimeout)
 }

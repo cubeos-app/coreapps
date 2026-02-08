@@ -14,6 +14,7 @@ import (
 type HALHandler struct {
 	powerMonitor *PowerMonitor
 	iridium      *IridiumDriver
+	meshtastic   *MeshtasticDriver
 }
 
 // NewHALHandler creates a new HAL handler instance.
@@ -21,6 +22,7 @@ func NewHALHandler() *HALHandler {
 	return &HALHandler{
 		powerMonitor: NewPowerMonitor(),
 		iridium:      NewIridiumDriver(),
+		meshtastic:   NewMeshtasticDriver(),
 	}
 }
 

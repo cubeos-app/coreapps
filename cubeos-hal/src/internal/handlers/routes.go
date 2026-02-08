@@ -178,8 +178,14 @@ func SetupRoutes(r chi.Router, h *HALHandler) {
 		r.Get("/status", h.GetMeshtasticStatus)
 		r.Get("/nodes", h.GetMeshtasticNodes)
 		r.Get("/position", h.GetMeshtasticPosition)
-		r.Post("/send", h.SendMeshtasticMessage)
+		r.Post("/connect", h.ConnectMeshtastic)
+		r.Post("/disconnect", h.DisconnectMeshtastic)
+		r.Get("/messages", h.GetMeshtasticMessages)
+		r.Post("/messages/send", h.SendMeshtasticMessage)
+		r.Post("/messages/send_raw", h.SendMeshtasticRaw)
+		r.Get("/events", h.StreamMeshtasticEvents)
 		r.Post("/channel", h.SetMeshtasticChannel)
+		r.Get("/config", h.GetMeshtasticConfig)
 	})
 
 	// Iridium
