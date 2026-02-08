@@ -71,7 +71,7 @@ type GPSPosition struct {
 // @Produce json
 // @Success 200 {object} GPSDevicesResponse
 // @Failure 500 {object} ErrorResponse
-// @Router /hal/gps/devices [get]
+// @Router /gps/devices [get]
 func (h *HALHandler) GetGPSDevices(w http.ResponseWriter, r *http.Request) {
 	devices := h.scanGPSDevices()
 	jsonResponse(w, http.StatusOK, map[string]interface{}{
@@ -90,7 +90,7 @@ func (h *HALHandler) GetGPSDevices(w http.ResponseWriter, r *http.Request) {
 // @Success 200 {object} GPSStatus
 // @Failure 400 {object} ErrorResponse
 // @Failure 500 {object} ErrorResponse
-// @Router /hal/gps/status [get]
+// @Router /gps/status [get]
 func (h *HALHandler) GetGPSStatus(w http.ResponseWriter, r *http.Request) {
 	port := r.URL.Query().Get("port")
 	if port == "" {
@@ -118,7 +118,7 @@ func (h *HALHandler) GetGPSStatus(w http.ResponseWriter, r *http.Request) {
 // @Success 200 {object} GPSPosition
 // @Failure 400 {object} ErrorResponse
 // @Failure 500 {object} ErrorResponse
-// @Router /hal/gps/position [get]
+// @Router /gps/position [get]
 func (h *HALHandler) GetGPSPosition(w http.ResponseWriter, r *http.Request) {
 	port := r.URL.Query().Get("port")
 	if port == "" {

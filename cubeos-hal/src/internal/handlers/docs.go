@@ -11,6 +11,14 @@ import (
 //go:embed openapi.yaml
 var openapiSpec []byte
 
+// getCORSHostname returns the hostname allowed for CORS from env or default.
+func getCORSHostname() string {
+	if h := os.Getenv("HAL_CORS_HOSTNAME"); h != "" {
+		return h
+	}
+	return "cubeos.cube"
+}
+
 // ServeOpenAPISpec serves the OpenAPI specification.
 // @Summary Get OpenAPI spec
 // @Description Returns the OpenAPI 3.0 specification in YAML format
@@ -20,11 +28,11 @@ var openapiSpec []byte
 // @Router /docs/openapi.yaml [get]
 func (h *HALHandler) ServeOpenAPISpec(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/yaml; charset=utf-8")
-	// Restrict CORS to localhost origins only (HAL is not internet-facing)
+	// Restrict CORS to localhost and configured hostname (HAL is not internet-facing)
 	origin := r.Header.Get("Origin")
 	if origin != "" && (strings.HasPrefix(origin, "http://127.0.0.1") ||
 		strings.HasPrefix(origin, "http://localhost") ||
-		strings.HasPrefix(origin, "http://cubeos.cube")) {
+		strings.HasPrefix(origin, "http://"+getCORSHostname())) {
 		w.Header().Set("Access-Control-Allow-Origin", origin)
 	}
 	w.Write(openapiSpec)
@@ -124,9 +132,9 @@ func (h *HALHandler) ServeSwaggerAsset(w http.ResponseWriter, r *http.Request) {
 
 	// Only serve known swagger-ui files
 	allowedFiles := map[string]string{
-		"swagger-ui.css":                      "text/css; charset=utf-8",
-		"swagger-ui-bundle.js":                "application/javascript; charset=utf-8",
-		"swagger-ui-standalone-preset.js":     "application/javascript; charset=utf-8",
+		"swagger-ui.css":                  "text/css; charset=utf-8",
+		"swagger-ui-bundle.js":            "application/javascript; charset=utf-8",
+		"swagger-ui-standalone-preset.js": "application/javascript; charset=utf-8",
 	}
 
 	contentType, ok := allowedFiles[requestedFile]

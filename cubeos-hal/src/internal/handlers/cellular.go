@@ -90,7 +90,7 @@ type AndroidTetheringStatus struct {
 // @Produce json
 // @Success 200 {object} CellularStatus
 // @Failure 500 {object} ErrorResponse
-// @Router /hal/cellular/status [get]
+// @Router /cellular/status [get]
 func (h *HALHandler) GetCellularStatus(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	status := CellularStatus{
@@ -130,7 +130,7 @@ func (h *HALHandler) GetCellularStatus(w http.ResponseWriter, r *http.Request) {
 // @Produce json
 // @Success 200 {object} map[string]interface{}
 // @Failure 500 {object} ErrorResponse
-// @Router /hal/cellular/modems [get]
+// @Router /cellular/modems [get]
 func (h *HALHandler) GetCellularModems(w http.ResponseWriter, r *http.Request) {
 	modems := h.listModems(r.Context())
 	jsonResponse(w, http.StatusOK, map[string]interface{}{
@@ -150,7 +150,7 @@ func (h *HALHandler) GetCellularModems(w http.ResponseWriter, r *http.Request) {
 // @Failure 400 {object} ErrorResponse
 // @Failure 404 {object} ErrorResponse
 // @Failure 500 {object} ErrorResponse
-// @Router /hal/cellular/signal [get]
+// @Router /cellular/signal [get]
 func (h *HALHandler) GetCellularSignal(w http.ResponseWriter, r *http.Request) {
 	modemParam := r.URL.Query().Get("modem")
 	modemIdx := 0
@@ -177,7 +177,7 @@ func (h *HALHandler) GetCellularSignal(w http.ResponseWriter, r *http.Request) {
 // @Success 200 {object} SuccessResponse
 // @Failure 400 {object} ErrorResponse
 // @Failure 500 {object} ErrorResponse
-// @Router /hal/cellular/connect [post]
+// @Router /cellular/connect [post]
 func (h *HALHandler) ConnectCellular(w http.ResponseWriter, r *http.Request) {
 	// HF05-09: Apply body limit
 	r = limitBody(r, 1<<20)
@@ -247,7 +247,7 @@ func (h *HALHandler) ConnectCellular(w http.ResponseWriter, r *http.Request) {
 // @Success 200 {object} SuccessResponse
 // @Failure 400 {object} ErrorResponse
 // @Failure 500 {object} ErrorResponse
-// @Router /hal/cellular/disconnect/{modem} [post]
+// @Router /cellular/disconnect/{modem} [post]
 func (h *HALHandler) DisconnectCellular(w http.ResponseWriter, r *http.Request) {
 	modemParam := chi.URLParam(r, "modem")
 	modemIdx, err := strconv.Atoi(modemParam)
@@ -266,75 +266,6 @@ func (h *HALHandler) DisconnectCellular(w http.ResponseWriter, r *http.Request) 
 	}
 
 	successResponse(w, "cellular disconnected")
-}
-
-// GetAndroidTethering returns Android USB tethering status.
-// @Summary Get Android tethering status
-// @Description Returns Android USB tethering (RNDIS) status
-// @Tags Cellular
-// @Accept json
-// @Produce json
-// @Success 200 {object} AndroidTetheringStatus
-// @Failure 500 {object} ErrorResponse
-// @Router /hal/cellular/android [get]
-func (h *HALHandler) GetAndroidTethering(w http.ResponseWriter, r *http.Request) {
-	status := AndroidTetheringStatus{
-		Available: false,
-		Connected: false,
-	}
-
-	ctx := r.Context()
-
-	// Check for RNDIS interface (typically usb0 or enp*u*)
-	interfaces := []string{"usb0", "usb1"}
-
-	// Also check for modern naming
-	if out, err := execWithTimeout(ctx, "ls", "/sys/class/net"); err == nil {
-		for _, name := range strings.Fields(out) {
-			if strings.HasPrefix(name, "enp") && strings.Contains(name, "u") {
-				interfaces = append(interfaces, name)
-			}
-		}
-	}
-
-	for _, iface := range interfaces {
-		operstate, _ := readFileString(fmt.Sprintf("/sys/class/net/%s/operstate", iface))
-		if operstate == "up" || operstate == "unknown" {
-			status.Available = true
-			status.Connected = true
-			status.Interface = iface
-
-			// Get IP address
-			if output, err := execWithTimeout(ctx, "ip", "-4", "-o", "addr", "show", iface); err == nil {
-				fields := strings.Fields(output)
-				for i, f := range fields {
-					if f == "inet" && i+1 < len(fields) {
-						status.IPAddress = strings.Split(fields[i+1], "/")[0]
-						break
-					}
-				}
-			}
-
-			// Get gateway
-			if output, err := execWithTimeout(ctx, "ip", "route", "show", "dev", iface); err == nil {
-				lines := strings.Split(output, "\n")
-				for _, line := range lines {
-					if strings.HasPrefix(line, "default via") {
-						fields := strings.Fields(line)
-						if len(fields) >= 3 {
-							status.Gateway = fields[2]
-						}
-					}
-				}
-			}
-
-			break
-		} else if operstate != "" {
-			status.Available = true
-		}
-	}
-
-	jsonResponse(w, http.StatusOK, status)
 }
 
 // ============================================================================
@@ -504,14 +435,14 @@ func (h *HALHandler) getModemSignal(ctx context.Context, modemIdx int) CellularS
 }
 
 // GetAndroidTetheringStatus returns Android USB tethering status.
-// @Router /hal/cellular/android/status [get]
+// @Router /cellular/android/status [get]
 func (h *HALHandler) GetAndroidTetheringStatus(w http.ResponseWriter, r *http.Request) {
 	status := h.checkAndroidTethering(r.Context())
 	jsonResponse(w, http.StatusOK, status)
 }
 
 // EnableAndroidTethering enables Android USB tethering.
-// @Router /hal/cellular/android/enable [post]
+// @Router /cellular/android/enable [post]
 func (h *HALHandler) EnableAndroidTethering(w http.ResponseWriter, r *http.Request) {
 	status := h.checkAndroidTethering(r.Context())
 	if !status.Connected {
@@ -528,7 +459,7 @@ func (h *HALHandler) EnableAndroidTethering(w http.ResponseWriter, r *http.Reque
 }
 
 // DisableAndroidTethering disables Android USB tethering.
-// @Router /hal/cellular/android/disable [post]
+// @Router /cellular/android/disable [post]
 func (h *HALHandler) DisableAndroidTethering(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	for _, iface := range []string{"usb0", "rndis0"} {

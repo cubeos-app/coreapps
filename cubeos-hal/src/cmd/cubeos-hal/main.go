@@ -4,7 +4,7 @@
 // @version 1.1.0
 // @description Hardware Abstraction Layer for Raspberry Pi and ARM64 SBCs
 //
-// @host cubeos.cube:6005
+// @host localhost:6005
 // @BasePath /hal
 package main
 

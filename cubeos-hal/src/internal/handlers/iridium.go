@@ -86,7 +86,7 @@ type IridiumClearRequest struct {
 // @Produce json
 // @Success 200 {object} map[string]interface{}
 // @Failure 500 {object} ErrorResponse
-// @Router /hal/iridium/devices [get]
+// @Router /iridium/devices [get]
 func (h *HALHandler) GetIridiumDevices(w http.ResponseWriter, r *http.Request) {
 	devices := h.iridium.ScanDevices(r.Context())
 	jsonResponse(w, http.StatusOK, map[string]interface{}{
@@ -103,7 +103,7 @@ func (h *HALHandler) GetIridiumDevices(w http.ResponseWriter, r *http.Request) {
 // @Param port query string false "Serial port (connects if not already connected)" default(/dev/ttyUSB1)
 // @Success 200 {object} IridiumStatusResponse
 // @Failure 500 {object} ErrorResponse
-// @Router /hal/iridium/status [get]
+// @Router /iridium/status [get]
 func (h *HALHandler) GetIridiumStatus(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
@@ -156,7 +156,7 @@ func (h *HALHandler) GetIridiumStatus(w http.ResponseWriter, r *http.Request) {
 // @Param port query string false "Serial port" default(/dev/ttyUSB1)
 // @Success 200 {object} IridiumSignalResponse
 // @Failure 500 {object} ErrorResponse
-// @Router /hal/iridium/signal [get]
+// @Router /iridium/signal [get]
 func (h *HALHandler) GetIridiumSignal(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
@@ -195,7 +195,7 @@ func (h *HALHandler) GetIridiumSignal(w http.ResponseWriter, r *http.Request) {
 // @Success 200 {object} IridiumSendResponse
 // @Failure 400 {object} ErrorResponse
 // @Failure 500 {object} ErrorResponse
-// @Router /hal/iridium/send [post]
+// @Router /iridium/send [post]
 func (h *HALHandler) SendIridiumMessage(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
@@ -322,7 +322,7 @@ func (h *HALHandler) SendIridiumMessage(w http.ResponseWriter, r *http.Request) 
 // @Param port query string false "Serial port" default(/dev/ttyUSB1)
 // @Success 200 {object} IridiumMailboxResponse
 // @Failure 500 {object} ErrorResponse
-// @Router /hal/iridium/mailbox_check [post]
+// @Router /iridium/mailbox_check [post]
 func (h *HALHandler) CheckIridiumMailbox(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
@@ -369,7 +369,7 @@ func (h *HALHandler) CheckIridiumMailbox(w http.ResponseWriter, r *http.Request)
 // @Param format query string false "Read format" default(binary) Enums(binary,text)
 // @Success 200 {object} IridiumReceiveResponse
 // @Failure 500 {object} ErrorResponse
-// @Router /hal/iridium/receive [get]
+// @Router /iridium/receive [get]
 func (h *HALHandler) ReceiveIridiumMessage(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
@@ -440,7 +440,7 @@ func (h *HALHandler) ReceiveIridiumMessage(w http.ResponseWriter, r *http.Reques
 // @Success 200 {object} SuccessResponse
 // @Failure 400 {object} ErrorResponse
 // @Failure 500 {object} ErrorResponse
-// @Router /hal/iridium/clear [post]
+// @Router /iridium/clear [post]
 func (h *HALHandler) ClearIridiumBuffers(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	r = limitBody(r, 1<<20)
@@ -484,7 +484,7 @@ func (h *HALHandler) ClearIridiumBuffers(w http.ResponseWriter, r *http.Request)
 // @Tags Iridium
 // @Produce text/event-stream
 // @Success 200 {string} string "SSE stream"
-// @Router /hal/iridium/events [get]
+// @Router /iridium/events [get]
 func (h *HALHandler) StreamIridiumEvents(w http.ResponseWriter, r *http.Request) {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
@@ -539,7 +539,7 @@ func (h *HALHandler) StreamIridiumEvents(w http.ResponseWriter, r *http.Request)
 // @Success 200 {object} SuccessResponse
 // @Failure 400 {object} ErrorResponse
 // @Failure 500 {object} ErrorResponse
-// @Router /hal/iridium/connect [post]
+// @Router /iridium/connect [post]
 func (h *HALHandler) ConnectIridium(w http.ResponseWriter, r *http.Request) {
 	port := r.URL.Query().Get("port")
 
@@ -564,7 +564,7 @@ func (h *HALHandler) ConnectIridium(w http.ResponseWriter, r *http.Request) {
 // @Tags Iridium
 // @Produce json
 // @Success 200 {object} SuccessResponse
-// @Router /hal/iridium/disconnect [post]
+// @Router /iridium/disconnect [post]
 func (h *HALHandler) DisconnectIridium(w http.ResponseWriter, r *http.Request) {
 	h.iridium.Disconnect()
 	successResponse(w, "disconnected")
@@ -573,9 +573,4 @@ func (h *HALHandler) DisconnectIridium(w http.ResponseWriter, r *http.Request) {
 // GetIridiumMessages is a backward-compatibility alias for ReceiveIridiumMessage.
 func (h *HALHandler) GetIridiumMessages(w http.ResponseWriter, r *http.Request) {
 	h.ReceiveIridiumMessage(w, r)
-}
-
-// SendIridiumSBD is a backward-compatibility alias for SendIridiumMessage.
-func (h *HALHandler) SendIridiumSBD(w http.ResponseWriter, r *http.Request) {
-	h.SendIridiumMessage(w, r)
 }

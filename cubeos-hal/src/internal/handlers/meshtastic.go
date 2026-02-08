@@ -21,7 +21,7 @@ import (
 // @Tags Meshtastic
 // @Produce json
 // @Success 200 {object} map[string]interface{}
-// @Router /hal/meshtastic/devices [get]
+// @Router /meshtastic/devices [get]
 func (h *HALHandler) GetMeshtasticDevices(w http.ResponseWriter, r *http.Request) {
 	devices := h.meshtastic.ScanDevices(r.Context())
 	jsonResponse(w, http.StatusOK, map[string]interface{}{
@@ -36,7 +36,7 @@ func (h *HALHandler) GetMeshtasticDevices(w http.ResponseWriter, r *http.Request
 // @Tags Meshtastic
 // @Produce json
 // @Success 200 {object} map[string]interface{}
-// @Router /hal/meshtastic/status [get]
+// @Router /meshtastic/status [get]
 func (h *HALHandler) GetMeshtasticStatus(w http.ResponseWriter, r *http.Request) {
 	connected := h.meshtastic.IsConnected()
 
@@ -77,7 +77,7 @@ func (h *HALHandler) GetMeshtasticStatus(w http.ResponseWriter, r *http.Request)
 // @Tags Meshtastic
 // @Produce json
 // @Success 200 {object} map[string]interface{}
-// @Router /hal/meshtastic/nodes [get]
+// @Router /meshtastic/nodes [get]
 func (h *HALHandler) GetMeshtasticNodes(w http.ResponseWriter, r *http.Request) {
 	nodes := h.meshtastic.GetNodes()
 
@@ -103,7 +103,7 @@ func (h *HALHandler) GetMeshtasticNodes(w http.ResponseWriter, r *http.Request) 
 // @Tags Meshtastic
 // @Produce json
 // @Success 200 {object} map[string]interface{}
-// @Router /hal/meshtastic/position [get]
+// @Router /meshtastic/position [get]
 func (h *HALHandler) GetMeshtasticPosition(w http.ResponseWriter, r *http.Request) {
 	myNode := h.meshtastic.GetMyNode()
 
@@ -139,7 +139,7 @@ func (h *HALHandler) GetMeshtasticPosition(w http.ResponseWriter, r *http.Reques
 // @Success 200 {object} map[string]interface{}
 // @Failure 400 {object} ErrorResponse
 // @Failure 500 {object} ErrorResponse
-// @Router /hal/meshtastic/connect [post]
+// @Router /meshtastic/connect [post]
 func (h *HALHandler) ConnectMeshtastic(w http.ResponseWriter, r *http.Request) {
 	// Parse optional connection parameters
 	var req struct {
@@ -245,7 +245,7 @@ func (h *HALHandler) ConnectMeshtastic(w http.ResponseWriter, r *http.Request) {
 // @Tags Meshtastic
 // @Produce json
 // @Success 200 {object} SuccessResponse
-// @Router /hal/meshtastic/disconnect [post]
+// @Router /meshtastic/disconnect [post]
 func (h *HALHandler) DisconnectMeshtastic(w http.ResponseWriter, r *http.Request) {
 	h.meshtastic.Disconnect()
 	successResponse(w, "disconnected from Meshtastic device")
@@ -261,7 +261,7 @@ func (h *HALHandler) DisconnectMeshtastic(w http.ResponseWriter, r *http.Request
 // @Success 200 {object} SuccessResponse
 // @Failure 400 {object} ErrorResponse
 // @Failure 500 {object} ErrorResponse
-// @Router /hal/meshtastic/messages/send [post]
+// @Router /meshtastic/messages/send [post]
 func (h *HALHandler) SendMeshtasticMessage(w http.ResponseWriter, r *http.Request) {
 	r = limitBody(r, 1<<10) // 1KB max
 
@@ -326,7 +326,7 @@ func (h *HALHandler) SendMeshtasticMessage(w http.ResponseWriter, r *http.Reques
 // @Success 200 {object} SuccessResponse
 // @Failure 400 {object} ErrorResponse
 // @Failure 500 {object} ErrorResponse
-// @Router /hal/meshtastic/messages/send_raw [post]
+// @Router /meshtastic/messages/send_raw [post]
 func (h *HALHandler) SendMeshtasticRaw(w http.ResponseWriter, r *http.Request) {
 	r = limitBody(r, 1<<16) // 64KB max
 
@@ -399,7 +399,7 @@ func (h *HALHandler) SendMeshtasticRaw(w http.ResponseWriter, r *http.Request) {
 // @Produce json
 // @Param limit query int false "Maximum messages to return" default(50)
 // @Success 200 {object} map[string]interface{}
-// @Router /hal/meshtastic/messages [get]
+// @Router /meshtastic/messages [get]
 func (h *HALHandler) GetMeshtasticMessages(w http.ResponseWriter, r *http.Request) {
 	limit := 50
 	if v := r.URL.Query().Get("limit"); v != "" {
@@ -421,7 +421,7 @@ func (h *HALHandler) GetMeshtasticMessages(w http.ResponseWriter, r *http.Reques
 // @Tags Meshtastic
 // @Produce text/event-stream
 // @Success 200 {string} string "SSE event stream"
-// @Router /hal/meshtastic/events [get]
+// @Router /meshtastic/events [get]
 func (h *HALHandler) StreamMeshtasticEvents(w http.ResponseWriter, r *http.Request) {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
@@ -472,7 +472,7 @@ func (h *HALHandler) StreamMeshtasticEvents(w http.ResponseWriter, r *http.Reque
 // @Tags Meshtastic
 // @Produce json
 // @Failure 501 {object} ErrorResponse
-// @Router /hal/meshtastic/channel [post]
+// @Router /meshtastic/channel [post]
 func (h *HALHandler) SetMeshtasticChannel(w http.ResponseWriter, r *http.Request) {
 	errorResponse(w, http.StatusNotImplemented, "Meshtastic channel configuration not yet implemented (requires config protobuf, deferred to Phase 2b)")
 }
@@ -483,7 +483,7 @@ func (h *HALHandler) SetMeshtasticChannel(w http.ResponseWriter, r *http.Request
 // @Tags Meshtastic
 // @Produce json
 // @Failure 501 {object} ErrorResponse
-// @Router /hal/meshtastic/config [get]
+// @Router /meshtastic/config [get]
 func (h *HALHandler) GetMeshtasticConfig(w http.ResponseWriter, r *http.Request) {
 	errorResponse(w, http.StatusNotImplemented, "Meshtastic config read not yet implemented (deferred to Phase 2b)")
 }
