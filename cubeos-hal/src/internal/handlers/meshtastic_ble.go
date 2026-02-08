@@ -101,11 +101,31 @@ func isBLEOnOnboardAdapter(adapter string) bool {
 }
 
 // isHostapdActive checks if the WiFi Access Point is running.
+// Uses /proc scan instead of systemctl because HAL runs in an Alpine container
+// (no systemctl binary) with pid:host namespace (can see host processes).
 func isHostapdActive() bool {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	out, err := execWithTimeout(ctx, "systemctl", "is-active", "hostapd")
-	return err == nil && strings.TrimSpace(out) == "active"
+	entries, err := os.ReadDir("/proc")
+	if err != nil {
+		return false
+	}
+	for _, entry := range entries {
+		// Only check numeric directories (PIDs)
+		if !entry.IsDir() {
+			continue
+		}
+		pid := entry.Name()
+		if len(pid) == 0 || pid[0] < '1' || pid[0] > '9' {
+			continue
+		}
+		comm, err := os.ReadFile("/proc/" + pid + "/comm")
+		if err != nil {
+			continue
+		}
+		if strings.TrimSpace(string(comm)) == "hostapd" {
+			return true
+		}
+	}
+	return false
 }
 
 // findBestBLEAdapter returns the best available BLE adapter.
