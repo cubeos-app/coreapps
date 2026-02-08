@@ -7,7 +7,9 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"os/exec"
 	"strings"
+	"sync"
 )
 
 // HALHandler handles all HAL API endpoints.
@@ -15,6 +17,11 @@ type HALHandler struct {
 	powerMonitor *PowerMonitor
 	iridium      *IridiumDriver
 	meshtastic   *MeshtasticDriver
+
+	// Stream process tracking (camera)
+	streamMu     sync.Mutex
+	streamCmd    *exec.Cmd
+	streamCancel func()
 }
 
 // NewHALHandler creates a new HAL handler instance.
@@ -24,6 +31,11 @@ func NewHALHandler() *HALHandler {
 		iridium:      NewIridiumDriver(),
 		meshtastic:   NewMeshtasticDriver(),
 	}
+}
+
+// Close cleans up HAL resources (stream processes, etc.).
+func (h *HALHandler) Close() {
+	h.stopStreamProcess()
 }
 
 // PowerMonitorRef returns a reference to the power monitor for shutdown wiring.

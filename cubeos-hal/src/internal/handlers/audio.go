@@ -1,12 +1,13 @@
 package handlers
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"os/exec"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // ============================================================================
@@ -57,6 +58,14 @@ type MuteRequest struct {
 	Card    int    `json:"card,omitempty" example:"0"`
 }
 
+// TestToneRequest represents test tone request.
+// @Description Test tone parameters
+type TestToneRequest struct {
+	Card     int `json:"card,omitempty" example:"0"`
+	Device   int `json:"device,omitempty" example:"0"`
+	Duration int `json:"duration,omitempty" example:"2"`
+}
+
 // ============================================================================
 // Audio Device Handlers
 // ============================================================================
@@ -71,9 +80,10 @@ type MuteRequest struct {
 // @Failure 500 {object} ErrorResponse
 // @Router /audio/devices [get]
 func (h *HALHandler) GetAudioDevices(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
 	response := AudioDevicesResponse{
-		Playback: h.getAudioDevices("playback"),
-		Capture:  h.getAudioDevices("capture"),
+		Playback: h.getAudioDevices(ctx, "playback"),
+		Capture:  h.getAudioDevices(ctx, "capture"),
 	}
 
 	jsonResponse(w, http.StatusOK, response)
@@ -89,7 +99,7 @@ func (h *HALHandler) GetAudioDevices(w http.ResponseWriter, r *http.Request) {
 // @Failure 500 {object} ErrorResponse
 // @Router /audio/playback [get]
 func (h *HALHandler) GetPlaybackDevices(w http.ResponseWriter, r *http.Request) {
-	devices := h.getAudioDevices("playback")
+	devices := h.getAudioDevices(r.Context(), "playback")
 	jsonResponse(w, http.StatusOK, map[string]interface{}{
 		"count":   len(devices),
 		"devices": devices,
@@ -106,7 +116,7 @@ func (h *HALHandler) GetPlaybackDevices(w http.ResponseWriter, r *http.Request) 
 // @Failure 500 {object} ErrorResponse
 // @Router /audio/capture [get]
 func (h *HALHandler) GetCaptureDevices(w http.ResponseWriter, r *http.Request) {
-	devices := h.getAudioDevices("capture")
+	devices := h.getAudioDevices(r.Context(), "capture")
 	jsonResponse(w, http.StatusOK, map[string]interface{}{
 		"count":   len(devices),
 		"devices": devices,
@@ -126,6 +136,7 @@ func (h *HALHandler) GetCaptureDevices(w http.ResponseWriter, r *http.Request) {
 // @Param control query string false "Mixer control" default(Master)
 // @Param card query int false "Sound card" default(0)
 // @Success 200 {object} VolumeInfo
+// @Failure 400 {object} ErrorResponse
 // @Failure 500 {object} ErrorResponse
 // @Router /audio/volume [get]
 func (h *HALHandler) GetVolume(w http.ResponseWriter, r *http.Request) {
@@ -134,12 +145,29 @@ func (h *HALHandler) GetVolume(w http.ResponseWriter, r *http.Request) {
 		control = "Master"
 	}
 
-	card := 0
-	if cardParam := r.URL.Query().Get("card"); cardParam != "" {
-		card, _ = strconv.Atoi(cardParam)
+	// HF06-03: Validate mixer control
+	if err := validateMixerControl(control); err != nil {
+		errorResponse(w, http.StatusBadRequest, err.Error())
+		return
 	}
 
-	info := h.getVolumeInfo(card, control)
+	card := 0
+	if cardParam := r.URL.Query().Get("card"); cardParam != "" {
+		var err error
+		card, err = strconv.Atoi(cardParam)
+		if err != nil {
+			errorResponse(w, http.StatusBadRequest, "invalid card number")
+			return
+		}
+	}
+
+	// HF06-08: Validate audio card
+	if err := validateAudioCard(card); err != nil {
+		errorResponse(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	info := h.getVolumeInfo(r.Context(), card, control)
 	jsonResponse(w, http.StatusOK, info)
 }
 
@@ -155,9 +183,11 @@ func (h *HALHandler) GetVolume(w http.ResponseWriter, r *http.Request) {
 // @Failure 500 {object} ErrorResponse
 // @Router /audio/volume [post]
 func (h *HALHandler) SetVolume(w http.ResponseWriter, r *http.Request) {
+	r.Body = limitBody(r, 1<<20).Body // HF06-04: limit body
+
 	var req VolumeRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		errorResponse(w, http.StatusBadRequest, "invalid request: "+err.Error())
+		errorResponse(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
 
@@ -171,13 +201,29 @@ func (h *HALHandler) SetVolume(w http.ResponseWriter, r *http.Request) {
 		control = "Master"
 	}
 
-	// Use amixer to set volume
+	// HF06-03: Validate mixer control
+	if err := validateMixerControl(control); err != nil {
+		errorResponse(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	// HF06-08: Validate audio card
+	if err := validateAudioCard(req.Card); err != nil {
+		errorResponse(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	// HF06-09: Use execWithTimeout
 	cardArg := fmt.Sprintf("-c%d", req.Card)
 	volumeArg := fmt.Sprintf("%d%%", req.Volume)
 
-	cmd := exec.Command("amixer", cardArg, "sset", control, volumeArg)
-	if output, err := cmd.CombinedOutput(); err != nil {
-		errorResponse(w, http.StatusInternalServerError, fmt.Sprintf("failed to set volume: %s - %s", err, string(output)))
+	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+	defer cancel()
+
+	_, err := execWithTimeout(ctx, "amixer", cardArg, "sset", control, volumeArg)
+	if err != nil {
+		// HF06-10: Sanitize error
+		errorResponse(w, http.StatusInternalServerError, sanitizeExecError("set volume", err))
 		return
 	}
 
@@ -196,9 +242,11 @@ func (h *HALHandler) SetVolume(w http.ResponseWriter, r *http.Request) {
 // @Failure 500 {object} ErrorResponse
 // @Router /audio/mute [post]
 func (h *HALHandler) SetMute(w http.ResponseWriter, r *http.Request) {
+	r.Body = limitBody(r, 1<<20).Body // HF06-04: limit body
+
 	var req MuteRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		errorResponse(w, http.StatusBadRequest, "invalid request: "+err.Error())
+		errorResponse(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
 
@@ -207,16 +255,33 @@ func (h *HALHandler) SetMute(w http.ResponseWriter, r *http.Request) {
 		control = "Master"
 	}
 
+	// HF06-03: Validate mixer control
+	if err := validateMixerControl(control); err != nil {
+		errorResponse(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	// HF06-08: Validate audio card
+	if err := validateAudioCard(req.Card); err != nil {
+		errorResponse(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
 	muteArg := "unmute"
 	if req.Muted {
 		muteArg = "mute"
 	}
 
+	// HF06-09: Use execWithTimeout
 	cardArg := fmt.Sprintf("-c%d", req.Card)
 
-	cmd := exec.Command("amixer", cardArg, "sset", control, muteArg)
-	if output, err := cmd.CombinedOutput(); err != nil {
-		errorResponse(w, http.StatusInternalServerError, fmt.Sprintf("failed to set mute: %s - %s", err, string(output)))
+	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+	defer cancel()
+
+	_, err := execWithTimeout(ctx, "amixer", cardArg, "sset", control, muteArg)
+	if err != nil {
+		// HF06-10: Sanitize error
+		errorResponse(w, http.StatusInternalServerError, sanitizeExecError("set mute", err))
 		return
 	}
 
@@ -237,35 +302,68 @@ func (h *HALHandler) SetMute(w http.ResponseWriter, r *http.Request) {
 // @Tags Audio
 // @Accept json
 // @Produce json
-// @Param card query int false "Sound card" default(0)
-// @Param device query int false "Device" default(0)
-// @Param duration query int false "Duration in seconds" default(2)
+// @Param request body TestToneRequest false "Test tone parameters"
 // @Success 200 {object} SuccessResponse
+// @Failure 400 {object} ErrorResponse
 // @Failure 500 {object} ErrorResponse
 // @Router /audio/test [post]
 func (h *HALHandler) PlayTestTone(w http.ResponseWriter, r *http.Request) {
-	card := 0
-	if cardParam := r.URL.Query().Get("card"); cardParam != "" {
-		card, _ = strconv.Atoi(cardParam)
+	var req TestToneRequest
+
+	// Accept JSON body (preferred) or fall back to query params
+	if r.Body != nil && r.ContentLength > 0 {
+		r.Body = limitBody(r, 1<<20).Body // HF06-04: limit body
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			errorResponse(w, http.StatusBadRequest, "invalid request body")
+			return
+		}
+	} else {
+		// Fall back to query params for backward compatibility
+		if cardParam := r.URL.Query().Get("card"); cardParam != "" {
+			req.Card, _ = strconv.Atoi(cardParam)
+		}
+		if deviceParam := r.URL.Query().Get("device"); deviceParam != "" {
+			req.Device, _ = strconv.Atoi(deviceParam)
+		}
+		if durParam := r.URL.Query().Get("duration"); durParam != "" {
+			req.Duration, _ = strconv.Atoi(durParam)
+		}
 	}
 
-	device := 0
-	if deviceParam := r.URL.Query().Get("device"); deviceParam != "" {
-		device, _ = strconv.Atoi(deviceParam)
+	// Apply defaults
+	if req.Duration == 0 {
+		req.Duration = 2
 	}
 
-	duration := 2
-	if durParam := r.URL.Query().Get("duration"); durParam != "" {
-		duration, _ = strconv.Atoi(durParam)
+	// HF06-08: Validate audio card/device
+	if err := validateAudioCard(req.Card); err != nil {
+		errorResponse(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if req.Device < 0 || req.Device > 31 {
+		errorResponse(w, http.StatusBadRequest, "audio device out of range (0-31)")
+		return
 	}
 
-	// Use speaker-test
-	deviceArg := fmt.Sprintf("plughw:%d,%d", card, device)
-	durationArg := strconv.Itoa(duration)
+	// HF06-07: Validate test tone duration (1-10s)
+	if err := validateDuration(req.Duration); err != nil {
+		errorResponse(w, http.StatusBadRequest, err.Error())
+		return
+	}
 
-	cmd := exec.Command("speaker-test", "-D", deviceArg, "-t", "sine", "-f", "440", "-l", "1", "-p", durationArg)
-	if output, err := cmd.CombinedOutput(); err != nil {
-		errorResponse(w, http.StatusInternalServerError, fmt.Sprintf("test tone failed: %s - %s", err, string(output)))
+	// HF06-09: Use execWithTimeout
+	deviceArg := fmt.Sprintf("plughw:%d,%d", req.Card, req.Device)
+	durationArg := strconv.Itoa(req.Duration)
+
+	// Timeout = duration + 5s buffer for startup/cleanup
+	timeout := time.Duration(req.Duration+5) * time.Second
+	ctx, cancel := context.WithTimeout(r.Context(), timeout)
+	defer cancel()
+
+	_, err := execWithTimeout(ctx, "speaker-test", "-D", deviceArg, "-t", "sine", "-f", "440", "-l", "1", "-p", durationArg)
+	if err != nil {
+		// HF06-10: Sanitize error
+		errorResponse(w, http.StatusInternalServerError, sanitizeExecError("test tone", err))
 		return
 	}
 
@@ -276,23 +374,23 @@ func (h *HALHandler) PlayTestTone(w http.ResponseWriter, r *http.Request) {
 // Helper Functions
 // ============================================================================
 
-func (h *HALHandler) getAudioDevices(deviceType string) []AudioDevice {
+func (h *HALHandler) getAudioDevices(ctx context.Context, deviceType string) []AudioDevice {
 	var devices []AudioDevice
 
-	// Use aplay -l for playback, arecord -l for capture
-	var cmd *exec.Cmd
+	// HF06-09: Use execWithTimeout for aplay/arecord
+	var cmdName string
 	if deviceType == "playback" {
-		cmd = exec.Command("aplay", "-l")
+		cmdName = "aplay"
 	} else {
-		cmd = exec.Command("arecord", "-l")
+		cmdName = "arecord"
 	}
 
-	output, err := cmd.Output()
+	output, err := execWithTimeout(ctx, cmdName, "-l")
 	if err != nil {
 		return devices
 	}
 
-	lines := strings.Split(string(output), "\n")
+	lines := strings.Split(output, "\n")
 	for _, line := range lines {
 		// Parse lines like: "card 0: Headphones [bcm2835 Headphones], device 0: bcm2835 Headphones [bcm2835 Headphones]"
 		if strings.HasPrefix(line, "card ") {
@@ -344,21 +442,21 @@ func (h *HALHandler) getAudioDevices(deviceType string) []AudioDevice {
 	return devices
 }
 
-func (h *HALHandler) getVolumeInfo(card int, control string) VolumeInfo {
+func (h *HALHandler) getVolumeInfo(ctx context.Context, card int, control string) VolumeInfo {
 	info := VolumeInfo{
 		Control: control,
 		Min:     0,
 		Max:     100,
 	}
 
+	// HF06-09: Use execWithTimeout
 	cardArg := fmt.Sprintf("-c%d", card)
-	cmd := exec.Command("amixer", cardArg, "sget", control)
-	output, err := cmd.Output()
+	output, err := execWithTimeout(ctx, "amixer", cardArg, "sget", control)
 	if err != nil {
 		return info
 	}
 
-	lines := strings.Split(string(output), "\n")
+	lines := strings.Split(output, "\n")
 	for _, line := range lines {
 		// Parse lines like: "  Mono: Playback 400 [61%] [on]"
 		// or: "  Front Left: Playback 400 [61%] [on]"

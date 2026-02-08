@@ -1,9 +1,11 @@
 package handlers
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"os"
 	"os/exec"
@@ -62,6 +64,15 @@ type CaptureResponse struct {
 	Base64    string `json:"base64,omitempty"`
 }
 
+// StreamRequest represents stream start request.
+// @Description Camera stream parameters
+type StreamRequest struct {
+	Camera int `json:"camera,omitempty" example:"0"`
+	Width  int `json:"width,omitempty" example:"1280"`
+	Height int `json:"height,omitempty" example:"720"`
+	FPS    int `json:"fps,omitempty" example:"30"`
+}
+
 // StreamInfo represents stream information.
 // @Description Camera stream information
 type StreamInfo struct {
@@ -72,6 +83,26 @@ type StreamInfo struct {
 	Height int    `json:"height" example:"720"`
 	FPS    int    `json:"fps" example:"30"`
 	Format string `json:"format" example:"mjpeg"`
+}
+
+// ============================================================================
+// Stream environment helpers
+// ============================================================================
+
+// getStreamHost returns the stream hostname from env or default.
+func getStreamHost() string {
+	if h := os.Getenv("CUBEOS_STREAM_HOST"); h != "" {
+		return h
+	}
+	return "cubeos.cube"
+}
+
+// getStreamPort returns the stream port from env or default.
+func getStreamPort() string {
+	if p := os.Getenv("CUBEOS_STREAM_PORT"); p != "" {
+		return p
+	}
+	return "8080"
 }
 
 // ============================================================================
@@ -88,7 +119,7 @@ type StreamInfo struct {
 // @Failure 500 {object} ErrorResponse
 // @Router /camera/devices [get]
 func (h *HALHandler) GetCameras(w http.ResponseWriter, r *http.Request) {
-	cameras := h.scanCameras()
+	cameras := h.scanCameras(r.Context())
 	jsonResponse(w, http.StatusOK, map[string]interface{}{
 		"count":   len(cameras),
 		"cameras": cameras,
@@ -103,16 +134,26 @@ func (h *HALHandler) GetCameras(w http.ResponseWriter, r *http.Request) {
 // @Produce json
 // @Param index query int false "Camera index" default(0)
 // @Success 200 {object} CameraDevice
+// @Failure 400 {object} ErrorResponse "Invalid camera index"
 // @Failure 404 {object} ErrorResponse "Camera not found"
 // @Failure 500 {object} ErrorResponse
 // @Router /camera/info [get]
 func (h *HALHandler) GetCameraInfo(w http.ResponseWriter, r *http.Request) {
 	index := 0
 	if idx := r.URL.Query().Get("index"); idx != "" {
-		index, _ = strconv.Atoi(idx)
+		var err error
+		index, err = strconv.Atoi(idx)
+		if err != nil {
+			errorResponse(w, http.StatusBadRequest, "invalid camera index")
+			return
+		}
+	}
+	if err := validateCameraIndex(index); err != nil {
+		errorResponse(w, http.StatusBadRequest, err.Error())
+		return
 	}
 
-	cameras := h.scanCameras()
+	cameras := h.scanCameras(r.Context())
 	if index >= len(cameras) {
 		errorResponse(w, http.StatusNotFound, "camera not found")
 		return
@@ -135,7 +176,11 @@ func (h *HALHandler) GetCameraInfo(w http.ResponseWriter, r *http.Request) {
 func (h *HALHandler) CaptureImage(w http.ResponseWriter, r *http.Request) {
 	var req CaptureRequest
 	if r.Body != nil {
-		json.NewDecoder(r.Body).Decode(&req)
+		r.Body = limitBody(r, 1<<20).Body // HF06-04: limit body
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			errorResponse(w, http.StatusBadRequest, "invalid request body")
+			return
+		}
 	}
 
 	// Set defaults
@@ -150,6 +195,26 @@ func (h *HALHandler) CaptureImage(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.Format == "" {
 		req.Format = "jpeg"
+	}
+
+	// HF06-05: Validate capture params
+	if err := validateResolution(req.Width, req.Height); err != nil {
+		errorResponse(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if err := validateImageQuality(req.Quality); err != nil {
+		errorResponse(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if req.Rotation != 0 {
+		if err := validateRotation(req.Rotation); err != nil {
+			errorResponse(w, http.StatusBadRequest, err.Error())
+			return
+		}
+	}
+	if err := validateCameraIndex(req.Camera); err != nil {
+		errorResponse(w, http.StatusBadRequest, err.Error())
+		return
 	}
 
 	// Generate output path
@@ -179,8 +244,12 @@ func (h *HALHandler) CaptureImage(w http.ResponseWriter, r *http.Request) {
 		args = append(args, "--camera", strconv.Itoa(req.Camera))
 	}
 
-	cmd := exec.Command("libcamera-still", args...)
-	if output, err := cmd.CombinedOutput(); err != nil {
+	// HF06-09: Use execWithTimeout instead of raw exec.Command
+	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+	defer cancel()
+
+	_, err := execWithTimeout(ctx, "libcamera-still", args...)
+	if err != nil {
 		// Try fswebcam for USB cameras
 		args = []string{
 			"-r", fmt.Sprintf("%dx%d", req.Width, req.Height),
@@ -189,9 +258,11 @@ func (h *HALHandler) CaptureImage(w http.ResponseWriter, r *http.Request) {
 			"--no-banner",
 			outputPath,
 		}
-		cmd = exec.Command("fswebcam", args...)
-		if output2, err2 := cmd.CombinedOutput(); err2 != nil {
-			errorResponse(w, http.StatusInternalServerError, fmt.Sprintf("capture failed: %s / %s", string(output), string(output2)))
+		_, err2 := execWithTimeout(ctx, "fswebcam", args...)
+		if err2 != nil {
+			// HF06-10: Sanitize error messages
+			errorResponse(w, http.StatusInternalServerError,
+				sanitizeExecError("libcamera-still", err)+"; "+sanitizeExecError("fswebcam", err2))
 			return
 		}
 	}
@@ -199,7 +270,7 @@ func (h *HALHandler) CaptureImage(w http.ResponseWriter, r *http.Request) {
 	// Get file info
 	fileInfo, err := os.Stat(outputPath)
 	if err != nil {
-		errorResponse(w, http.StatusInternalServerError, "failed to read captured image: "+err.Error())
+		errorResponse(w, http.StatusInternalServerError, "failed to read captured image")
 		return
 	}
 
@@ -239,13 +310,17 @@ func (h *HALHandler) GetCapturedImage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Security: only allow files from /tmp
-	if !strings.HasPrefix(imagePath, "/tmp/") {
+	// HF06-01 (P1): Use validateCapturePath for path traversal protection.
+	// filepath.Clean + /tmp/ prefix check + capture_*.jpg pattern match.
+	if err := validateCapturePath(imagePath); err != nil {
 		errorResponse(w, http.StatusBadRequest, "invalid path")
 		return
 	}
 
-	data, err := os.ReadFile(imagePath)
+	// Use the cleaned path for file access
+	cleanPath := filepath.Clean(imagePath)
+
+	data, err := os.ReadFile(cleanPath)
 	if err != nil {
 		errorResponse(w, http.StatusNotFound, "image not found")
 		return
@@ -266,23 +341,30 @@ func (h *HALHandler) GetCapturedImage(w http.ResponseWriter, r *http.Request) {
 // @Failure 500 {object} ErrorResponse
 // @Router /camera/stream/status [get]
 func (h *HALHandler) GetStreamInfo(w http.ResponseWriter, r *http.Request) {
-	// Check if mjpg-streamer or similar is running
 	info := StreamInfo{
 		Active: false,
 	}
 
-	// Check for common streaming services
-	cmd := exec.Command("pgrep", "-f", "mjpg_streamer")
-	if err := cmd.Run(); err == nil {
+	// HF06-02: Check tracked stream process first
+	h.streamMu.Lock()
+	if h.streamCmd != nil && h.streamCmd.Process != nil {
 		info.Active = true
-		info.URL = "http://cubeos.cube:8080/?action=stream"
+		info.URL = fmt.Sprintf("http://%s:%s/?action=stream", getStreamHost(), getStreamPort())
 		info.Format = "mjpeg"
-		info.FPS = 30
 	}
+	h.streamMu.Unlock()
 
-	cmd = exec.Command("pgrep", "-f", "libcamera-vid")
-	if err := cmd.Run(); err == nil {
-		info.Active = true
+	// Also check for externally started streaming processes
+	if !info.Active {
+		ctx := r.Context()
+		if _, err := execWithTimeout(ctx, "pgrep", "-f", "mjpg_streamer"); err == nil {
+			info.Active = true
+			info.URL = fmt.Sprintf("http://%s:%s/?action=stream", getStreamHost(), getStreamPort())
+			info.Format = "mjpeg"
+			info.FPS = 30
+		} else if _, err := execWithTimeout(ctx, "pgrep", "-f", "libcamera-vid"); err == nil {
+			info.Active = true
+		}
 	}
 
 	jsonResponse(w, http.StatusOK, info)
@@ -294,63 +376,128 @@ func (h *HALHandler) GetStreamInfo(w http.ResponseWriter, r *http.Request) {
 // @Tags Camera
 // @Accept json
 // @Produce json
-// @Param camera query int false "Camera index" default(0)
-// @Param width query int false "Stream width" default(1280)
-// @Param height query int false "Stream height" default(720)
-// @Param fps query int false "Frames per second" default(30)
+// @Param request body StreamRequest false "Stream parameters"
 // @Success 200 {object} StreamInfo
+// @Failure 400 {object} ErrorResponse "Invalid parameters or stream already active"
 // @Failure 500 {object} ErrorResponse
 // @Router /camera/stream/start [post]
 func (h *HALHandler) StartStream(w http.ResponseWriter, r *http.Request) {
-	camera := 0
-	if idx := r.URL.Query().Get("camera"); idx != "" {
-		camera, _ = strconv.Atoi(idx)
+	// Parse from JSON body or query params
+	var req StreamRequest
+	if r.Body != nil && r.ContentLength > 0 {
+		r.Body = limitBody(r, 1<<20).Body
+		json.NewDecoder(r.Body).Decode(&req)
+	}
+	// Fall back to query params for backward compatibility
+	if req.Camera == 0 {
+		if idx := r.URL.Query().Get("camera"); idx != "" {
+			req.Camera, _ = strconv.Atoi(idx)
+		}
+	}
+	if req.Width == 0 {
+		if ws := r.URL.Query().Get("width"); ws != "" {
+			req.Width, _ = strconv.Atoi(ws)
+		}
+	}
+	if req.Height == 0 {
+		if hs := r.URL.Query().Get("height"); hs != "" {
+			req.Height, _ = strconv.Atoi(hs)
+		}
+	}
+	if req.FPS == 0 {
+		if f := r.URL.Query().Get("fps"); f != "" {
+			req.FPS, _ = strconv.Atoi(f)
+		}
 	}
 
-	width := 1280
-	if w := r.URL.Query().Get("width"); w != "" {
-		width, _ = strconv.Atoi(w)
+	// Apply defaults
+	if req.Width == 0 {
+		req.Width = 1280
+	}
+	if req.Height == 0 {
+		req.Height = 720
+	}
+	if req.FPS == 0 {
+		req.FPS = 30
 	}
 
-	height := 720
-	if h := r.URL.Query().Get("height"); h != "" {
-		height, _ = strconv.Atoi(h)
+	// HF06-06: Validate stream params
+	if err := validateCameraIndex(req.Camera); err != nil {
+		errorResponse(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if err := validateResolution(req.Width, req.Height); err != nil {
+		errorResponse(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if req.FPS < 1 || req.FPS > 120 {
+		errorResponse(w, http.StatusBadRequest, "fps out of range (1-120)")
+		return
 	}
 
-	fps := 30
-	if f := r.URL.Query().Get("fps"); f != "" {
-		fps, _ = strconv.Atoi(f)
+	// HF06-02: Prevent double-start
+	h.streamMu.Lock()
+	defer h.streamMu.Unlock()
+
+	if h.streamCmd != nil && h.streamCmd.Process != nil {
+		errorResponse(w, http.StatusBadRequest, "stream already active, stop first")
+		return
 	}
+
+	streamPort := getStreamPort()
+
+	// Create a cancellable context for the stream process
+	ctx, cancel := context.WithCancel(context.Background())
 
 	// Try mjpg-streamer
-	cmd := exec.Command("mjpg_streamer",
-		"-i", fmt.Sprintf("input_uvc.so -d /dev/video%d -r %dx%d -f %d", camera, width, height, fps),
-		"-o", "output_http.so -p 8080 -w /usr/share/mjpg-streamer/www",
+	cmd := exec.CommandContext(ctx,
+		"mjpg_streamer",
+		"-i", fmt.Sprintf("input_uvc.so -d /dev/video%d -r %dx%d -f %d", req.Camera, req.Width, req.Height, req.FPS),
+		"-o", fmt.Sprintf("output_http.so -p %s -w /usr/share/mjpg-streamer/www", streamPort),
 	)
 
 	if err := cmd.Start(); err != nil {
 		// Try libcamera approach
-		cmd = exec.Command("libcamera-vid",
+		cmd = exec.CommandContext(ctx,
+			"libcamera-vid",
 			"-t", "0",
-			"--width", strconv.Itoa(width),
-			"--height", strconv.Itoa(height),
-			"--framerate", strconv.Itoa(fps),
+			"--width", strconv.Itoa(req.Width),
+			"--height", strconv.Itoa(req.Height),
+			"--framerate", strconv.Itoa(req.FPS),
 			"--codec", "mjpeg",
-			"-o", "tcp://0.0.0.0:8080",
+			"-o", fmt.Sprintf("tcp://0.0.0.0:%s", streamPort),
 		)
 		if err := cmd.Start(); err != nil {
-			errorResponse(w, http.StatusInternalServerError, "failed to start stream: "+err.Error())
+			cancel()
+			errorResponse(w, http.StatusInternalServerError, sanitizeExecError("start stream", err))
 			return
 		}
 	}
 
+	// Store process reference for lifecycle management
+	h.streamCmd = cmd
+	h.streamCancel = cancel
+
+	// Goroutine to clean up when process exits unexpectedly
+	go func() {
+		if err := cmd.Wait(); err != nil {
+			log.Printf("stream process exited: %v", err)
+		}
+		h.streamMu.Lock()
+		if h.streamCmd == cmd {
+			h.streamCmd = nil
+			h.streamCancel = nil
+		}
+		h.streamMu.Unlock()
+	}()
+
 	info := StreamInfo{
 		Active: true,
-		URL:    "http://cubeos.cube:8080/?action=stream",
-		Camera: camera,
-		Width:  width,
-		Height: height,
-		FPS:    fps,
+		URL:    fmt.Sprintf("http://%s:%s/?action=stream", getStreamHost(), streamPort),
+		Camera: req.Camera,
+		Width:  req.Width,
+		Height: req.Height,
+		FPS:    req.FPS,
 		Format: "mjpeg",
 	}
 
@@ -367,27 +514,43 @@ func (h *HALHandler) StartStream(w http.ResponseWriter, r *http.Request) {
 // @Failure 500 {object} ErrorResponse
 // @Router /camera/stream/stop [post]
 func (h *HALHandler) StopStream(w http.ResponseWriter, r *http.Request) {
-	// Kill streaming processes
-	exec.Command("pkill", "-f", "mjpg_streamer").Run()
-	exec.Command("pkill", "-f", "libcamera-vid").Run()
+	h.stopStreamProcess()
+
+	// Also kill any externally started streaming processes
+	ctx := r.Context()
+	execWithTimeout(ctx, "pkill", "-f", "mjpg_streamer")
+	execWithTimeout(ctx, "pkill", "-f", "libcamera-vid")
 
 	successResponse(w, "stream stopped")
+}
+
+// stopStreamProcess kills the tracked stream process, if any.
+func (h *HALHandler) stopStreamProcess() {
+	h.streamMu.Lock()
+	defer h.streamMu.Unlock()
+
+	if h.streamCancel != nil {
+		h.streamCancel()
+	}
+	if h.streamCmd != nil && h.streamCmd.Process != nil {
+		h.streamCmd.Process.Kill()
+	}
+	h.streamCmd = nil
+	h.streamCancel = nil
 }
 
 // ============================================================================
 // Helper Functions
 // ============================================================================
 
-func (h *HALHandler) scanCameras() []CameraDevice {
+func (h *HALHandler) scanCameras(ctx context.Context) []CameraDevice {
 	var cameras []CameraDevice
 
 	// Check for Pi Camera using libcamera
-	cmd := exec.Command("libcamera-hello", "--list-cameras")
-	if output, err := cmd.Output(); err == nil {
-		outputStr := string(output)
-		if strings.Contains(outputStr, "Available cameras") {
-			// Parse camera info
-			lines := strings.Split(outputStr, "\n")
+	output, err := execWithTimeout(ctx, "libcamera-hello", "--list-cameras")
+	if err == nil {
+		if strings.Contains(output, "Available cameras") {
+			lines := strings.Split(output, "\n")
 			for i, line := range lines {
 				if strings.Contains(line, ": ") && strings.Contains(line, "imx") {
 					camera := CameraDevice{
@@ -428,8 +591,8 @@ func (h *HALHandler) scanCameras() []CameraDevice {
 		}
 
 		// Get device info using v4l2-ctl
-		cmd := exec.Command("v4l2-ctl", "--device", entry, "--info")
-		if output, err := cmd.Output(); err == nil {
+		devOutput, err := execWithTimeout(ctx, "v4l2-ctl", "--device", entry, "--info")
+		if err == nil {
 			camera := CameraDevice{
 				Index:     len(cameras),
 				Path:      entry,
@@ -437,7 +600,7 @@ func (h *HALHandler) scanCameras() []CameraDevice {
 				Available: true,
 			}
 
-			lines := strings.Split(string(output), "\n")
+			lines := strings.Split(devOutput, "\n")
 			for _, line := range lines {
 				if strings.Contains(line, "Card type") {
 					parts := strings.SplitN(line, ":", 2)
@@ -454,9 +617,9 @@ func (h *HALHandler) scanCameras() []CameraDevice {
 			}
 
 			// Get supported formats
-			cmd = exec.Command("v4l2-ctl", "--device", entry, "--list-formats-ext")
-			if fmtOutput, err := cmd.Output(); err == nil {
-				fmtLines := strings.Split(string(fmtOutput), "\n")
+			fmtOutput, err := execWithTimeout(ctx, "v4l2-ctl", "--device", entry, "--list-formats-ext")
+			if err == nil {
+				fmtLines := strings.Split(fmtOutput, "\n")
 				for _, line := range fmtLines {
 					if strings.Contains(line, "Size:") {
 						parts := strings.Split(line, "Size:")

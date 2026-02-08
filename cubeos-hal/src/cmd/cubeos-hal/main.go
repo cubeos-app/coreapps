@@ -111,6 +111,9 @@ func main() {
 	// Stop power monitor first
 	h.PowerMonitorRef().Shutdown()
 
+	// Stop stream and other HAL resources
+	h.Close()
+
 	// Give 15 seconds for graceful shutdown (aligned with Pi watchdog timeout)
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
