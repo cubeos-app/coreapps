@@ -2,12 +2,27 @@ package handlers
 
 import (
 	"encoding/json"
-	"fmt"
+	"log"
 	"net/http"
 	"os"
-	"os/exec"
 	"strings"
 )
+
+// getDefaultNATSource returns the default NAT source CIDR.
+func getDefaultNATSource() string {
+	if src := os.Getenv("HAL_NAT_SOURCE"); src != "" {
+		return src
+	}
+	return "10.42.24.0/24"
+}
+
+// getDefaultNATInterface returns the default NAT output interface.
+func getDefaultNATInterface() string {
+	if iface := os.Getenv("HAL_NAT_INTERFACE"); iface != "" {
+		return iface
+	}
+	return "eth0"
+}
 
 // GetFirewallRules returns iptables rules
 // @Summary Get firewall rules
@@ -19,18 +34,19 @@ import (
 // @Router /firewall/rules [get]
 func (h *HALHandler) GetFirewallRules(w http.ResponseWriter, r *http.Request) {
 	// Get filter table rules
-	filterOutput, err := exec.Command("iptables", "-L", "-n", "-v", "--line-numbers").Output()
+	filterOutput, err := execWithTimeout(r.Context(), "iptables", "-L", "-n", "-v", "--line-numbers")
 	if err != nil {
-		errorResponse(w, http.StatusInternalServerError, fmt.Sprintf("failed to get filter rules: %v", err))
+		log.Printf("GetFirewallRules: filter: %v", err)
+		errorResponse(w, http.StatusInternalServerError, "failed to get filter rules")
 		return
 	}
 
 	// Get NAT table rules
-	natOutput, _ := exec.Command("iptables", "-t", "nat", "-L", "-n", "-v", "--line-numbers").Output()
+	natOutput, _ := execWithTimeout(r.Context(), "iptables", "-t", "nat", "-L", "-n", "-v", "--line-numbers")
 
 	jsonResponse(w, http.StatusOK, map[string]interface{}{
-		"filter": parseIptablesOutput(string(filterOutput)),
-		"nat":    parseIptablesOutput(string(natOutput)),
+		"filter": parseIptablesOutput(filterOutput),
+		"nat":    parseIptablesOutput(natOutput),
 	})
 }
 
@@ -47,18 +63,18 @@ func (h *HALHandler) GetFirewallStatus(w http.ResponseWriter, r *http.Request) {
 	forwardingEnabled := strings.TrimSpace(string(forwardData)) == "1"
 
 	// Count rules in each chain
-	filterOutput, _ := exec.Command("iptables", "-L", "-n", "--line-numbers").Output()
-	natOutput, _ := exec.Command("iptables", "-t", "nat", "-L", "-n", "--line-numbers").Output()
+	filterOutput, _ := execWithTimeout(r.Context(), "iptables", "-L", "-n", "--line-numbers")
+	natOutput, _ := execWithTimeout(r.Context(), "iptables", "-t", "nat", "-L", "-n", "--line-numbers")
 
 	// Check if NAT is enabled by looking for MASQUERADE rules
-	natEnabled := strings.Contains(string(natOutput), "MASQUERADE")
+	natEnabled := strings.Contains(natOutput, "MASQUERADE")
 
 	jsonResponse(w, http.StatusOK, map[string]interface{}{
 		"enabled":            true,
 		"forwarding_enabled": forwardingEnabled,
 		"nat_enabled":        natEnabled,
-		"rules_count":        countIptablesRules(string(filterOutput)),
-		"nat_rules_count":    countIptablesRules(string(natOutput)),
+		"rules_count":        countIptablesRules(filterOutput),
+		"nat_rules_count":    countIptablesRules(natOutput),
 	})
 }
 
@@ -73,7 +89,8 @@ func (h *HALHandler) GetFirewallStatus(w http.ResponseWriter, r *http.Request) {
 func (h *HALHandler) GetForwardingStatus(w http.ResponseWriter, r *http.Request) {
 	data, err := os.ReadFile("/proc/sys/net/ipv4/ip_forward")
 	if err != nil {
-		errorResponse(w, http.StatusInternalServerError, fmt.Sprintf("failed to read ip_forward: %v", err))
+		log.Printf("GetForwardingStatus: %v", err)
+		errorResponse(w, http.StatusInternalServerError, "failed to read forwarding status")
 		return
 	}
 
@@ -87,18 +104,6 @@ func (h *HALHandler) GetForwardingStatus(w http.ResponseWriter, r *http.Request)
 	})
 }
 
-// GetIPForwardStatus is an alias for GetForwardingStatus
-// @Summary Get IP forward sysctl value
-// @Description Returns the ip_forward sysctl value (alias for /forwarding endpoint)
-// @Tags Firewall
-// @Produce json
-// @Success 200 {object} map[string]interface{}
-// @Failure 500 {object} ErrorResponse
-// @Router /firewall/ipforward [get]
-func (h *HALHandler) GetIPForwardStatus(w http.ResponseWriter, r *http.Request) {
-	h.GetForwardingStatus(w, r)
-}
-
 // GetNATStatus returns NAT status
 // @Summary Get NAT status
 // @Description Returns whether NAT/masquerading is enabled by checking POSTROUTING chain
@@ -108,16 +113,17 @@ func (h *HALHandler) GetIPForwardStatus(w http.ResponseWriter, r *http.Request) 
 // @Failure 500 {object} ErrorResponse
 // @Router /firewall/nat/status [get]
 func (h *HALHandler) GetNATStatus(w http.ResponseWriter, r *http.Request) {
-	output, err := exec.Command("iptables", "-t", "nat", "-L", "POSTROUTING", "-n", "-v").Output()
+	output, err := execWithTimeout(r.Context(), "iptables", "-t", "nat", "-L", "POSTROUTING", "-n", "-v")
 	if err != nil {
-		errorResponse(w, http.StatusInternalServerError, fmt.Sprintf("failed to get NAT rules: %v", err))
+		log.Printf("GetNATStatus: %v", err)
+		errorResponse(w, http.StatusInternalServerError, "failed to get NAT rules")
 		return
 	}
 
-	enabled := strings.Contains(string(output), "MASQUERADE")
+	enabled := strings.Contains(output, "MASQUERADE")
 
 	var sourceNet, outInterface string
-	lines := strings.Split(string(output), "\n")
+	lines := strings.Split(output, "\n")
 	for _, line := range lines {
 		if strings.Contains(line, "MASQUERADE") {
 			fields := strings.Fields(line)
@@ -151,6 +157,8 @@ func (h *HALHandler) GetNATStatus(w http.ResponseWriter, r *http.Request) {
 // @Failure 500 {object} ErrorResponse
 // @Router /firewall/rule [post]
 func (h *HALHandler) AddFirewallRule(w http.ResponseWriter, r *http.Request) {
+	r = limitBody(r, 1<<20) // 1MB
+
 	var req struct {
 		Chain       string `json:"chain"`
 		Protocol    string `json:"protocol"`
@@ -166,6 +174,7 @@ func (h *HALHandler) AddFirewallRule(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Apply defaults
 	if req.Chain == "" {
 		req.Chain = "INPUT"
 	}
@@ -173,6 +182,64 @@ func (h *HALHandler) AddFirewallRule(w http.ResponseWriter, r *http.Request) {
 		req.Action = "ACCEPT"
 	}
 
+	// Validate chain
+	if err := validateFirewallChain(req.Chain); err != nil {
+		errorResponse(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	// Validate action
+	if err := validateFirewallAction(req.Action); err != nil {
+		errorResponse(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	// Validate protocol if provided
+	if req.Protocol != "" {
+		if err := validateFirewallProtocol(req.Protocol); err != nil {
+			errorResponse(w, http.StatusBadRequest, err.Error())
+			return
+		}
+	}
+
+	// Validate port if provided
+	if req.Port != "" {
+		if err := validatePort(req.Port); err != nil {
+			errorResponse(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		// Port requires protocol
+		if req.Protocol == "" {
+			errorResponse(w, http.StatusBadRequest, "protocol is required when port is specified")
+			return
+		}
+	}
+
+	// Validate source IP/CIDR if provided
+	if req.Source != "" {
+		if err := validateCIDROrIP(req.Source); err != nil {
+			errorResponse(w, http.StatusBadRequest, "invalid source: "+err.Error())
+			return
+		}
+	}
+
+	// Validate destination IP/CIDR if provided
+	if req.Destination != "" {
+		if err := validateCIDROrIP(req.Destination); err != nil {
+			errorResponse(w, http.StatusBadRequest, "invalid destination: "+err.Error())
+			return
+		}
+	}
+
+	// Validate interface if provided
+	if req.Interface != "" {
+		if err := validateInterfaceName(req.Interface); err != nil {
+			errorResponse(w, http.StatusBadRequest, "invalid interface: "+err.Error())
+			return
+		}
+	}
+
+	// Build iptables command
 	args := []string{"-A", req.Chain}
 
 	if req.Interface != "" {
@@ -192,9 +259,10 @@ func (h *HALHandler) AddFirewallRule(w http.ResponseWriter, r *http.Request) {
 	}
 	args = append(args, "-j", req.Action)
 
-	output, err := exec.Command("iptables", args...).CombinedOutput()
+	_, err := execWithTimeout(r.Context(), "iptables", args...)
 	if err != nil {
-		errorResponse(w, http.StatusInternalServerError, fmt.Sprintf("failed to add rule: %v - %s", err, string(output)))
+		log.Printf("AddFirewallRule: %v", err)
+		errorResponse(w, http.StatusInternalServerError, sanitizeExecError("add firewall rule", err))
 		return
 	}
 
@@ -216,6 +284,8 @@ func (h *HALHandler) AddFirewallRule(w http.ResponseWriter, r *http.Request) {
 // @Failure 500 {object} ErrorResponse
 // @Router /firewall/rule [delete]
 func (h *HALHandler) DeleteFirewallRule(w http.ResponseWriter, r *http.Request) {
+	r = limitBody(r, 1<<20) // 1MB
+
 	var req struct {
 		Chain      string `json:"chain"`
 		RuleNumber string `json:"rule_number"`
@@ -231,9 +301,22 @@ func (h *HALHandler) DeleteFirewallRule(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	output, err := exec.Command("iptables", "-D", req.Chain, req.RuleNumber).CombinedOutput()
+	// Validate chain
+	if err := validateFirewallChain(req.Chain); err != nil {
+		errorResponse(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	// Validate rule number (positive integer)
+	if err := validateRuleNumber(req.RuleNumber); err != nil {
+		errorResponse(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	_, err := execWithTimeout(r.Context(), "iptables", "-D", req.Chain, req.RuleNumber)
 	if err != nil {
-		errorResponse(w, http.StatusInternalServerError, fmt.Sprintf("failed to delete rule: %v - %s", err, string(output)))
+		log.Printf("DeleteFirewallRule: %v", err)
+		errorResponse(w, http.StatusInternalServerError, sanitizeExecError("delete firewall rule", err))
 		return
 	}
 
@@ -256,6 +339,8 @@ func (h *HALHandler) DeleteFirewallRule(w http.ResponseWriter, r *http.Request) 
 // @Failure 500 {object} ErrorResponse
 // @Router /firewall/nat/enable [post]
 func (h *HALHandler) EnableNAT(w http.ResponseWriter, r *http.Request) {
+	r = limitBody(r, 1<<20) // 1MB
+
 	var req struct {
 		Source       string `json:"source"`
 		OutInterface string `json:"out_interface"`
@@ -263,21 +348,34 @@ func (h *HALHandler) EnableNAT(w http.ResponseWriter, r *http.Request) {
 
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		// Allow empty body with defaults
-		req.Source = "10.42.24.0/24"
-		req.OutInterface = "eth0"
+		req.Source = getDefaultNATSource()
+		req.OutInterface = getDefaultNATInterface()
 	}
 
 	if req.Source == "" {
-		req.Source = "10.42.24.0/24"
+		req.Source = getDefaultNATSource()
 	}
 	if req.OutInterface == "" {
-		req.OutInterface = "eth0"
+		req.OutInterface = getDefaultNATInterface()
+	}
+
+	// Validate source CIDR
+	if err := validateCIDROrIP(req.Source); err != nil {
+		errorResponse(w, http.StatusBadRequest, "invalid NAT source: "+err.Error())
+		return
+	}
+
+	// Validate output interface
+	if err := validateInterfaceName(req.OutInterface); err != nil {
+		errorResponse(w, http.StatusBadRequest, "invalid output interface: "+err.Error())
+		return
 	}
 
 	args := []string{"-t", "nat", "-A", "POSTROUTING", "-s", req.Source, "-o", req.OutInterface, "-j", "MASQUERADE"}
-	output, err := exec.Command("iptables", args...).CombinedOutput()
+	_, err := execWithTimeout(r.Context(), "iptables", args...)
 	if err != nil {
-		errorResponse(w, http.StatusInternalServerError, fmt.Sprintf("failed to enable NAT: %v - %s", err, string(output)))
+		log.Printf("EnableNAT: %v", err)
+		errorResponse(w, http.StatusInternalServerError, sanitizeExecError("enable NAT", err))
 		return
 	}
 
@@ -297,9 +395,10 @@ func (h *HALHandler) EnableNAT(w http.ResponseWriter, r *http.Request) {
 // @Failure 500 {object} ErrorResponse
 // @Router /firewall/nat/disable [post]
 func (h *HALHandler) DisableNAT(w http.ResponseWriter, r *http.Request) {
-	output, err := exec.Command("iptables", "-t", "nat", "-F", "POSTROUTING").CombinedOutput()
+	_, err := execWithTimeout(r.Context(), "iptables", "-t", "nat", "-F", "POSTROUTING")
 	if err != nil {
-		errorResponse(w, http.StatusInternalServerError, fmt.Sprintf("failed to disable NAT: %v - %s", err, string(output)))
+		log.Printf("DisableNAT: %v", err)
+		errorResponse(w, http.StatusInternalServerError, sanitizeExecError("disable NAT", err))
 		return
 	}
 
@@ -317,7 +416,8 @@ func (h *HALHandler) DisableNAT(w http.ResponseWriter, r *http.Request) {
 func (h *HALHandler) EnableIPForward(w http.ResponseWriter, r *http.Request) {
 	err := os.WriteFile("/proc/sys/net/ipv4/ip_forward", []byte("1"), 0644)
 	if err != nil {
-		errorResponse(w, http.StatusInternalServerError, fmt.Sprintf("failed to enable forwarding: %v", err))
+		log.Printf("EnableIPForward: %v", err)
+		errorResponse(w, http.StatusInternalServerError, "failed to enable forwarding")
 		return
 	}
 
@@ -338,7 +438,8 @@ func (h *HALHandler) EnableIPForward(w http.ResponseWriter, r *http.Request) {
 func (h *HALHandler) DisableIPForward(w http.ResponseWriter, r *http.Request) {
 	err := os.WriteFile("/proc/sys/net/ipv4/ip_forward", []byte("0"), 0644)
 	if err != nil {
-		errorResponse(w, http.StatusInternalServerError, fmt.Sprintf("failed to disable forwarding: %v", err))
+		log.Printf("DisableIPForward: %v", err)
+		errorResponse(w, http.StatusInternalServerError, "failed to disable forwarding")
 		return
 	}
 

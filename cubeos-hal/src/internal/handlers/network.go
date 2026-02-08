@@ -3,14 +3,30 @@ package handlers
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"os"
-	"os/exec"
 	"strconv"
 	"strings"
 
 	"github.com/go-chi/chi/v5"
 )
+
+// getDefaultInternetCheckIP returns the IP used for internet connectivity checks.
+func getDefaultInternetCheckIP() string {
+	if ip := os.Getenv("HAL_INTERNET_CHECK_IP"); ip != "" {
+		return ip
+	}
+	return "8.8.8.8"
+}
+
+// getDefaultWiFiInterface returns the default WiFi interface name.
+func getDefaultWiFiInterface() string {
+	if iface := os.Getenv("HAL_DEFAULT_WIFI_INTERFACE"); iface != "" {
+		return iface
+	}
+	return "wlan0"
+}
 
 // ListInterfaces returns all network interfaces
 // @Summary List network interfaces
@@ -21,23 +37,25 @@ import (
 // @Failure 500 {object} ErrorResponse
 // @Router /network/interfaces [get]
 func (h *HALHandler) ListInterfaces(w http.ResponseWriter, r *http.Request) {
-	output, err := exec.Command("ip", "-j", "addr").Output()
+	output, err := execWithTimeout(r.Context(), "ip", "-j", "addr")
 	if err != nil {
 		// Fallback to non-JSON output
-		output, err = exec.Command("ip", "addr").Output()
+		output, err = execWithTimeout(r.Context(), "ip", "addr")
 		if err != nil {
-			errorResponse(w, http.StatusInternalServerError, "failed to get interfaces: "+err.Error())
+			log.Printf("ListInterfaces: %v", err)
+			errorResponse(w, http.StatusInternalServerError, "failed to get interfaces")
 			return
 		}
 		jsonResponse(w, http.StatusOK, map[string]interface{}{
-			"raw": string(output),
+			"raw": output,
 		})
 		return
 	}
 
 	var interfaces []interface{}
-	if err := json.Unmarshal(output, &interfaces); err != nil {
-		errorResponse(w, http.StatusInternalServerError, "failed to parse interfaces: "+err.Error())
+	if err := json.Unmarshal([]byte(output), &interfaces); err != nil {
+		log.Printf("ListInterfaces: parse error: %v", err)
+		errorResponse(w, http.StatusInternalServerError, "failed to parse interfaces")
 		return
 	}
 
@@ -59,20 +77,21 @@ func (h *HALHandler) ListInterfaces(w http.ResponseWriter, r *http.Request) {
 // @Router /network/interface/{name} [get]
 func (h *HALHandler) GetInterface(w http.ResponseWriter, r *http.Request) {
 	name := chi.URLParam(r, "name")
-	if name == "" {
-		errorResponse(w, http.StatusBadRequest, "interface name required")
+	if err := validateInterfaceName(name); err != nil {
+		errorResponse(w, http.StatusBadRequest, err.Error())
 		return
 	}
 
-	output, err := exec.Command("ip", "-j", "addr", "show", name).Output()
+	output, err := execWithTimeout(r.Context(), "ip", "-j", "addr", "show", name)
 	if err != nil {
-		errorResponse(w, http.StatusNotFound, "interface not found: "+name)
+		errorResponse(w, http.StatusNotFound, "interface not found")
 		return
 	}
 
 	var iface []interface{}
-	if err := json.Unmarshal(output, &iface); err != nil {
-		errorResponse(w, http.StatusInternalServerError, "failed to parse interface: "+err.Error())
+	if err := json.Unmarshal([]byte(output), &iface); err != nil {
+		log.Printf("GetInterface(%s): parse error: %v", name, err)
+		errorResponse(w, http.StatusInternalServerError, "failed to parse interface")
 		return
 	}
 
@@ -95,17 +114,16 @@ func (h *HALHandler) GetInterface(w http.ResponseWriter, r *http.Request) {
 // @Router /network/interface/{name}/traffic [get]
 func (h *HALHandler) GetInterfaceTraffic(w http.ResponseWriter, r *http.Request) {
 	name := chi.URLParam(r, "name")
-	if name == "" {
-		errorResponse(w, http.StatusBadRequest, "interface name required")
+	if err := validateInterfaceName(name); err != nil {
+		errorResponse(w, http.StatusBadRequest, err.Error())
 		return
 	}
 
-	// Read from /sys/class/net/{iface}/statistics/
+	// validateInterfaceName() blocks path traversal characters (no / or ..)
 	basePath := fmt.Sprintf("/sys/class/net/%s/statistics", name)
 
-	// Check if interface exists
 	if _, err := os.Stat(basePath); os.IsNotExist(err) {
-		errorResponse(w, http.StatusNotFound, fmt.Sprintf("interface not found: %s", name))
+		errorResponse(w, http.StatusNotFound, "interface not found")
 		return
 	}
 
@@ -142,7 +160,8 @@ func (h *HALHandler) GetInterfaceTraffic(w http.ResponseWriter, r *http.Request)
 func (h *HALHandler) GetTrafficStats(w http.ResponseWriter, r *http.Request) {
 	data, err := os.ReadFile("/proc/net/dev")
 	if err != nil {
-		errorResponse(w, http.StatusInternalServerError, fmt.Sprintf("failed to read /proc/net/dev: %v", err))
+		log.Printf("GetTrafficStats: %v", err)
+		errorResponse(w, http.StatusInternalServerError, "failed to read network statistics")
 		return
 	}
 
@@ -204,14 +223,15 @@ func (h *HALHandler) GetTrafficStats(w http.ResponseWriter, r *http.Request) {
 // @Router /network/interface/{name}/up [post]
 func (h *HALHandler) BringInterfaceUp(w http.ResponseWriter, r *http.Request) {
 	name := chi.URLParam(r, "name")
-	if name == "" {
-		errorResponse(w, http.StatusBadRequest, "interface name required")
+	if err := validateInterfaceName(name); err != nil {
+		errorResponse(w, http.StatusBadRequest, err.Error())
 		return
 	}
 
-	output, err := exec.Command("ip", "link", "set", name, "up").CombinedOutput()
+	_, err := execWithTimeout(r.Context(), "ip", "link", "set", name, "up")
 	if err != nil {
-		errorResponse(w, http.StatusInternalServerError, fmt.Sprintf("failed to bring up %s: %v - %s", name, err, string(output)))
+		log.Printf("BringInterfaceUp(%s): %v", name, err)
+		errorResponse(w, http.StatusInternalServerError, sanitizeExecError("bring interface up", err))
 		return
 	}
 
@@ -234,14 +254,15 @@ func (h *HALHandler) BringInterfaceUp(w http.ResponseWriter, r *http.Request) {
 // @Router /network/interface/{name}/down [post]
 func (h *HALHandler) BringInterfaceDown(w http.ResponseWriter, r *http.Request) {
 	name := chi.URLParam(r, "name")
-	if name == "" {
-		errorResponse(w, http.StatusBadRequest, "interface name required")
+	if err := validateInterfaceName(name); err != nil {
+		errorResponse(w, http.StatusBadRequest, err.Error())
 		return
 	}
 
-	output, err := exec.Command("ip", "link", "set", name, "down").CombinedOutput()
+	_, err := execWithTimeout(r.Context(), "ip", "link", "set", name, "down")
 	if err != nil {
-		errorResponse(w, http.StatusInternalServerError, fmt.Sprintf("failed to bring down %s: %v - %s", name, err, string(output)))
+		log.Printf("BringInterfaceDown(%s): %v", name, err)
+		errorResponse(w, http.StatusInternalServerError, sanitizeExecError("bring interface down", err))
 		return
 	}
 
@@ -266,14 +287,15 @@ func (h *HALHandler) GetNetworkStatus(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Check default route
-	output, err := exec.Command("ip", "route", "show", "default").Output()
+	output, err := execWithTimeout(r.Context(), "ip", "route", "show", "default")
 	if err == nil && len(output) > 0 {
 		status["connected"] = true
-		status["default_route"] = strings.TrimSpace(string(output))
+		status["default_route"] = strings.TrimSpace(output)
 	}
 
 	// Check internet connectivity
-	_, err = exec.Command("ping", "-c", "1", "-W", "2", "8.8.8.8").Output()
+	checkIP := getDefaultInternetCheckIP()
+	_, err = execWithTimeout(r.Context(), "ping", "-c", "1", "-W", "2", checkIP)
 	status["internet"] = err == nil
 
 	// Determine mode based on interfaces
@@ -294,21 +316,27 @@ func (h *HALHandler) GetNetworkStatus(w http.ResponseWriter, r *http.Request) {
 // @Produce json
 // @Param iface path string true "WiFi interface name"
 // @Success 200 {object} map[string]interface{}
+// @Failure 400 {object} ErrorResponse
 // @Failure 500 {object} ErrorResponse
 // @Router /network/wifi/scan/{iface} [get]
 func (h *HALHandler) ScanWiFi(w http.ResponseWriter, r *http.Request) {
 	iface := chi.URLParam(r, "iface")
 	if iface == "" {
-		iface = "wlan0"
+		iface = getDefaultWiFiInterface()
 	}
-
-	output, err := exec.Command("iw", iface, "scan").Output()
-	if err != nil {
-		errorResponse(w, http.StatusInternalServerError, fmt.Sprintf("scan failed: %v", err))
+	if err := validateInterfaceName(iface); err != nil {
+		errorResponse(w, http.StatusBadRequest, err.Error())
 		return
 	}
 
-	networks := parseWifiScan(string(output))
+	output, err := execWithTimeout(r.Context(), "iw", iface, "scan")
+	if err != nil {
+		log.Printf("ScanWiFi(%s): %v", iface, err)
+		errorResponse(w, http.StatusInternalServerError, sanitizeExecError("WiFi scan", err))
+		return
+	}
+
+	networks := parseWifiScan(output)
 
 	jsonResponse(w, http.StatusOK, map[string]interface{}{
 		"interface": iface,
@@ -366,6 +394,8 @@ func parseWifiScan(output string) []map[string]interface{} {
 // @Failure 500 {object} ErrorResponse
 // @Router /network/wifi/connect [post]
 func (h *HALHandler) ConnectWiFi(w http.ResponseWriter, r *http.Request) {
+	r = limitBody(r, 1<<20) // 1MB
+
 	var req struct {
 		SSID      string `json:"ssid"`
 		Password  string `json:"password"`
@@ -377,55 +407,73 @@ func (h *HALHandler) ConnectWiFi(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if req.SSID == "" {
-		errorResponse(w, http.StatusBadRequest, "ssid required")
+	// Validate SSID
+	if err := validateSSID(req.SSID); err != nil {
+		errorResponse(w, http.StatusBadRequest, err.Error())
 		return
+	}
+
+	// Validate password if provided
+	if req.Password != "" {
+		if err := validateWiFiPassword(req.Password); err != nil {
+			errorResponse(w, http.StatusBadRequest, err.Error())
+			return
+		}
 	}
 
 	if req.Interface == "" {
-		req.Interface = "wlan0"
+		req.Interface = getDefaultWiFiInterface()
 	}
-
-	// Use wpa_cli to connect
-	output, err := exec.Command("wpa_cli", "-i", req.Interface, "add_network").Output()
-	if err != nil {
-		errorResponse(w, http.StatusInternalServerError, fmt.Sprintf("failed to add network: %v", err))
+	if err := validateInterfaceName(req.Interface); err != nil {
+		errorResponse(w, http.StatusBadRequest, err.Error())
 		return
 	}
 
-	networkID := strings.TrimSpace(string(output))
+	// Use wpa_cli to connect
+	output, err := execWithTimeout(r.Context(), "wpa_cli", "-i", req.Interface, "add_network")
+	if err != nil {
+		log.Printf("ConnectWiFi: add_network: %v", err)
+		errorResponse(w, http.StatusInternalServerError, "failed to add network")
+		return
+	}
+
+	networkID := strings.TrimSpace(output)
 
 	// Set SSID
-	_, err = exec.Command("wpa_cli", "-i", req.Interface, "set_network", networkID, "ssid", fmt.Sprintf("\"%s\"", req.SSID)).Output()
+	_, err = execWithTimeout(r.Context(), "wpa_cli", "-i", req.Interface, "set_network", networkID, "ssid", fmt.Sprintf("\"%s\"", req.SSID))
 	if err != nil {
-		errorResponse(w, http.StatusInternalServerError, fmt.Sprintf("failed to set ssid: %v", err))
+		log.Printf("ConnectWiFi: set_network ssid: %v", err)
+		errorResponse(w, http.StatusInternalServerError, "failed to set SSID")
 		return
 	}
 
 	// Set password
 	if req.Password != "" {
-		_, err = exec.Command("wpa_cli", "-i", req.Interface, "set_network", networkID, "psk", fmt.Sprintf("\"%s\"", req.Password)).Output()
+		_, err = execWithTimeout(r.Context(), "wpa_cli", "-i", req.Interface, "set_network", networkID, "psk", fmt.Sprintf("\"%s\"", req.Password))
 		if err != nil {
-			errorResponse(w, http.StatusInternalServerError, fmt.Sprintf("failed to set password: %v", err))
+			log.Printf("ConnectWiFi: set_network psk: %v", err)
+			errorResponse(w, http.StatusInternalServerError, "failed to set password")
 			return
 		}
 	} else {
-		_, err = exec.Command("wpa_cli", "-i", req.Interface, "set_network", networkID, "key_mgmt", "NONE").Output()
+		_, err = execWithTimeout(r.Context(), "wpa_cli", "-i", req.Interface, "set_network", networkID, "key_mgmt", "NONE")
 		if err != nil {
-			errorResponse(w, http.StatusInternalServerError, fmt.Sprintf("failed to set key_mgmt: %v", err))
+			log.Printf("ConnectWiFi: set_network key_mgmt: %v", err)
+			errorResponse(w, http.StatusInternalServerError, "failed to set key management")
 			return
 		}
 	}
 
 	// Enable network
-	_, err = exec.Command("wpa_cli", "-i", req.Interface, "enable_network", networkID).Output()
+	_, err = execWithTimeout(r.Context(), "wpa_cli", "-i", req.Interface, "enable_network", networkID)
 	if err != nil {
-		errorResponse(w, http.StatusInternalServerError, fmt.Sprintf("failed to enable network: %v", err))
+		log.Printf("ConnectWiFi: enable_network: %v", err)
+		errorResponse(w, http.StatusInternalServerError, "failed to enable network")
 		return
 	}
 
-	// Save config
-	exec.Command("wpa_cli", "-i", req.Interface, "save_config").Run()
+	// Save config (best effort)
+	_, _ = execWithTimeout(r.Context(), "wpa_cli", "-i", req.Interface, "save_config")
 
 	jsonResponse(w, http.StatusOK, map[string]interface{}{
 		"success":    true,
@@ -442,17 +490,23 @@ func (h *HALHandler) ConnectWiFi(w http.ResponseWriter, r *http.Request) {
 // @Produce json
 // @Param iface path string true "WiFi interface name"
 // @Success 200 {object} SuccessResponse
+// @Failure 400 {object} ErrorResponse
 // @Failure 500 {object} ErrorResponse
 // @Router /network/wifi/disconnect/{iface} [post]
 func (h *HALHandler) DisconnectWiFi(w http.ResponseWriter, r *http.Request) {
 	iface := chi.URLParam(r, "iface")
 	if iface == "" {
-		iface = "wlan0"
+		iface = getDefaultWiFiInterface()
+	}
+	if err := validateInterfaceName(iface); err != nil {
+		errorResponse(w, http.StatusBadRequest, err.Error())
+		return
 	}
 
-	_, err := exec.Command("wpa_cli", "-i", iface, "disconnect").Output()
+	_, err := execWithTimeout(r.Context(), "wpa_cli", "-i", iface, "disconnect")
 	if err != nil {
-		errorResponse(w, http.StatusInternalServerError, fmt.Sprintf("disconnect failed: %v", err))
+		log.Printf("DisconnectWiFi(%s): %v", iface, err)
+		errorResponse(w, http.StatusInternalServerError, sanitizeExecError("WiFi disconnect", err))
 		return
 	}
 
@@ -471,14 +525,15 @@ func (h *HALHandler) DisconnectWiFi(w http.ResponseWriter, r *http.Request) {
 // @Failure 500 {object} ErrorResponse
 // @Router /network/ap/status [get]
 func (h *HALHandler) GetAPStatus(w http.ResponseWriter, r *http.Request) {
-	output, err := exec.Command("hostapd_cli", "status").Output()
+	output, err := execWithTimeout(r.Context(), "hostapd_cli", "status")
 	if err != nil {
-		errorResponse(w, http.StatusInternalServerError, fmt.Sprintf("failed to get AP status: %v", err))
+		log.Printf("GetAPStatus: %v", err)
+		errorResponse(w, http.StatusInternalServerError, sanitizeExecError("get AP status", err))
 		return
 	}
 
 	status := make(map[string]string)
-	lines := strings.Split(string(output), "\n")
+	lines := strings.Split(output, "\n")
 	for _, line := range lines {
 		parts := strings.SplitN(line, "=", 2)
 		if len(parts) == 2 {
@@ -500,16 +555,17 @@ func (h *HALHandler) GetAPStatus(w http.ResponseWriter, r *http.Request) {
 // @Failure 500 {object} ErrorResponse
 // @Router /network/ap/clients [get]
 func (h *HALHandler) GetAPClients(w http.ResponseWriter, r *http.Request) {
-	output, err := exec.Command("hostapd_cli", "all_sta").Output()
+	output, err := execWithTimeout(r.Context(), "hostapd_cli", "all_sta")
 	if err != nil {
-		errorResponse(w, http.StatusInternalServerError, fmt.Sprintf("failed to get AP clients: %v", err))
+		log.Printf("GetAPClients: %v", err)
+		errorResponse(w, http.StatusInternalServerError, sanitizeExecError("get AP clients", err))
 		return
 	}
 
 	var clients []map[string]string
 	var current map[string]string
 
-	lines := strings.Split(string(output), "\n")
+	lines := strings.Split(output, "\n")
 	for _, line := range lines {
 		line = strings.TrimSpace(line)
 		if line == "" {
@@ -551,6 +607,8 @@ func (h *HALHandler) GetAPClients(w http.ResponseWriter, r *http.Request) {
 // @Failure 500 {object} ErrorResponse
 // @Router /network/ap/disconnect [post]
 func (h *HALHandler) DisconnectAPClient(w http.ResponseWriter, r *http.Request) {
+	r = limitBody(r, 1<<20) // 1MB
+
 	var req struct {
 		MAC string `json:"mac"`
 	}
@@ -560,14 +618,15 @@ func (h *HALHandler) DisconnectAPClient(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	if req.MAC == "" {
-		errorResponse(w, http.StatusBadRequest, "mac address required")
+	if err := validateMACAddress(req.MAC); err != nil {
+		errorResponse(w, http.StatusBadRequest, err.Error())
 		return
 	}
 
-	output, err := exec.Command("hostapd_cli", "disassociate", req.MAC).CombinedOutput()
+	_, err := execWithTimeout(r.Context(), "hostapd_cli", "disassociate", req.MAC)
 	if err != nil {
-		errorResponse(w, http.StatusInternalServerError, fmt.Sprintf("failed to disconnect client: %v - %s", err, string(output)))
+		log.Printf("DisconnectAPClient(%s): %v", req.MAC, err)
+		errorResponse(w, http.StatusInternalServerError, sanitizeExecError("disconnect AP client", err))
 		return
 	}
 
@@ -586,6 +645,8 @@ func (h *HALHandler) DisconnectAPClient(w http.ResponseWriter, r *http.Request) 
 // @Failure 500 {object} ErrorResponse
 // @Router /network/ap/block [post]
 func (h *HALHandler) BlockAPClient(w http.ResponseWriter, r *http.Request) {
+	r = limitBody(r, 1<<20) // 1MB
+
 	var req struct {
 		MAC string `json:"mac"`
 	}
@@ -595,17 +656,18 @@ func (h *HALHandler) BlockAPClient(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if req.MAC == "" {
-		errorResponse(w, http.StatusBadRequest, "mac address required")
+	if err := validateMACAddress(req.MAC); err != nil {
+		errorResponse(w, http.StatusBadRequest, err.Error())
 		return
 	}
 
 	// First disconnect, then deny
-	exec.Command("hostapd_cli", "disassociate", req.MAC).Run()
+	_, _ = execWithTimeout(r.Context(), "hostapd_cli", "disassociate", req.MAC)
 
-	output, err := exec.Command("hostapd_cli", "deny_acl", "ADD_MAC", req.MAC).CombinedOutput()
+	_, err := execWithTimeout(r.Context(), "hostapd_cli", "deny_acl", "ADD_MAC", req.MAC)
 	if err != nil {
-		errorResponse(w, http.StatusInternalServerError, fmt.Sprintf("failed to block client: %v - %s", err, string(output)))
+		log.Printf("BlockAPClient(%s): %v", req.MAC, err)
+		errorResponse(w, http.StatusInternalServerError, sanitizeExecError("block AP client", err))
 		return
 	}
 

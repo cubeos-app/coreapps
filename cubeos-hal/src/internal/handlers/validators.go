@@ -17,22 +17,22 @@ import (
 // --- Regex patterns (compiled once) ---
 
 var (
-	reServiceName     = regexp.MustCompile(`^[a-zA-Z0-9@._:-]+$`)
-	reInterfaceName   = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._-]{0,14}$`)
-	reSSID            = regexp.MustCompile(`^[^\x00]{1,32}$`)
-	reVPNName         = regexp.MustCompile(`^[a-zA-Z0-9_-]{1,15}$`)
-	reShareName       = regexp.MustCompile(`^[a-zA-Z0-9_.$-]+$`)
-	reDeviceName      = regexp.MustCompile(`^[a-zA-Z0-9_-]+$`)
-	reBlockDevice     = regexp.MustCompile(`^/dev/[a-zA-Z0-9]+$`)
-	re1WireDeviceID   = regexp.MustCompile(`^[0-9a-f]{2}-[0-9a-f]{12}$`)
-	reI2CAddress      = regexp.MustCompile(`^0x[0-9a-fA-F]{2}$`)
-	reI2CRegister     = regexp.MustCompile(`^0x[0-9a-fA-F]{2}$`)
-	reGPIOChipName    = regexp.MustCompile(`^gpiochip[0-9]+$`)
-	reSerialPort      = regexp.MustCompile(`^/dev/(tty[a-zA-Z0-9]+|serial[a-zA-Z0-9/]+)$`)
-	reAPN             = regexp.MustCompile(`^[a-zA-Z0-9._-]{1,100}$`)
-	reMeshtasticNode  = regexp.MustCompile(`^![0-9a-fA-F]{1,8}$`)
-	reMixerControl    = regexp.MustCompile(`^[a-zA-Z][a-zA-Z0-9 _-]{0,63}$`)
-	reHostname        = regexp.MustCompile(`^[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*$`)
+	reServiceName    = regexp.MustCompile(`^[a-zA-Z0-9@._:-]+$`)
+	reInterfaceName  = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._-]{0,14}$`)
+	reSSID           = regexp.MustCompile(`^[^\x00]{1,32}$`)
+	reVPNName        = regexp.MustCompile(`^[a-zA-Z0-9_-]{1,15}$`)
+	reShareName      = regexp.MustCompile(`^[a-zA-Z0-9_.$-]+$`)
+	reDeviceName     = regexp.MustCompile(`^[a-zA-Z0-9_-]+$`)
+	reBlockDevice    = regexp.MustCompile(`^/dev/[a-zA-Z0-9]+$`)
+	re1WireDeviceID  = regexp.MustCompile(`^[0-9a-f]{2}-[0-9a-f]{12}$`)
+	reI2CAddress     = regexp.MustCompile(`^0x[0-9a-fA-F]{2}$`)
+	reI2CRegister    = regexp.MustCompile(`^0x[0-9a-fA-F]{2}$`)
+	reGPIOChipName   = regexp.MustCompile(`^gpiochip[0-9]+$`)
+	reSerialPort     = regexp.MustCompile(`^/dev/(tty[a-zA-Z0-9]+|serial[a-zA-Z0-9/]+)$`)
+	reAPN            = regexp.MustCompile(`^[a-zA-Z0-9._-]{1,100}$`)
+	reMeshtasticNode = regexp.MustCompile(`^![0-9a-fA-F]{1,8}$`)
+	reMixerControl   = regexp.MustCompile(`^[a-zA-Z][a-zA-Z0-9 _-]{0,63}$`)
+	reHostname       = regexp.MustCompile(`^[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*$`)
 )
 
 // --- Service allowlist ---
@@ -40,26 +40,26 @@ var (
 // serviceAllowlist contains the systemd services that can be managed via HAL.
 // Add services here as needed — anything not on the list is rejected.
 var serviceAllowlist = map[string]bool{
-	"pihole-FTL":              true,
-	"hostapd":                 true,
-	"dnsmasq":                 true,
-	"NetworkManager":          true,
-	"systemd-resolved":        true,
-	"systemd-timesyncd":       true,
-	"wpa_supplicant":          true,
-	"bluetooth":               true,
-	"gpsd":                    true,
-	"ModemManager":            true,
-	"tor":                     true,
-	"docker":                  true,
-	"ssh":                     true,
-	"avahi-daemon":            true,
-	"cron":                    true,
-	"systemd-journald":        true,
-	"wg-quick@wg0":            true,
-	"wg-quick@wg1":            true,
-	"openvpn@client":          true,
-	"openvpn@server":          true,
+	"pihole-FTL":        true,
+	"hostapd":           true,
+	"dnsmasq":           true,
+	"NetworkManager":    true,
+	"systemd-resolved":  true,
+	"systemd-timesyncd": true,
+	"wpa_supplicant":    true,
+	"bluetooth":         true,
+	"gpsd":              true,
+	"ModemManager":      true,
+	"tor":               true,
+	"docker":            true,
+	"ssh":               true,
+	"avahi-daemon":      true,
+	"cron":              true,
+	"systemd-journald":  true,
+	"wg-quick@wg0":      true,
+	"wg-quick@wg1":      true,
+	"openvpn@client":    true,
+	"openvpn@server":    true,
 }
 
 // --- Validator functions ---
@@ -156,6 +156,24 @@ func validateFirewallAction(action string) error {
 	allowed := map[string]bool{"ACCEPT": true, "DROP": true, "REJECT": true, "LOG": true}
 	if !allowed[action] {
 		return fmt.Errorf("invalid firewall action (must be ACCEPT, DROP, REJECT, or LOG)")
+	}
+	return nil
+}
+
+// validateFirewallProtocol validates an iptables protocol.
+func validateFirewallProtocol(proto string) error {
+	allowed := map[string]bool{"tcp": true, "udp": true, "icmp": true, "all": true}
+	if !allowed[strings.ToLower(proto)] {
+		return fmt.Errorf("invalid protocol (must be tcp, udp, icmp, or all)")
+	}
+	return nil
+}
+
+// validateRuleNumber validates an iptables rule number (positive integer).
+func validateRuleNumber(num string) error {
+	n, err := strconv.Atoi(num)
+	if err != nil || n < 1 {
+		return fmt.Errorf("invalid rule number (must be positive integer)")
 	}
 	return nil
 }
