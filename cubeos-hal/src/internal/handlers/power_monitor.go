@@ -31,14 +31,15 @@ type PowerEvent struct {
 
 // MonitorStatus is the response payload for GET /power/monitor/status.
 type MonitorStatus struct {
-	Running         bool            `json:"running"`
-	DetectedDevice  string          `json:"detected_device"`
-	IntervalSeconds int             `json:"interval_seconds"`
-	LastReading     *BatteryReading `json:"last_reading"`
-	ACPowerLost     bool            `json:"ac_power_lost"`
-	ShutdownPending bool            `json:"shutdown_pending"`
-	ShutdownAt      *string         `json:"shutdown_at"`
-	Events          []PowerEvent    `json:"events"`
+	Running         bool              `json:"running"`
+	DetectedDevice  string            `json:"detected_device"`
+	IntervalSeconds int               `json:"interval_seconds"`
+	LastReading     *BatteryReading   `json:"last_reading"`
+	ACPowerLost     bool              `json:"ac_power_lost"`
+	ShutdownPending bool              `json:"shutdown_pending"`
+	ShutdownAt      *string           `json:"shutdown_at"`
+	I2CRecovery     *I2CRecoveryStats `json:"i2c_recovery,omitempty"`
+	Events          []PowerEvent      `json:"events"`
 }
 
 // PowerMonitor runs a background goroutine that periodically reads UPS status
@@ -58,6 +59,7 @@ type PowerMonitor struct {
 	shutdownCancel  context.CancelFunc
 	events          []PowerEvent
 	driver          UPSDriver
+	i2cRecovery     *I2CRecovery
 }
 
 // NewPowerMonitor creates a PowerMonitor with configuration from environment variables.
@@ -96,6 +98,7 @@ func NewPowerMonitor() *PowerMonitor {
 		critThreshold: critThreshold,
 		shutdownDelay: shutdownDelay,
 		events:        make([]PowerEvent, 0, maxEvents),
+		i2cRecovery:   NewI2CRecovery(),
 	}
 }
 
@@ -198,6 +201,11 @@ func (pm *PowerMonitor) Status() MonitorStatus {
 		status.ShutdownAt = &t
 	}
 
+	if pm.i2cRecovery != nil {
+		stats := pm.i2cRecovery.Stats()
+		status.I2CRecovery = &stats
+	}
+
 	return status
 }
 
@@ -266,7 +274,44 @@ func (pm *PowerMonitor) poll(ctx context.Context) {
 	reading, err := driver.ReadStatus(readCtx)
 	if err != nil {
 		log.Printf("PowerMonitor: read error: %v", err)
-		return
+
+		// Track consecutive errors and attempt I2C recovery if threshold reached
+		if pm.i2cRecovery != nil && pm.i2cRecovery.RecordError() {
+			pm.mu.Lock()
+			pm.addEventLocked("i2c_recovery", fmt.Sprintf("attempting I2C bus recovery after %d consecutive errors", pm.i2cRecovery.Stats().ConsecutiveErrors))
+			pm.mu.Unlock()
+
+			if recoveryErr := pm.i2cRecovery.AttemptRecovery(); recoveryErr != nil {
+				log.Printf("PowerMonitor: I2C recovery failed: %v", recoveryErr)
+				pm.mu.Lock()
+				pm.addEventLocked("i2c_recovery_failed", fmt.Sprintf("I2C recovery failed: %v", recoveryErr))
+				pm.mu.Unlock()
+			} else {
+				log.Printf("PowerMonitor: I2C recovery succeeded, retrying read")
+				pm.mu.Lock()
+				pm.addEventLocked("i2c_recovery_ok", "I2C bus recovery succeeded")
+				pm.mu.Unlock()
+
+				// Retry the read immediately after recovery
+				retryCtx, retryCancel := context.WithTimeout(ctx, 10*time.Second)
+				defer retryCancel()
+				reading, err = driver.ReadStatus(retryCtx)
+				if err != nil {
+					log.Printf("PowerMonitor: read still failing after recovery: %v", err)
+					return
+				}
+				// Fall through to process the successful reading below
+			}
+		}
+
+		if err != nil {
+			return
+		}
+	}
+
+	// Successful read — reset consecutive error counter
+	if pm.i2cRecovery != nil {
+		pm.i2cRecovery.RecordSuccess()
 	}
 
 	pm.mu.Lock()
