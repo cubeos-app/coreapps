@@ -2,9 +2,9 @@ package handlers
 
 import (
 	"fmt"
+	"log"
 	"net/http"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -123,25 +123,35 @@ func (h *HALHandler) ListI2CBuses(w http.ResponseWriter, r *http.Request) {
 // @Produce json
 // @Param bus query int false "I2C bus number" default(1)
 // @Success 200 {object} I2CScanResponse
+// @Failure 400 {object} ErrorResponse
 // @Failure 500 {object} ErrorResponse
 // @Router /i2c/scan [get]
 func (h *HALHandler) ScanI2CBus(w http.ResponseWriter, r *http.Request) {
 	busParam := r.URL.Query().Get("bus")
 	bus := 1
 	if busParam != "" {
-		if n, err := strconv.Atoi(busParam); err == nil {
-			bus = n
+		n, err := strconv.Atoi(busParam)
+		if err != nil {
+			errorResponse(w, http.StatusBadRequest, "invalid bus number")
+			return
 		}
+		bus = n
 	}
 
-	cmd := exec.Command("i2cdetect", "-y", strconv.Itoa(bus))
-	output, err := cmd.Output()
-	if err != nil {
-		errorResponse(w, http.StatusInternalServerError, "i2c scan failed: "+err.Error())
+	// HF04-04: Validate I2C bus range
+	if err := validateI2CBus(bus); err != nil {
+		errorResponse(w, http.StatusBadRequest, err.Error())
 		return
 	}
 
-	devices := h.parseI2CDetectOutput(string(output))
+	output, err := execWithTimeout(r.Context(), "i2cdetect", "-y", strconv.Itoa(bus))
+	if err != nil {
+		log.Printf("i2cdetect bus %d failed: %v", bus, err)
+		errorResponse(w, http.StatusInternalServerError, sanitizeExecError("I2C scan", err))
+		return
+	}
+
+	devices := h.parseI2CDetectOutput(output)
 
 	// Try to identify known devices
 	for i := range devices {
@@ -175,23 +185,45 @@ func (h *HALHandler) GetI2CDevice(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// HF04-04: Validate I2C bus range
+	if err := validateI2CBus(bus); err != nil {
+		errorResponse(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
 	address := chi.URLParam(r, "address")
 	if address == "" {
 		errorResponse(w, http.StatusBadRequest, "address required")
 		return
 	}
 
-	// Parse address (handle both 0x36 and 54)
+	// HF04-05: Fix silent address 0 default — return error on parse failure
 	var addr int
-	if strings.HasPrefix(address, "0x") {
-		fmt.Sscanf(address, "0x%x", &addr)
+	if strings.HasPrefix(address, "0x") || strings.HasPrefix(address, "0X") {
+		n, err := strconv.ParseUint(strings.TrimPrefix(strings.TrimPrefix(address, "0x"), "0X"), 16, 8)
+		if err != nil {
+			errorResponse(w, http.StatusBadRequest, "invalid I2C address format")
+			return
+		}
+		addr = int(n)
 	} else {
-		addr, _ = strconv.Atoi(address)
+		n, err := strconv.Atoi(address)
+		if err != nil {
+			errorResponse(w, http.StatusBadRequest, "invalid I2C address format")
+			return
+		}
+		addr = n
+	}
+
+	// Validate address range (0x03-0x77)
+	if addr < 0x03 || addr > 0x77 {
+		errorResponse(w, http.StatusBadRequest, "I2C address out of range (0x03-0x77)")
+		return
 	}
 
 	// Check if device responds
-	cmd := exec.Command("i2cget", "-y", strconv.Itoa(bus), fmt.Sprintf("0x%02x", addr))
-	if err := cmd.Run(); err != nil {
+	_, err = execWithTimeout(r.Context(), "i2cget", "-y", strconv.Itoa(bus), fmt.Sprintf("0x%02x", addr))
+	if err != nil {
 		errorResponse(w, http.StatusNotFound, "device not found at address "+address)
 		return
 	}
@@ -227,31 +259,44 @@ func (h *HALHandler) ReadI2CRegister(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// HF04-03 + HF04-04: Validate I2C bus range
+	if err := validateI2CBus(bus); err != nil {
+		errorResponse(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	// HF04-03: Validate I2C address
 	address := r.URL.Query().Get("address")
-	if address == "" {
-		errorResponse(w, http.StatusBadRequest, "address required")
+	if err := validateI2CAddress(address); err != nil {
+		errorResponse(w, http.StatusBadRequest, err.Error())
 		return
 	}
 
+	// HF04-03: Validate I2C register
 	register := r.URL.Query().Get("register")
-	if register == "" {
-		errorResponse(w, http.StatusBadRequest, "register required")
+	if err := validateI2CRegister(register); err != nil {
+		errorResponse(w, http.StatusBadRequest, err.Error())
 		return
 	}
 
+	// HF04-03: Validate I2C mode
 	mode := r.URL.Query().Get("mode")
 	if mode == "" {
 		mode = "b" // byte mode by default
 	}
-
-	cmd := exec.Command("i2cget", "-y", strconv.Itoa(bus), address, register, mode)
-	output, err := cmd.Output()
-	if err != nil {
-		errorResponse(w, http.StatusInternalServerError, "i2c read failed: "+err.Error())
+	if err := validateI2CMode(mode); err != nil {
+		errorResponse(w, http.StatusBadRequest, err.Error())
 		return
 	}
 
-	value := strings.TrimSpace(string(output))
+	output, err := execWithTimeout(r.Context(), "i2cget", "-y", strconv.Itoa(bus), address, register, mode)
+	if err != nil {
+		log.Printf("i2cget bus=%d addr=%s reg=%s failed: %v", bus, address, register, err)
+		errorResponse(w, http.StatusInternalServerError, sanitizeExecError("I2C read", err))
+		return
+	}
+
+	value := strings.TrimSpace(output)
 
 	jsonResponse(w, http.StatusOK, map[string]interface{}{
 		"bus":      bus,
@@ -284,23 +329,51 @@ func (h *HALHandler) WriteI2CRegister(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	address := r.URL.Query().Get("address")
-	register := r.URL.Query().Get("register")
-	value := r.URL.Query().Get("value")
-
-	if address == "" || register == "" || value == "" {
-		errorResponse(w, http.StatusBadRequest, "address, register, and value required")
+	// HF04-03 + HF04-04: Validate I2C bus range
+	if err := validateI2CBus(bus); err != nil {
+		errorResponse(w, http.StatusBadRequest, err.Error())
 		return
 	}
 
+	// HF04-03: Validate I2C address
+	address := r.URL.Query().Get("address")
+	if err := validateI2CAddress(address); err != nil {
+		errorResponse(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	// HF04-03: Validate I2C register
+	register := r.URL.Query().Get("register")
+	if err := validateI2CRegister(register); err != nil {
+		errorResponse(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	// HF04-03: Validate I2C value (same format as register — 0xNN)
+	value := r.URL.Query().Get("value")
+	if value == "" {
+		errorResponse(w, http.StatusBadRequest, "value is required")
+		return
+	}
+	if err := validateI2CRegister(value); err != nil {
+		errorResponse(w, http.StatusBadRequest, "invalid I2C value format (expected 0xNN)")
+		return
+	}
+
+	// HF04-03: Validate I2C mode
 	mode := r.URL.Query().Get("mode")
 	if mode == "" {
 		mode = "b"
 	}
+	if err := validateI2CMode(mode); err != nil {
+		errorResponse(w, http.StatusBadRequest, err.Error())
+		return
+	}
 
-	cmd := exec.Command("i2cset", "-y", strconv.Itoa(bus), address, register, value, mode)
-	if output, err := cmd.CombinedOutput(); err != nil {
-		errorResponse(w, http.StatusInternalServerError, fmt.Sprintf("i2c write failed: %s - %s", err, string(output)))
+	output, err := execWithTimeout(r.Context(), "i2cset", "-y", strconv.Itoa(bus), address, register, value, mode)
+	if err != nil {
+		log.Printf("i2cset bus=%d addr=%s reg=%s val=%s failed: %v, output: %s", bus, address, register, value, err, output)
+		errorResponse(w, http.StatusInternalServerError, sanitizeExecError("I2C write", err))
 		return
 	}
 

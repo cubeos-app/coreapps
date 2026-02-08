@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"os"
+	"regexp"
 	"syscall"
 	"unsafe"
 )
@@ -55,7 +56,7 @@ func (b *I2CBus) SetAddress(addr uint8) error {
 }
 
 // ReadByte reads a single byte from a register
-func (b *I2CBus) ReadByte(addr uint8, reg uint8) (uint8, error) {
+func (b *I2CBus) ReadRegByte(addr uint8, reg uint8) (uint8, error) {
 	if err := b.SetAddress(addr); err != nil {
 		return 0, err
 	}
@@ -96,7 +97,7 @@ func (b *I2CBus) ReadWord(addr uint8, reg uint8) (uint16, error) {
 }
 
 // WriteByte writes a single byte to a register
-func (b *I2CBus) WriteByte(addr uint8, reg uint8, value uint8) error {
+func (b *I2CBus) WriteRegByte(addr uint8, reg uint8, value uint8) error {
 	if err := b.SetAddress(addr); err != nil {
 		return err
 	}
@@ -127,16 +128,14 @@ func (b *I2CBus) WriteWord(addr uint8, reg uint8, value uint16) error {
 	return nil
 }
 
-// ScanBus scans the I2C bus for devices and returns found addresses
+// ScanBus scans the I2C bus for devices and returns found addresses.
+// Scans standard range 0x03-0x77, skipping reserved addresses 0x00-0x02 and 0x78-0x7F.
 func (b *I2CBus) ScanBus() []uint8 {
 	var found []uint8
 
 	for addr := uint8(0x03); addr <= 0x77; addr++ {
-		// Skip reserved addresses
-		if addr >= 0x30 && addr <= 0x37 {
-			continue // Reserved for EEPROM
-		}
-
+		// HF04-10: Removed incorrect 0x30-0x37 skip — these are valid EEPROM addresses.
+		// Standard I2C reserved ranges (0x00-0x02 and 0x78-0x7F) are excluded by the loop bounds.
 		if err := b.SetAddress(addr); err != nil {
 			continue
 		}
@@ -222,8 +221,15 @@ type gpioHandleData struct {
 	values [64]uint8
 }
 
+// reGPIOChipNameLocal validates GPIO chip names (e.g., "gpiochip0", "gpiochip4")
+var reGPIOChipNameLocal = regexp.MustCompile(`^gpiochip[0-9]+$`)
+
 // OpenGPIOChip opens a GPIO chip (gpiochip4 for Pi 5, gpiochip0 for Pi 4)
 func OpenGPIOChip(chip string) (*GPIOChip, error) {
+	// HF04-09: Validate chip name to prevent path traversal (e.g., "../../etc/shadow")
+	if !reGPIOChipNameLocal.MatchString(chip) {
+		return nil, fmt.Errorf("invalid GPIO chip name: %s", chip)
+	}
 	path := fmt.Sprintf("/dev/%s", chip)
 	file, err := os.OpenFile(path, os.O_RDWR, 0600)
 	if err != nil {

@@ -1,11 +1,14 @@
 package handlers
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
-	"os/exec"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 )
@@ -71,8 +74,7 @@ func (h *HALHandler) GetBluetoothStatus(w http.ResponseWriter, r *http.Request) 
 	}
 
 	// Check if bluetoothctl is available
-	cmd := exec.Command("bluetoothctl", "show")
-	output, err := cmd.Output()
+	output, err := execWithTimeout(r.Context(), "bluetoothctl", "show")
 	if err != nil {
 		errorResponse(w, http.StatusNotFound, "Bluetooth not available")
 		return
@@ -81,7 +83,7 @@ func (h *HALHandler) GetBluetoothStatus(w http.ResponseWriter, r *http.Request) 
 	status.Available = true
 
 	// Parse output
-	lines := strings.Split(string(output), "\n")
+	lines := strings.Split(output, "\n")
 	for _, line := range lines {
 		line = strings.TrimSpace(line)
 
@@ -126,9 +128,10 @@ func (h *HALHandler) GetBluetoothStatus(w http.ResponseWriter, r *http.Request) 
 // @Failure 500 {object} ErrorResponse
 // @Router /bluetooth/power/on [post]
 func (h *HALHandler) PowerOnBluetooth(w http.ResponseWriter, r *http.Request) {
-	cmd := exec.Command("bluetoothctl", "power", "on")
-	if output, err := cmd.CombinedOutput(); err != nil {
-		errorResponse(w, http.StatusInternalServerError, fmt.Sprintf("failed to power on: %s - %s", err, string(output)))
+	_, err := execWithTimeout(r.Context(), "bluetoothctl", "power", "on")
+	if err != nil {
+		log.Printf("bluetooth power on failed: %v", err)
+		errorResponse(w, http.StatusInternalServerError, sanitizeExecError("power on Bluetooth", err))
 		return
 	}
 
@@ -145,9 +148,10 @@ func (h *HALHandler) PowerOnBluetooth(w http.ResponseWriter, r *http.Request) {
 // @Failure 500 {object} ErrorResponse
 // @Router /bluetooth/power/off [post]
 func (h *HALHandler) PowerOffBluetooth(w http.ResponseWriter, r *http.Request) {
-	cmd := exec.Command("bluetoothctl", "power", "off")
-	if output, err := cmd.CombinedOutput(); err != nil {
-		errorResponse(w, http.StatusInternalServerError, fmt.Sprintf("failed to power off: %s - %s", err, string(output)))
+	_, err := execWithTimeout(r.Context(), "bluetoothctl", "power", "off")
+	if err != nil {
+		log.Printf("bluetooth power off failed: %v", err)
+		errorResponse(w, http.StatusInternalServerError, sanitizeExecError("power off Bluetooth", err))
 		return
 	}
 
@@ -169,7 +173,7 @@ func (h *HALHandler) PowerOffBluetooth(w http.ResponseWriter, r *http.Request) {
 // @Router /bluetooth/devices [get]
 func (h *HALHandler) GetBluetoothDevices(w http.ResponseWriter, r *http.Request) {
 	response := BluetoothDevicesResponse{
-		Paired:    h.getPairedBluetoothDevices(),
+		Paired:    h.getPairedBluetoothDevices(r.Context()),
 		Available: []BluetoothDevice{},
 	}
 
@@ -178,23 +182,42 @@ func (h *HALHandler) GetBluetoothDevices(w http.ResponseWriter, r *http.Request)
 
 // ScanBluetoothDevices scans for Bluetooth devices.
 // @Summary Scan Bluetooth devices
-// @Description Scans for available Bluetooth devices (async)
+// @Description Scans for available Bluetooth devices with bounded duration
 // @Tags Bluetooth
 // @Accept json
 // @Produce json
-// @Param duration query int false "Scan duration in seconds" default(10)
+// @Param duration query int false "Scan duration in seconds (1-30)" default(10)
 // @Success 200 {object} map[string]interface{}
+// @Failure 400 {object} ErrorResponse
 // @Failure 500 {object} ErrorResponse
 // @Router /bluetooth/scan [post]
 func (h *HALHandler) ScanBluetoothDevices(w http.ResponseWriter, r *http.Request) {
-	// Start scanning
-	cmd := exec.Command("bluetoothctl", "scan", "on")
-	if err := cmd.Start(); err != nil {
-		errorResponse(w, http.StatusInternalServerError, "failed to start scan: "+err.Error())
+	// HF04-01: Fix process leak — use bounded timeout instead of fire-and-forget cmd.Start()
+	duration := 10
+	if d := r.URL.Query().Get("duration"); d != "" {
+		if n, err := strconv.Atoi(d); err == nil {
+			duration = n
+		}
+	}
+	if duration < 1 || duration > 30 {
+		errorResponse(w, http.StatusBadRequest, "scan duration must be 1-30 seconds")
 		return
 	}
 
-	successResponse(w, "Bluetooth scan started (run GET /bluetooth/devices to see results)")
+	// Use a dedicated context with the scan duration as timeout.
+	// bluetoothctl scan on runs indefinitely — the context cancellation kills it cleanly.
+	ctx, cancel := context.WithTimeout(r.Context(), time.Duration(duration)*time.Second)
+	defer cancel()
+
+	// Run scan with bounded timeout — process is killed when context expires.
+	// bluetoothctl --timeout N scan on exits after N seconds.
+	_, err := execWithTimeout(ctx, "bluetoothctl", "--timeout", strconv.Itoa(duration), "scan", "on")
+	// bluetoothctl scan exits non-zero when the timeout fires — that's expected
+	if err != nil && ctx.Err() != context.DeadlineExceeded {
+		log.Printf("bluetooth scan error: %v", err)
+	}
+
+	successResponse(w, fmt.Sprintf("Bluetooth scan completed (%ds)", duration))
 }
 
 // PairBluetoothDevice pairs with a Bluetooth device.
@@ -209,20 +232,25 @@ func (h *HALHandler) ScanBluetoothDevices(w http.ResponseWriter, r *http.Request
 // @Failure 500 {object} ErrorResponse
 // @Router /bluetooth/pair [post]
 func (h *HALHandler) PairBluetoothDevice(w http.ResponseWriter, r *http.Request) {
+	// HF04-08: Apply limitBody
+	r = limitBody(r, 1<<20)
+
 	var req BluetoothConnectRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		errorResponse(w, http.StatusBadRequest, "invalid request: "+err.Error())
+		errorResponse(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
 
-	if req.Address == "" {
-		errorResponse(w, http.StatusBadRequest, "address required")
+	// HF04-06: Validate Bluetooth MAC address
+	if err := validateMACAddress(req.Address); err != nil {
+		errorResponse(w, http.StatusBadRequest, err.Error())
 		return
 	}
 
-	cmd := exec.Command("bluetoothctl", "pair", req.Address)
-	if output, err := cmd.CombinedOutput(); err != nil {
-		errorResponse(w, http.StatusInternalServerError, fmt.Sprintf("pairing failed: %s - %s", err, string(output)))
+	_, err := execWithTimeout(r.Context(), "bluetoothctl", "pair", req.Address)
+	if err != nil {
+		log.Printf("bluetooth pair %s failed: %v", req.Address, err)
+		errorResponse(w, http.StatusInternalServerError, sanitizeExecError("pairing", err))
 		return
 	}
 
@@ -242,14 +270,17 @@ func (h *HALHandler) PairBluetoothDevice(w http.ResponseWriter, r *http.Request)
 // @Router /bluetooth/connect/{address} [post]
 func (h *HALHandler) ConnectBluetoothDevice(w http.ResponseWriter, r *http.Request) {
 	address := chi.URLParam(r, "address")
-	if address == "" {
-		errorResponse(w, http.StatusBadRequest, "address required")
+
+	// HF04-06: Validate Bluetooth MAC address
+	if err := validateMACAddress(address); err != nil {
+		errorResponse(w, http.StatusBadRequest, err.Error())
 		return
 	}
 
-	cmd := exec.Command("bluetoothctl", "connect", address)
-	if output, err := cmd.CombinedOutput(); err != nil {
-		errorResponse(w, http.StatusInternalServerError, fmt.Sprintf("connect failed: %s - %s", err, string(output)))
+	_, err := execWithTimeout(r.Context(), "bluetoothctl", "connect", address)
+	if err != nil {
+		log.Printf("bluetooth connect %s failed: %v", address, err)
+		errorResponse(w, http.StatusInternalServerError, sanitizeExecError("connect", err))
 		return
 	}
 
@@ -269,14 +300,17 @@ func (h *HALHandler) ConnectBluetoothDevice(w http.ResponseWriter, r *http.Reque
 // @Router /bluetooth/disconnect/{address} [post]
 func (h *HALHandler) DisconnectBluetoothDevice(w http.ResponseWriter, r *http.Request) {
 	address := chi.URLParam(r, "address")
-	if address == "" {
-		errorResponse(w, http.StatusBadRequest, "address required")
+
+	// HF04-06: Validate Bluetooth MAC address
+	if err := validateMACAddress(address); err != nil {
+		errorResponse(w, http.StatusBadRequest, err.Error())
 		return
 	}
 
-	cmd := exec.Command("bluetoothctl", "disconnect", address)
-	if output, err := cmd.CombinedOutput(); err != nil {
-		errorResponse(w, http.StatusInternalServerError, fmt.Sprintf("disconnect failed: %s - %s", err, string(output)))
+	_, err := execWithTimeout(r.Context(), "bluetoothctl", "disconnect", address)
+	if err != nil {
+		log.Printf("bluetooth disconnect %s failed: %v", address, err)
+		errorResponse(w, http.StatusInternalServerError, sanitizeExecError("disconnect", err))
 		return
 	}
 
@@ -296,14 +330,17 @@ func (h *HALHandler) DisconnectBluetoothDevice(w http.ResponseWriter, r *http.Re
 // @Router /bluetooth/remove/{address} [delete]
 func (h *HALHandler) RemoveBluetoothDevice(w http.ResponseWriter, r *http.Request) {
 	address := chi.URLParam(r, "address")
-	if address == "" {
-		errorResponse(w, http.StatusBadRequest, "address required")
+
+	// HF04-06: Validate Bluetooth MAC address
+	if err := validateMACAddress(address); err != nil {
+		errorResponse(w, http.StatusBadRequest, err.Error())
 		return
 	}
 
-	cmd := exec.Command("bluetoothctl", "remove", address)
-	if output, err := cmd.CombinedOutput(); err != nil {
-		errorResponse(w, http.StatusInternalServerError, fmt.Sprintf("remove failed: %s - %s", err, string(output)))
+	_, err := execWithTimeout(r.Context(), "bluetoothctl", "remove", address)
+	if err != nil {
+		log.Printf("bluetooth remove %s failed: %v", address, err)
+		errorResponse(w, http.StatusInternalServerError, sanitizeExecError("remove", err))
 		return
 	}
 
@@ -314,16 +351,15 @@ func (h *HALHandler) RemoveBluetoothDevice(w http.ResponseWriter, r *http.Reques
 // Helper Functions
 // ============================================================================
 
-func (h *HALHandler) getPairedBluetoothDevices() []BluetoothDevice {
+func (h *HALHandler) getPairedBluetoothDevices(ctx context.Context) []BluetoothDevice {
 	var devices []BluetoothDevice
 
-	cmd := exec.Command("bluetoothctl", "devices", "Paired")
-	output, err := cmd.Output()
+	output, err := execWithTimeout(ctx, "bluetoothctl", "devices", "Paired")
 	if err != nil {
 		return devices
 	}
 
-	lines := strings.Split(string(output), "\n")
+	lines := strings.Split(output, "\n")
 	for _, line := range lines {
 		line = strings.TrimSpace(line)
 		if line == "" {
@@ -343,10 +379,9 @@ func (h *HALHandler) getPairedBluetoothDevices() []BluetoothDevice {
 				}
 
 				// Check if connected
-				infoCmd := exec.Command("bluetoothctl", "info", device.Address)
-				if infoOutput, err := infoCmd.Output(); err == nil {
-					device.Connected = strings.Contains(string(infoOutput), "Connected: yes")
-					device.Trusted = strings.Contains(string(infoOutput), "Trusted: yes")
+				if infoOutput, err := execWithTimeout(ctx, "bluetoothctl", "info", device.Address); err == nil {
+					device.Connected = strings.Contains(infoOutput, "Connected: yes")
+					device.Trusted = strings.Contains(infoOutput, "Trusted: yes")
 				}
 
 				devices = append(devices, device)

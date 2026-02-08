@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"net/http"
 	"os"
-	"os/exec"
 	"strconv"
 	"strings"
 	"time"
@@ -65,7 +64,7 @@ type GPIOModeRequest struct {
 // @Failure 500 {object} ErrorResponse
 // @Router /gpio/pins [get]
 func (h *HALHandler) GetGPIOStatus(w http.ResponseWriter, r *http.Request) {
-	pins := h.scanGPIOPins()
+	pins := h.scanGPIOPins(r)
 
 	// Determine chip
 	chip := "gpiochip4" // Pi 5
@@ -109,7 +108,7 @@ func (h *HALHandler) GetGPIOPin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	pinInfo := h.readGPIOPin(pin)
+	pinInfo := h.readGPIOPin(r, pin)
 	jsonResponse(w, http.StatusOK, pinInfo)
 }
 
@@ -125,9 +124,12 @@ func (h *HALHandler) GetGPIOPin(w http.ResponseWriter, r *http.Request) {
 // @Failure 500 {object} ErrorResponse
 // @Router /gpio/pin [post]
 func (h *HALHandler) SetGPIOPin(w http.ResponseWriter, r *http.Request) {
+	// HF04-08: Apply limitBody
+	r = limitBody(r, 1<<20)
+
 	var req GPIOSetRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		errorResponse(w, http.StatusBadRequest, "invalid request: "+err.Error())
+		errorResponse(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
 
@@ -145,8 +147,8 @@ func (h *HALHandler) SetGPIOPin(w http.ResponseWriter, r *http.Request) {
 	chip := h.getGPIOChip()
 
 	// Try gpioset first (gpiod)
-	cmd := exec.Command("gpioset", chip, fmt.Sprintf("%d=%d", req.Pin, req.Value))
-	if err := cmd.Run(); err != nil {
+	_, err := execWithTimeout(r.Context(), "gpioset", chip, fmt.Sprintf("%d=%d", req.Pin, req.Value))
+	if err != nil {
 		// Fallback to sysfs
 		if err := h.setGPIOSysfs(req.Pin, req.Value); err != nil {
 			errorResponse(w, http.StatusInternalServerError, "failed to set GPIO: "+err.Error())
@@ -169,9 +171,12 @@ func (h *HALHandler) SetGPIOPin(w http.ResponseWriter, r *http.Request) {
 // @Failure 500 {object} ErrorResponse
 // @Router /gpio/mode [post]
 func (h *HALHandler) SetGPIOMode(w http.ResponseWriter, r *http.Request) {
+	// HF04-08: Apply limitBody
+	r = limitBody(r, 1<<20)
+
 	var req GPIOModeRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		errorResponse(w, http.StatusBadRequest, "invalid request: "+err.Error())
+		errorResponse(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
 
@@ -264,6 +269,12 @@ func (h *HALHandler) UnexportGPIOPin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// HF04-07: Add range validation (was missing, unlike ExportGPIOPin)
+	if pin < 0 || pin > 27 {
+		errorResponse(w, http.StatusBadRequest, "pin must be 0-27")
+		return
+	}
+
 	unexportPath := "/sys/class/gpio/unexport"
 	if err := os.WriteFile(unexportPath, []byte(strconv.Itoa(pin)), 0644); err != nil {
 		errorResponse(w, http.StatusInternalServerError, "failed to unexport GPIO: "+err.Error())
@@ -287,21 +298,21 @@ func (h *HALHandler) getGPIOChip() string {
 	return "gpiochip0"
 }
 
-func (h *HALHandler) scanGPIOPins() []GPIOPin {
+func (h *HALHandler) scanGPIOPins(r *http.Request) []GPIOPin {
 	var pins []GPIOPin
 
 	// BCM GPIO pins commonly used on Raspberry Pi header
 	bcmPins := []int{2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27}
 
 	for _, pin := range bcmPins {
-		pinInfo := h.readGPIOPin(pin)
+		pinInfo := h.readGPIOPin(r, pin)
 		pins = append(pins, pinInfo)
 	}
 
 	return pins
 }
 
-func (h *HALHandler) readGPIOPin(pin int) GPIOPin {
+func (h *HALHandler) readGPIOPin(r *http.Request, pin int) GPIOPin {
 	pinInfo := GPIOPin{
 		Pin:      pin,
 		Mode:     "unknown",
@@ -330,9 +341,9 @@ func (h *HALHandler) readGPIOPin(pin int) GPIOPin {
 	} else {
 		// Try gpioget
 		chip := h.getGPIOChip()
-		cmd := exec.Command("gpioget", chip, strconv.Itoa(pin))
-		if output, err := cmd.Output(); err == nil {
-			val, _ := strconv.Atoi(strings.TrimSpace(string(output)))
+		output, err := execWithTimeout(r.Context(), "gpioget", chip, strconv.Itoa(pin))
+		if err == nil {
+			val, _ := strconv.Atoi(strings.TrimSpace(output))
 			pinInfo.Value = val
 			pinInfo.Mode = "input" // gpioget implies input mode
 		}

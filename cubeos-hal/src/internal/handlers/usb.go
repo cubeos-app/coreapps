@@ -1,8 +1,9 @@
 package handlers
 
 import (
+	"fmt"
+	"log"
 	"net/http"
-	"os/exec"
 	"strconv"
 	"strings"
 )
@@ -54,7 +55,7 @@ type USBHub struct {
 // @Failure 500 {object} ErrorResponse
 // @Router /usb/devices [get]
 func (h *HALHandler) GetUSBDevices(w http.ResponseWriter, r *http.Request) {
-	devices := h.scanUSBDevices()
+	devices := h.scanUSBDevices(r)
 	jsonResponse(w, http.StatusOK, map[string]interface{}{
 		"count":   len(devices),
 		"devices": devices,
@@ -72,15 +73,15 @@ func (h *HALHandler) GetUSBDevices(w http.ResponseWriter, r *http.Request) {
 // @Router /usb/tree [get]
 func (h *HALHandler) GetUSBDevicesTree(w http.ResponseWriter, r *http.Request) {
 	// Use lsusb -t for tree output
-	cmd := exec.Command("lsusb", "-t")
-	output, err := cmd.Output()
+	output, err := execWithTimeout(r.Context(), "lsusb", "-t")
 	if err != nil {
-		errorResponse(w, http.StatusInternalServerError, "failed to get USB tree: "+err.Error())
+		log.Printf("lsusb -t failed: %v", err)
+		errorResponse(w, http.StatusInternalServerError, sanitizeExecError("get USB tree", err))
 		return
 	}
 
 	// Also get detailed list
-	devices := h.scanUSBDevices()
+	devices := h.scanUSBDevices(r)
 
 	// Group by bus
 	hubs := make(map[int][]USBDevice)
@@ -89,7 +90,7 @@ func (h *HALHandler) GetUSBDevicesTree(w http.ResponseWriter, r *http.Request) {
 	}
 
 	jsonResponse(w, http.StatusOK, map[string]interface{}{
-		"tree": string(output),
+		"tree": output,
 		"hubs": hubs,
 	})
 }
@@ -112,7 +113,7 @@ func (h *HALHandler) GetUSBDevicesByClass(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	devices := h.scanUSBDevices()
+	devices := h.scanUSBDevices(r)
 
 	// Map class names to class codes
 	classMap := map[string][]string{
@@ -177,20 +178,23 @@ func (h *HALHandler) ResetUSBDevice(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Use usbreset or unbind/bind method
-	// Try usbreset first
-	devPath := "/dev/bus/usb/%03d/%03d"
-	cmd := exec.Command("usbreset", devPath)
-	if err := cmd.Run(); err != nil {
-		// Try unbind/bind method
-		// This requires finding the device in sysfs
-		errorResponse(w, http.StatusInternalServerError, "USB reset not available: "+err.Error())
+	// HF04-02: Validate bus/device range
+	if err := validateUSBBusDevice(bus, device); err != nil {
+		errorResponse(w, http.StatusBadRequest, err.Error())
 		return
 	}
 
-	successResponse(w, "USB device reset")
-	_ = bus
-	_ = device
+	// HF04-02: Fix broken format string — was passing literal "%03d/%03d" to usbreset
+	devPath := fmt.Sprintf("/dev/bus/usb/%03d/%03d", bus, device)
+
+	_, err = execWithTimeout(r.Context(), "usbreset", devPath)
+	if err != nil {
+		log.Printf("usbreset %s failed: %v", devPath, err)
+		errorResponse(w, http.StatusInternalServerError, sanitizeExecError("USB reset", err))
+		return
+	}
+
+	successResponse(w, fmt.Sprintf("USB device %s reset", devPath))
 }
 
 // RescanUSB rescans USB buses.
@@ -204,9 +208,10 @@ func (h *HALHandler) ResetUSBDevice(w http.ResponseWriter, r *http.Request) {
 // @Router /usb/rescan [post]
 func (h *HALHandler) RescanUSB(w http.ResponseWriter, r *http.Request) {
 	// Trigger rescan via udevadm
-	cmd := exec.Command("udevadm", "trigger", "--subsystem-match=usb")
-	if output, err := cmd.CombinedOutput(); err != nil {
-		errorResponse(w, http.StatusInternalServerError, "USB rescan failed: "+string(output))
+	_, err := execWithTimeout(r.Context(), "udevadm", "trigger", "--subsystem-match=usb")
+	if err != nil {
+		log.Printf("USB rescan failed: %v", err)
+		errorResponse(w, http.StatusInternalServerError, sanitizeExecError("USB rescan", err))
 		return
 	}
 
@@ -217,17 +222,16 @@ func (h *HALHandler) RescanUSB(w http.ResponseWriter, r *http.Request) {
 // Helper Functions
 // ============================================================================
 
-func (h *HALHandler) scanUSBDevices() []USBDevice {
+func (h *HALHandler) scanUSBDevices(r *http.Request) []USBDevice {
 	var devices []USBDevice
 
-	// Use lsusb -v for detailed info
-	cmd := exec.Command("lsusb")
-	output, err := cmd.Output()
+	// Use lsusb for device listing
+	output, err := execWithTimeout(r.Context(), "lsusb")
 	if err != nil {
 		return devices
 	}
 
-	lines := strings.Split(string(output), "\n")
+	lines := strings.Split(output, "\n")
 	for _, line := range lines {
 		if line == "" {
 			continue
@@ -272,9 +276,8 @@ func (h *HALHandler) scanUSBDevices() []USBDevice {
 			}
 		}
 
-		device.Path = "/dev/bus/usb/" +
-			strings.ReplaceAll(strconv.Itoa(device.Bus), " ", "0") + "/" +
-			strings.ReplaceAll(strconv.Itoa(device.Device), " ", "0")
+		// HF04-11: Fix path padding — strings.ReplaceAll doesn't pad, use fmt.Sprintf
+		device.Path = fmt.Sprintf("/dev/bus/usb/%03d/%03d", device.Bus, device.Device)
 
 		if device.VendorID != "" {
 			devices = append(devices, device)
@@ -283,22 +286,21 @@ func (h *HALHandler) scanUSBDevices() []USBDevice {
 
 	// Try to get more details for each device
 	for i := range devices {
-		h.enrichUSBDevice(&devices[i])
+		h.enrichUSBDevice(r, &devices[i])
 	}
 
 	return devices
 }
 
-func (h *HALHandler) enrichUSBDevice(device *USBDevice) {
+func (h *HALHandler) enrichUSBDevice(r *http.Request, device *USBDevice) {
 	// Use lsusb -v -s bus:device for more details
 	selector := strconv.Itoa(device.Bus) + ":" + strconv.Itoa(device.Device)
-	cmd := exec.Command("lsusb", "-v", "-s", selector)
-	output, err := cmd.Output()
+	output, err := execWithTimeout(r.Context(), "lsusb", "-v", "-s", selector)
 	if err != nil {
 		return
 	}
 
-	lines := strings.Split(string(output), "\n")
+	lines := strings.Split(output, "\n")
 	for _, line := range lines {
 		line = strings.TrimSpace(line)
 
