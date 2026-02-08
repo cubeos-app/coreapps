@@ -1,12 +1,14 @@
 package handlers
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
-	"os/exec"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 )
@@ -88,21 +90,22 @@ type AndroidTetheringStatus struct {
 // @Produce json
 // @Success 200 {object} CellularStatus
 // @Failure 500 {object} ErrorResponse
-// @Router /cellular/status [get]
+// @Router /hal/cellular/status [get]
 func (h *HALHandler) GetCellularStatus(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
 	status := CellularStatus{
 		Available: false,
 		Modems:    []CellularModem{},
 	}
 
-	// Check if ModemManager is running
-	if _, err := exec.Command("systemctl", "is-active", "ModemManager").Output(); err != nil {
+	// HF05-11: Check if ModemManager is running with timeout
+	if _, err := execWithTimeout(ctx, "systemctl", "is-active", "ModemManager"); err != nil {
 		jsonResponse(w, http.StatusOK, status)
 		return
 	}
 
 	// List modems
-	modems := h.listModems()
+	modems := h.listModems(ctx)
 	status.Modems = modems
 	status.ModemCount = len(modems)
 	status.Available = len(modems) > 0
@@ -127,9 +130,9 @@ func (h *HALHandler) GetCellularStatus(w http.ResponseWriter, r *http.Request) {
 // @Produce json
 // @Success 200 {object} map[string]interface{}
 // @Failure 500 {object} ErrorResponse
-// @Router /cellular/modems [get]
+// @Router /hal/cellular/modems [get]
 func (h *HALHandler) GetCellularModems(w http.ResponseWriter, r *http.Request) {
-	modems := h.listModems()
+	modems := h.listModems(r.Context())
 	jsonResponse(w, http.StatusOK, map[string]interface{}{
 		"count":  len(modems),
 		"modems": modems,
@@ -142,21 +145,25 @@ func (h *HALHandler) GetCellularModems(w http.ResponseWriter, r *http.Request) {
 // @Tags Cellular
 // @Accept json
 // @Produce json
-// @Param modem query int false "Modem index" default(0)
+// @Param modem query int false "Modem index (0-15)" default(0)
 // @Success 200 {object} CellularSignal
+// @Failure 400 {object} ErrorResponse
 // @Failure 404 {object} ErrorResponse
 // @Failure 500 {object} ErrorResponse
-// @Router /cellular/signal [get]
+// @Router /hal/cellular/signal [get]
 func (h *HALHandler) GetCellularSignal(w http.ResponseWriter, r *http.Request) {
 	modemParam := r.URL.Query().Get("modem")
 	modemIdx := 0
 	if modemParam != "" {
-		if idx, err := strconv.Atoi(modemParam); err == nil {
-			modemIdx = idx
+		idx, err := strconv.Atoi(modemParam)
+		if err != nil || idx < 0 || idx > 15 {
+			errorResponse(w, http.StatusBadRequest, "invalid modem index (0-15)")
+			return
 		}
+		modemIdx = idx
 	}
 
-	signal := h.getModemSignal(modemIdx)
+	signal := h.getModemSignal(r.Context(), modemIdx)
 	jsonResponse(w, http.StatusOK, signal)
 }
 
@@ -170,16 +177,40 @@ func (h *HALHandler) GetCellularSignal(w http.ResponseWriter, r *http.Request) {
 // @Success 200 {object} SuccessResponse
 // @Failure 400 {object} ErrorResponse
 // @Failure 500 {object} ErrorResponse
-// @Router /cellular/connect [post]
+// @Router /hal/cellular/connect [post]
 func (h *HALHandler) ConnectCellular(w http.ResponseWriter, r *http.Request) {
+	// HF05-09: Apply body limit
+	r = limitBody(r, 1<<20)
+
 	var req CellularConnectRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		errorResponse(w, http.StatusBadRequest, "invalid request: "+err.Error())
+		errorResponse(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
 
-	if req.APN == "" {
-		errorResponse(w, http.StatusBadRequest, "APN required")
+	// HF05-07: Validate APN
+	if err := validateAPN(req.APN); err != nil {
+		errorResponse(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	// HF05-07: Validate credentials — reject injection characters
+	if strings.ContainsAny(req.User, ",\n\r\x00") || len(req.User) > 128 {
+		errorResponse(w, http.StatusBadRequest, "invalid username")
+		return
+	}
+	if strings.ContainsAny(req.Password, ",\n\r\x00") || len(req.Password) > 128 {
+		errorResponse(w, http.StatusBadRequest, "invalid password")
+		return
+	}
+	if req.PIN != "" && (len(req.PIN) < 4 || len(req.PIN) > 8 || !isDigitsOnly(req.PIN)) {
+		errorResponse(w, http.StatusBadRequest, "invalid PIN (must be 4-8 digits)")
+		return
+	}
+
+	// Validate modem index range
+	if req.ModemIndex < 0 || req.ModemIndex > 15 {
+		errorResponse(w, http.StatusBadRequest, "invalid modem index (0-15)")
 		return
 	}
 
@@ -194,9 +225,12 @@ func (h *HALHandler) ConnectCellular(w http.ResponseWriter, r *http.Request) {
 		args = append(args, fmt.Sprintf("password=%s", req.Password))
 	}
 
-	cmd := exec.Command("mmcli", args...)
-	if output, err := cmd.CombinedOutput(); err != nil {
-		errorResponse(w, http.StatusInternalServerError, fmt.Sprintf("connection failed: %s - %s", err, string(output)))
+	// HF05-11: Use execWithTimeout with 60s for modem connection
+	ctx, cancel := context.WithTimeout(r.Context(), 60*time.Second)
+	defer cancel()
+	if _, err := execWithTimeout(ctx, "mmcli", args...); err != nil {
+		log.Printf("cellular: connect failed: %v", err)
+		errorResponse(w, http.StatusInternalServerError, sanitizeExecError("cellular connect", err))
 		return
 	}
 
@@ -213,21 +247,21 @@ func (h *HALHandler) ConnectCellular(w http.ResponseWriter, r *http.Request) {
 // @Success 200 {object} SuccessResponse
 // @Failure 400 {object} ErrorResponse
 // @Failure 500 {object} ErrorResponse
-// @Router /cellular/disconnect/{modem} [post]
+// @Router /hal/cellular/disconnect/{modem} [post]
 func (h *HALHandler) DisconnectCellular(w http.ResponseWriter, r *http.Request) {
 	modemParam := chi.URLParam(r, "modem")
-	modemIdx := 0
-	if modemParam != "" {
-		if idx, err := strconv.Atoi(modemParam); err == nil {
-			modemIdx = idx
-		}
+	modemIdx, err := strconv.Atoi(modemParam)
+	if err != nil || modemIdx < 0 || modemIdx > 15 {
+		errorResponse(w, http.StatusBadRequest, "invalid modem index (0-15)")
+		return
 	}
 
 	modemPath := fmt.Sprintf("/org/freedesktop/ModemManager1/Modem/%d", modemIdx)
 
-	cmd := exec.Command("mmcli", "-m", modemPath, "--simple-disconnect")
-	if output, err := cmd.CombinedOutput(); err != nil {
-		errorResponse(w, http.StatusInternalServerError, fmt.Sprintf("disconnect failed: %s - %s", err, string(output)))
+	// HF05-11: Use execWithTimeout
+	if _, err := execWithTimeout(r.Context(), "mmcli", "-m", modemPath, "--simple-disconnect"); err != nil {
+		log.Printf("cellular: disconnect failed: %v", err)
+		errorResponse(w, http.StatusInternalServerError, sanitizeExecError("cellular disconnect", err))
 		return
 	}
 
@@ -242,19 +276,21 @@ func (h *HALHandler) DisconnectCellular(w http.ResponseWriter, r *http.Request) 
 // @Produce json
 // @Success 200 {object} AndroidTetheringStatus
 // @Failure 500 {object} ErrorResponse
-// @Router /cellular/android [get]
+// @Router /hal/cellular/android [get]
 func (h *HALHandler) GetAndroidTethering(w http.ResponseWriter, r *http.Request) {
 	status := AndroidTetheringStatus{
 		Available: false,
 		Connected: false,
 	}
 
+	ctx := r.Context()
+
 	// Check for RNDIS interface (typically usb0 or enp*u*)
 	interfaces := []string{"usb0", "usb1"}
 
 	// Also check for modern naming
-	if entries, err := exec.Command("ls", "/sys/class/net").Output(); err == nil {
-		for _, name := range strings.Fields(string(entries)) {
+	if out, err := execWithTimeout(ctx, "ls", "/sys/class/net"); err == nil {
+		for _, name := range strings.Fields(out) {
 			if strings.HasPrefix(name, "enp") && strings.Contains(name, "u") {
 				interfaces = append(interfaces, name)
 			}
@@ -269,8 +305,8 @@ func (h *HALHandler) GetAndroidTethering(w http.ResponseWriter, r *http.Request)
 			status.Interface = iface
 
 			// Get IP address
-			if output, err := exec.Command("ip", "-4", "-o", "addr", "show", iface).Output(); err == nil {
-				fields := strings.Fields(string(output))
+			if output, err := execWithTimeout(ctx, "ip", "-4", "-o", "addr", "show", iface); err == nil {
+				fields := strings.Fields(output)
 				for i, f := range fields {
 					if f == "inet" && i+1 < len(fields) {
 						status.IPAddress = strings.Split(fields[i+1], "/")[0]
@@ -280,8 +316,8 @@ func (h *HALHandler) GetAndroidTethering(w http.ResponseWriter, r *http.Request)
 			}
 
 			// Get gateway
-			if output, err := exec.Command("ip", "route", "show", "dev", iface).Output(); err == nil {
-				lines := strings.Split(string(output), "\n")
+			if output, err := execWithTimeout(ctx, "ip", "route", "show", "dev", iface); err == nil {
+				lines := strings.Split(output, "\n")
 				for _, line := range lines {
 					if strings.HasPrefix(line, "default via") {
 						fields := strings.Fields(line)
@@ -305,17 +341,17 @@ func (h *HALHandler) GetAndroidTethering(w http.ResponseWriter, r *http.Request)
 // Helper Functions
 // ============================================================================
 
-func (h *HALHandler) listModems() []CellularModem {
+func (h *HALHandler) listModems(ctx context.Context) []CellularModem {
 	var modems []CellularModem
 
-	// Get modem list from mmcli
-	output, err := exec.Command("mmcli", "-L").Output()
+	// HF05-11: Get modem list from mmcli with timeout
+	output, err := execWithTimeout(ctx, "mmcli", "-L")
 	if err != nil {
 		return modems
 	}
 
 	// Parse modem paths
-	lines := strings.Split(string(output), "\n")
+	lines := strings.Split(output, "\n")
 	for _, line := range lines {
 		if strings.Contains(line, "/org/freedesktop/ModemManager1/Modem/") {
 			// Extract modem path
@@ -333,7 +369,7 @@ func (h *HALHandler) listModems() []CellularModem {
 			}
 
 			// Get modem details
-			modem := h.getModemInfo(path)
+			modem := h.getModemInfo(ctx, path)
 			modems = append(modems, modem)
 		}
 	}
@@ -341,7 +377,7 @@ func (h *HALHandler) listModems() []CellularModem {
 	return modems
 }
 
-func (h *HALHandler) getModemInfo(path string) CellularModem {
+func (h *HALHandler) getModemInfo(ctx context.Context, path string) CellularModem {
 	modem := CellularModem{
 		Path: path,
 	}
@@ -354,13 +390,13 @@ func (h *HALHandler) getModemInfo(path string) CellularModem {
 		}
 	}
 
-	// Get detailed info
-	output, err := exec.Command("mmcli", "-m", path).Output()
+	// HF05-11: Get detailed info with timeout
+	output, err := execWithTimeout(ctx, "mmcli", "-m", path)
 	if err != nil {
 		return modem
 	}
 
-	lines := strings.Split(string(output), "\n")
+	lines := strings.Split(output, "\n")
 	for _, line := range lines {
 		line = strings.TrimSpace(line)
 
@@ -400,16 +436,16 @@ func (h *HALHandler) getModemInfo(path string) CellularModem {
 	return modem
 }
 
-func (h *HALHandler) getModemSignal(modemIdx int) CellularSignal {
+func (h *HALHandler) getModemSignal(ctx context.Context, modemIdx int) CellularSignal {
 	signal := CellularSignal{}
 
 	modemPath := fmt.Sprintf("/org/freedesktop/ModemManager1/Modem/%d", modemIdx)
 
-	// Get signal info
-	output, err := exec.Command("mmcli", "-m", modemPath, "--signal-get").Output()
+	// HF05-11: Get signal info with timeout
+	output, err := execWithTimeout(ctx, "mmcli", "-m", modemPath, "--signal-get")
 	if err != nil {
 		// Fallback to basic signal quality
-		modem := h.getModemInfo(modemPath)
+		modem := h.getModemInfo(ctx, modemPath)
 		signal.Quality = modem.SignalQuality
 		signal.Bars = signal.Quality / 25
 		if signal.Bars > 4 {
@@ -419,7 +455,7 @@ func (h *HALHandler) getModemSignal(modemIdx int) CellularSignal {
 		return signal
 	}
 
-	lines := strings.Split(string(output), "\n")
+	lines := strings.Split(output, "\n")
 	for _, line := range lines {
 		line = strings.TrimSpace(line)
 
@@ -468,47 +504,51 @@ func (h *HALHandler) getModemSignal(modemIdx int) CellularSignal {
 }
 
 // GetAndroidTetheringStatus returns Android USB tethering status.
+// @Router /hal/cellular/android/status [get]
 func (h *HALHandler) GetAndroidTetheringStatus(w http.ResponseWriter, r *http.Request) {
-	status := h.checkAndroidTethering()
+	status := h.checkAndroidTethering(r.Context())
 	jsonResponse(w, http.StatusOK, status)
 }
 
 // EnableAndroidTethering enables Android USB tethering.
+// @Router /hal/cellular/android/enable [post]
 func (h *HALHandler) EnableAndroidTethering(w http.ResponseWriter, r *http.Request) {
-	status := h.checkAndroidTethering()
+	status := h.checkAndroidTethering(r.Context())
 	if !status.Connected {
 		errorResponse(w, http.StatusBadRequest, "no Android device detected")
 		return
 	}
-	cmd := exec.Command("dhclient", status.Interface)
-	if output, err := cmd.CombinedOutput(); err != nil {
-		errorResponse(w, http.StatusInternalServerError, "DHCP failed: "+string(output))
+	// HF05-11: Use execWithTimeout
+	if _, err := execWithTimeout(r.Context(), "dhclient", status.Interface); err != nil {
+		log.Printf("cellular: dhclient failed on %s: %v", status.Interface, err)
+		errorResponse(w, http.StatusInternalServerError, sanitizeExecError("DHCP", err))
 		return
 	}
 	successResponse(w, "Android tethering enabled on "+status.Interface)
 }
 
 // DisableAndroidTethering disables Android USB tethering.
+// @Router /hal/cellular/android/disable [post]
 func (h *HALHandler) DisableAndroidTethering(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
 	for _, iface := range []string{"usb0", "rndis0"} {
-		exec.Command("dhclient", "-r", iface).Run()
-		exec.Command("ip", "link", "set", iface, "down").Run()
+		execWithTimeout(ctx, "dhclient", "-r", iface)
+		execWithTimeout(ctx, "ip", "link", "set", iface, "down")
 	}
 	successResponse(w, "Android tethering disabled")
 }
 
 // checkAndroidTethering checks for Android USB tethering interface
-func (h *HALHandler) checkAndroidTethering() AndroidTetheringStatus {
+func (h *HALHandler) checkAndroidTethering(ctx context.Context) AndroidTetheringStatus {
 	status := AndroidTetheringStatus{}
 
 	interfaces := []string{"usb0", "rndis0", "enp0s20f0u1"}
 	for _, iface := range interfaces {
-		cmd := exec.Command("ip", "addr", "show", iface)
-		if output, err := cmd.Output(); err == nil {
+		if output, err := execWithTimeout(ctx, "ip", "addr", "show", iface); err == nil {
 			status.Interface = iface
 			status.Connected = true
 
-			lines := strings.Split(string(output), "\n")
+			lines := strings.Split(output, "\n")
 			for _, line := range lines {
 				line = strings.TrimSpace(line)
 				if strings.HasPrefix(line, "inet ") {
@@ -522,4 +562,14 @@ func (h *HALHandler) checkAndroidTethering() AndroidTetheringStatus {
 		}
 	}
 	return status
+}
+
+// isDigitsOnly checks if a string contains only digit characters.
+func isDigitsOnly(s string) bool {
+	for _, c := range s {
+		if c < '0' || c > '9' {
+			return false
+		}
+	}
+	return len(s) > 0
 }

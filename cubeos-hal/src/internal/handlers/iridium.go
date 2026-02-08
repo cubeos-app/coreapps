@@ -1,11 +1,12 @@
 package handlers
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"os"
-	"os/exec"
 	"strconv"
 	"strings"
 	"time"
@@ -78,9 +79,9 @@ type IridiumMessage struct {
 // @Produce json
 // @Success 200 {object} map[string]interface{}
 // @Failure 500 {object} ErrorResponse
-// @Router /iridium/devices [get]
+// @Router /hal/iridium/devices [get]
 func (h *HALHandler) GetIridiumDevices(w http.ResponseWriter, r *http.Request) {
-	devices := h.scanIridiumDevices()
+	devices := h.scanIridiumDevices(r.Context())
 	jsonResponse(w, http.StatusOK, map[string]interface{}{
 		"count":   len(devices),
 		"devices": devices,
@@ -95,14 +96,22 @@ func (h *HALHandler) GetIridiumDevices(w http.ResponseWriter, r *http.Request) {
 // @Produce json
 // @Param port query string false "Serial port" default(/dev/ttyUSB0)
 // @Success 200 {object} IridiumStatus
+// @Failure 400 {object} ErrorResponse
 // @Failure 500 {object} ErrorResponse
-// @Router /iridium/status [get]
+// @Router /hal/iridium/status [get]
 func (h *HALHandler) GetIridiumStatus(w http.ResponseWriter, r *http.Request) {
 	port := r.URL.Query().Get("port")
 	if port == "" {
 		port = "/dev/ttyUSB0"
 	}
 
+	// HF05-01: Validate serial port path
+	if err := validateSerialPort(port); err != nil {
+		errorResponse(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	ctx := r.Context()
 	status := IridiumStatus{
 		Available: false,
 	}
@@ -115,11 +124,12 @@ func (h *HALHandler) GetIridiumStatus(w http.ResponseWriter, r *http.Request) {
 
 	status.Available = true
 
-	// Configure serial port
-	exec.Command("stty", "-F", port, "19200", "raw", "-echo").Run()
+	// HF05-11: Configure serial port with timeout
+	if _, err := execWithTimeout(ctx, "stty", "-F", port, "19200", "raw", "-echo"); err != nil {
+		log.Printf("iridium: stty failed for %s: %v", port, err)
+	}
 
-	// Try to communicate with modem
-	// Send AT command
+	// Try to communicate with modem — send AT command
 	response := h.sendATCommand(port, "AT", 2)
 	if strings.Contains(response, "OK") {
 		status.Connected = true
@@ -182,22 +192,32 @@ func (h *HALHandler) GetIridiumStatus(w http.ResponseWriter, r *http.Request) {
 // @Produce json
 // @Param port query string false "Serial port" default(/dev/ttyUSB0)
 // @Success 200 {object} IridiumSignal
+// @Failure 400 {object} ErrorResponse
 // @Failure 500 {object} ErrorResponse
-// @Router /iridium/signal [get]
+// @Router /hal/iridium/signal [get]
 func (h *HALHandler) GetIridiumSignal(w http.ResponseWriter, r *http.Request) {
 	port := r.URL.Query().Get("port")
 	if port == "" {
 		port = "/dev/ttyUSB0"
 	}
 
+	// HF05-01: Validate serial port path
+	if err := validateSerialPort(port); err != nil {
+		errorResponse(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	ctx := r.Context()
 	signal := IridiumSignal{
 		Quality: 0,
 		Bars:    0,
 		Status:  "No Signal",
 	}
 
-	// Configure serial port
-	exec.Command("stty", "-F", port, "19200", "raw", "-echo").Run()
+	// HF05-11: Configure serial port with timeout
+	if _, err := execWithTimeout(ctx, "stty", "-F", port, "19200", "raw", "-echo"); err != nil {
+		log.Printf("iridium: stty failed for %s: %v", port, err)
+	}
 
 	// Get signal quality
 	response := h.sendATCommand(port, "AT+CSQ", 2)
@@ -240,16 +260,25 @@ func (h *HALHandler) GetIridiumSignal(w http.ResponseWriter, r *http.Request) {
 // @Success 200 {object} SuccessResponse
 // @Failure 400 {object} ErrorResponse
 // @Failure 500 {object} ErrorResponse
-// @Router /iridium/send [post]
+// @Router /hal/iridium/send [post]
 func (h *HALHandler) SendIridiumMessage(w http.ResponseWriter, r *http.Request) {
 	port := r.URL.Query().Get("port")
 	if port == "" {
 		port = "/dev/ttyUSB0"
 	}
 
+	// HF05-01: Validate serial port path
+	if err := validateSerialPort(port); err != nil {
+		errorResponse(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	// HF05-09: Apply body limit
+	r = limitBody(r, 1<<20)
+
 	var req IridiumSendRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		errorResponse(w, http.StatusBadRequest, "invalid request: "+err.Error())
+		errorResponse(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
 
@@ -258,8 +287,23 @@ func (h *HALHandler) SendIridiumMessage(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	// Configure serial port
-	exec.Command("stty", "-F", port, "19200", "raw", "-echo").Run()
+	// HF05-02: Validate Iridium message — prevents AT command injection
+	// The message is concatenated into "AT+SBDWT=<msg>" and sent over serial.
+	// CR/LF in the message would terminate the AT command early and allow
+	// injecting arbitrary AT commands (e.g., AT+CFUN=0 to disable radio).
+	if req.Message != "" {
+		if err := validateIridiumMessage(req.Message); err != nil {
+			errorResponse(w, http.StatusBadRequest, err.Error())
+			return
+		}
+	}
+
+	ctx := r.Context()
+
+	// HF05-11: Configure serial port with timeout
+	if _, err := execWithTimeout(ctx, "stty", "-F", port, "19200", "raw", "-echo"); err != nil {
+		log.Printf("iridium: stty failed for %s: %v", port, err)
+	}
 
 	// Clear MO buffer
 	response := h.sendATCommand(port, "AT+SBDD0", 2)
@@ -276,18 +320,18 @@ func (h *HALHandler) SendIridiumMessage(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	// Write text message
+	// Write text message — message is validated (no CR/LF/null)
 	cmd := fmt.Sprintf("AT+SBDWT=%s", message)
 	response = h.sendATCommand(port, cmd, 5)
 	if !strings.Contains(response, "OK") {
-		errorResponse(w, http.StatusInternalServerError, "failed to write message: "+response)
+		errorResponse(w, http.StatusInternalServerError, "failed to write message to modem")
 		return
 	}
 
-	// Initiate SBD session
-	response = h.sendATCommand(port, "AT+SBDIX", 60) // Long timeout for satellite
+	// Initiate SBD session (long timeout for satellite link)
+	response = h.sendATCommand(port, "AT+SBDIX", 60)
 	if !strings.Contains(response, "+SBDIX:") {
-		errorResponse(w, http.StatusInternalServerError, "SBD session failed: "+response)
+		errorResponse(w, http.StatusInternalServerError, "SBD session failed")
 		return
 	}
 
@@ -307,7 +351,7 @@ func (h *HALHandler) SendIridiumMessage(w http.ResponseWriter, r *http.Request) 
 		}
 	}
 
-	errorResponse(w, http.StatusInternalServerError, "unexpected response: "+response)
+	errorResponse(w, http.StatusInternalServerError, "unexpected modem response")
 }
 
 // ReceiveIridiumMessage receives SBD messages.
@@ -318,16 +362,27 @@ func (h *HALHandler) SendIridiumMessage(w http.ResponseWriter, r *http.Request) 
 // @Produce json
 // @Param port query string false "Serial port" default(/dev/ttyUSB0)
 // @Success 200 {object} map[string]interface{}
+// @Failure 400 {object} ErrorResponse
 // @Failure 500 {object} ErrorResponse
-// @Router /iridium/receive [get]
+// @Router /hal/iridium/receive [get]
 func (h *HALHandler) ReceiveIridiumMessage(w http.ResponseWriter, r *http.Request) {
 	port := r.URL.Query().Get("port")
 	if port == "" {
 		port = "/dev/ttyUSB0"
 	}
 
-	// Configure serial port
-	exec.Command("stty", "-F", port, "19200", "raw", "-echo").Run()
+	// HF05-01: Validate serial port path
+	if err := validateSerialPort(port); err != nil {
+		errorResponse(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	ctx := r.Context()
+
+	// HF05-11: Configure serial port with timeout
+	if _, err := execWithTimeout(ctx, "stty", "-F", port, "19200", "raw", "-echo"); err != nil {
+		log.Printf("iridium: stty failed for %s: %v", port, err)
+	}
 
 	var messages []IridiumMessage
 
@@ -360,7 +415,7 @@ func (h *HALHandler) ReceiveIridiumMessage(w http.ResponseWriter, r *http.Reques
 // Helper Functions
 // ============================================================================
 
-func (h *HALHandler) scanIridiumDevices() []IridiumDevice {
+func (h *HALHandler) scanIridiumDevices(ctx context.Context) []IridiumDevice {
 	var devices []IridiumDevice
 
 	// Check common serial ports
@@ -370,8 +425,10 @@ func (h *HALHandler) scanIridiumDevices() []IridiumDevice {
 
 	for _, port := range ports {
 		if _, err := os.Stat(port); err == nil {
-			// Configure port
-			exec.Command("stty", "-F", port, "19200", "raw", "-echo").Run()
+			// HF05-11: Configure port with timeout
+			if _, err := execWithTimeout(ctx, "stty", "-F", port, "19200", "raw", "-echo"); err != nil {
+				continue
+			}
 
 			// Try AT command
 			response := h.sendATCommand(port, "AT", 2)
@@ -426,8 +483,8 @@ func (h *HALHandler) scanIridiumDevices() []IridiumDevice {
 }
 
 func (h *HALHandler) sendATCommand(port string, command string, timeout int) string {
-	// Simple AT command sender using echo and cat
-	// In production, use a proper serial library
+	// Simple AT command sender via direct serial I/O
+	// In production, consider a proper serial library
 
 	// Write command
 	f, err := os.OpenFile(port, os.O_RDWR, 0)
@@ -437,7 +494,9 @@ func (h *HALHandler) sendATCommand(port string, command string, timeout int) str
 	defer f.Close()
 
 	// Send command with CR
-	f.WriteString(command + "\r")
+	if _, err := f.WriteString(command + "\r"); err != nil {
+		return ""
+	}
 
 	// Read response with timeout
 	buf := make([]byte, 1024)
@@ -451,17 +510,16 @@ func (h *HALHandler) sendATCommand(port string, command string, timeout int) str
 	return string(buf[:n])
 }
 
-// SendIridiumSBD sends an Iridium SBD message.
+// SendIridiumSBD is a stub — real implementation is SendIridiumMessage.
+// Kept for backward compatibility; routes.go now points to SendIridiumMessage.
 func (h *HALHandler) SendIridiumSBD(w http.ResponseWriter, r *http.Request) {
-	errorResponse(w, http.StatusNotImplemented, "Iridium SBD send not yet implemented")
+	h.SendIridiumMessage(w, r)
 }
 
 // GetIridiumMessages retrieves Iridium messages.
+// Delegates to ReceiveIridiumMessage for the real implementation.
 func (h *HALHandler) GetIridiumMessages(w http.ResponseWriter, r *http.Request) {
-	jsonResponse(w, http.StatusOK, map[string]interface{}{
-		"messages": []interface{}{},
-		"count":    0,
-	})
+	h.ReceiveIridiumMessage(w, r)
 }
 
 // CheckIridiumMailbox checks the Iridium mailbox.

@@ -163,7 +163,7 @@ func SetupRoutes(r chi.Router, h *HALHandler) {
 		r.Get("/modems", h.GetCellularModems)
 		r.Get("/status", h.GetCellularStatus)
 		r.Get("/signal", h.GetCellularSignal)
-		r.Post("/connect/{modem}", h.ConnectCellular)
+		r.Post("/connect", h.ConnectCellular)
 		r.Post("/disconnect/{modem}", h.DisconnectCellular)
 
 		// Android tethering
@@ -174,17 +174,21 @@ func SetupRoutes(r chi.Router, h *HALHandler) {
 
 	// Meshtastic
 	r.Route("/meshtastic", func(r chi.Router) {
+		r.Get("/devices", h.GetMeshtasticDevices)
 		r.Get("/status", h.GetMeshtasticStatus)
 		r.Get("/nodes", h.GetMeshtasticNodes)
+		r.Get("/position", h.GetMeshtasticPosition)
 		r.Post("/send", h.SendMeshtasticMessage)
 		r.Post("/channel", h.SetMeshtasticChannel)
 	})
 
 	// Iridium
 	r.Route("/iridium", func(r chi.Router) {
+		r.Get("/devices", h.GetIridiumDevices)
 		r.Get("/status", h.GetIridiumStatus)
 		r.Get("/signal", h.GetIridiumSignal)
-		r.Post("/send", h.SendIridiumSBD)
+		r.Post("/send", h.SendIridiumMessage)
+		r.Get("/receive", h.ReceiveIridiumMessage)
 		r.Get("/messages", h.GetIridiumMessages)
 		r.Post("/check", h.CheckIridiumMailbox)
 	})

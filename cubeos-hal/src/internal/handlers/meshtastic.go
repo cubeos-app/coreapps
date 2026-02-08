@@ -1,11 +1,11 @@
 package handlers
 
 import (
+	"context"
 	"encoding/json"
-	"fmt"
+	"log"
 	"net/http"
 	"os"
-	"os/exec"
 	"strconv"
 	"strings"
 )
@@ -83,9 +83,9 @@ type MeshtasticMessage struct {
 // @Produce json
 // @Success 200 {object} map[string]interface{}
 // @Failure 500 {object} ErrorResponse
-// @Router /meshtastic/devices [get]
+// @Router /hal/meshtastic/devices [get]
 func (h *HALHandler) GetMeshtasticDevices(w http.ResponseWriter, r *http.Request) {
-	devices := h.scanMeshtasticDevices()
+	devices := h.scanMeshtasticDevices(r.Context())
 	jsonResponse(w, http.StatusOK, map[string]interface{}{
 		"count":   len(devices),
 		"devices": devices,
@@ -100,20 +100,28 @@ func (h *HALHandler) GetMeshtasticDevices(w http.ResponseWriter, r *http.Request
 // @Produce json
 // @Param port query string false "Serial port" default(/dev/ttyUSB0)
 // @Success 200 {object} MeshtasticStatus
+// @Failure 400 {object} ErrorResponse
 // @Failure 500 {object} ErrorResponse
-// @Router /meshtastic/status [get]
+// @Router /hal/meshtastic/status [get]
 func (h *HALHandler) GetMeshtasticStatus(w http.ResponseWriter, r *http.Request) {
 	port := r.URL.Query().Get("port")
 	if port == "" {
 		port = "/dev/ttyUSB0"
 	}
 
+	// HF05-01: Validate serial port path
+	if err := validateSerialPort(port); err != nil {
+		errorResponse(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	ctx := r.Context()
 	status := MeshtasticStatus{
 		Available: false,
 	}
 
 	// Check if meshtastic CLI is available
-	if _, err := exec.LookPath("meshtastic"); err != nil {
+	if _, err := execWithTimeout(ctx, "which", "meshtastic"); err != nil {
 		jsonResponse(w, http.StatusOK, status)
 		return
 	}
@@ -126,18 +134,18 @@ func (h *HALHandler) GetMeshtasticStatus(w http.ResponseWriter, r *http.Request)
 
 	status.Available = true
 
-	// Get device info
-	output, err := exec.Command("meshtastic", "--port", port, "--info").Output()
+	// HF05-11: Get device info with timeout
+	output, err := execWithTimeout(ctx, "meshtastic", "--port", port, "--info")
 	if err == nil {
 		status.Connected = true
-		device := h.parseMeshtasticInfo(string(output), port)
+		device := h.parseMeshtasticInfo(output, port)
 		status.Device = &device
 	}
 
 	// Get node count
-	nodesOutput, err := exec.Command("meshtastic", "--port", port, "--nodes").Output()
+	nodesOutput, err := execWithTimeout(ctx, "meshtastic", "--port", port, "--nodes")
 	if err == nil {
-		nodes := h.parseMeshtasticNodes(string(nodesOutput))
+		nodes := h.parseMeshtasticNodes(nodesOutput)
 		status.NodeCount = len(nodes)
 	}
 
@@ -152,21 +160,30 @@ func (h *HALHandler) GetMeshtasticStatus(w http.ResponseWriter, r *http.Request)
 // @Produce json
 // @Param port query string false "Serial port" default(/dev/ttyUSB0)
 // @Success 200 {object} map[string]interface{}
+// @Failure 400 {object} ErrorResponse
 // @Failure 500 {object} ErrorResponse
-// @Router /meshtastic/nodes [get]
+// @Router /hal/meshtastic/nodes [get]
 func (h *HALHandler) GetMeshtasticNodes(w http.ResponseWriter, r *http.Request) {
 	port := r.URL.Query().Get("port")
 	if port == "" {
 		port = "/dev/ttyUSB0"
 	}
 
-	output, err := exec.Command("meshtastic", "--port", port, "--nodes").Output()
-	if err != nil {
-		errorResponse(w, http.StatusInternalServerError, "failed to get nodes: "+err.Error())
+	// HF05-01: Validate serial port path
+	if err := validateSerialPort(port); err != nil {
+		errorResponse(w, http.StatusBadRequest, err.Error())
 		return
 	}
 
-	nodes := h.parseMeshtasticNodes(string(output))
+	// HF05-11: Use execWithTimeout
+	output, err := execWithTimeout(r.Context(), "meshtastic", "--port", port, "--nodes")
+	if err != nil {
+		log.Printf("meshtastic: failed to get nodes: %v", err)
+		errorResponse(w, http.StatusInternalServerError, sanitizeExecError("get mesh nodes", err))
+		return
+	}
+
+	nodes := h.parseMeshtasticNodes(output)
 	jsonResponse(w, http.StatusOK, map[string]interface{}{
 		"count": len(nodes),
 		"nodes": nodes,
@@ -181,26 +198,34 @@ func (h *HALHandler) GetMeshtasticNodes(w http.ResponseWriter, r *http.Request) 
 // @Produce json
 // @Param port query string false "Serial port" default(/dev/ttyUSB0)
 // @Success 200 {object} MeshtasticPosition
+// @Failure 400 {object} ErrorResponse
 // @Failure 500 {object} ErrorResponse
-// @Router /meshtastic/position [get]
+// @Router /hal/meshtastic/position [get]
 func (h *HALHandler) GetMeshtasticPosition(w http.ResponseWriter, r *http.Request) {
 	port := r.URL.Query().Get("port")
 	if port == "" {
 		port = "/dev/ttyUSB0"
 	}
 
+	// HF05-01: Validate serial port path
+	if err := validateSerialPort(port); err != nil {
+		errorResponse(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
 	position := MeshtasticPosition{
 		Valid: false,
 	}
 
-	output, err := exec.Command("meshtastic", "--port", port, "--info").Output()
+	// HF05-11: Use execWithTimeout
+	output, err := execWithTimeout(r.Context(), "meshtastic", "--port", port, "--info")
 	if err != nil {
 		jsonResponse(w, http.StatusOK, position)
 		return
 	}
 
 	// Parse position from info output
-	lines := strings.Split(string(output), "\n")
+	lines := strings.Split(output, "\n")
 	for _, line := range lines {
 		line = strings.TrimSpace(line)
 		if strings.HasPrefix(line, "latitude:") {
@@ -235,21 +260,38 @@ func (h *HALHandler) GetMeshtasticPosition(w http.ResponseWriter, r *http.Reques
 // @Success 200 {object} SuccessResponse
 // @Failure 400 {object} ErrorResponse
 // @Failure 500 {object} ErrorResponse
-// @Router /meshtastic/send [post]
+// @Router /hal/meshtastic/send [post]
 func (h *HALHandler) SendMeshtasticMessage(w http.ResponseWriter, r *http.Request) {
 	port := r.URL.Query().Get("port")
 	if port == "" {
 		port = "/dev/ttyUSB0"
 	}
 
-	var req MeshtasticMessage
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		errorResponse(w, http.StatusBadRequest, "invalid request: "+err.Error())
+	// HF05-01: Validate serial port path
+	if err := validateSerialPort(port); err != nil {
+		errorResponse(w, http.StatusBadRequest, err.Error())
 		return
 	}
 
-	if req.Text == "" {
-		errorResponse(w, http.StatusBadRequest, "text required")
+	// HF05-09: Apply body limit
+	r = limitBody(r, 1<<20)
+
+	var req MeshtasticMessage
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		errorResponse(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+
+	// HF05-05: Validate message text (exec.Command array prevents injection,
+	// but validate for correctness — Meshtastic max 228 chars, no leading dash)
+	if err := validateMeshtasticText(req.Text); err != nil {
+		errorResponse(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	// HF05-05: Validate destination node ID if provided
+	if err := validateMeshtasticNodeID(req.Destination); err != nil {
+		errorResponse(w, http.StatusBadRequest, err.Error())
 		return
 	}
 
@@ -263,9 +305,10 @@ func (h *HALHandler) SendMeshtasticMessage(w http.ResponseWriter, r *http.Reques
 		args = append(args, "--ch-index", strconv.Itoa(req.Channel))
 	}
 
-	cmd := exec.Command("meshtastic", args...)
-	if output, err := cmd.CombinedOutput(); err != nil {
-		errorResponse(w, http.StatusInternalServerError, fmt.Sprintf("send failed: %s - %s", err, string(output)))
+	// HF05-11: Use execWithTimeout
+	if _, err := execWithTimeout(r.Context(), "meshtastic", args...); err != nil {
+		log.Printf("meshtastic: send failed: %v", err)
+		errorResponse(w, http.StatusInternalServerError, sanitizeExecError("send mesh message", err))
 		return
 	}
 
@@ -276,7 +319,7 @@ func (h *HALHandler) SendMeshtasticMessage(w http.ResponseWriter, r *http.Reques
 // Helper Functions
 // ============================================================================
 
-func (h *HALHandler) scanMeshtasticDevices() []MeshtasticDevice {
+func (h *HALHandler) scanMeshtasticDevices(ctx context.Context) []MeshtasticDevice {
 	var devices []MeshtasticDevice
 
 	// Check common serial ports
@@ -293,11 +336,11 @@ func (h *HALHandler) scanMeshtasticDevices() []MeshtasticDevice {
 				Name: "Meshtastic Device",
 			}
 
-			// Try to get device info
-			output, err := exec.Command("meshtastic", "--port", port, "--info").Output()
+			// HF05-11: Try to get device info with timeout
+			output, err := execWithTimeout(ctx, "meshtastic", "--port", port, "--info")
 			if err == nil {
 				device.Connected = true
-				info := h.parseMeshtasticInfo(string(output), port)
+				info := h.parseMeshtasticInfo(output, port)
 				device.NodeID = info.NodeID
 				device.LongName = info.LongName
 				device.ShortName = info.ShortName
@@ -331,7 +374,8 @@ func (h *HALHandler) parseMeshtasticInfo(output string, port string) MeshtasticD
 				if endIdx := strings.Index(numStr, ","); endIdx != -1 {
 					numStr = strings.TrimSpace(numStr[:endIdx])
 					if num, err := strconv.Atoi(numStr); err == nil {
-						device.NodeID = fmt.Sprintf("!%08x", num)
+						device.NodeID = strings.ToLower(strconv.FormatInt(int64(num), 16))
+						device.NodeID = "!" + device.NodeID
 					}
 				}
 			}
@@ -382,6 +426,7 @@ func (h *HALHandler) parseMeshtasticNodes(output string) []MeshtasticNode {
 }
 
 // SetMeshtasticChannel sets the Meshtastic channel.
+// @Router /hal/meshtastic/channel [post]
 func (h *HALHandler) SetMeshtasticChannel(w http.ResponseWriter, r *http.Request) {
 	errorResponse(w, http.StatusNotImplemented, "Meshtastic channel configuration not yet implemented")
 }

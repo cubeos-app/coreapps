@@ -2,10 +2,10 @@ package handlers
 
 import (
 	"bufio"
+	"context"
+	"log"
 	"net/http"
 	"os"
-	"os/exec"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -71,7 +71,7 @@ type GPSPosition struct {
 // @Produce json
 // @Success 200 {object} GPSDevicesResponse
 // @Failure 500 {object} ErrorResponse
-// @Router /gps/devices [get]
+// @Router /hal/gps/devices [get]
 func (h *HALHandler) GetGPSDevices(w http.ResponseWriter, r *http.Request) {
 	devices := h.scanGPSDevices()
 	jsonResponse(w, http.StatusOK, map[string]interface{}{
@@ -88,15 +88,22 @@ func (h *HALHandler) GetGPSDevices(w http.ResponseWriter, r *http.Request) {
 // @Produce json
 // @Param port query string false "GPS port" default(/dev/ttyUSB0)
 // @Success 200 {object} GPSStatus
+// @Failure 400 {object} ErrorResponse
 // @Failure 500 {object} ErrorResponse
-// @Router /gps/status [get]
+// @Router /hal/gps/status [get]
 func (h *HALHandler) GetGPSStatus(w http.ResponseWriter, r *http.Request) {
 	port := r.URL.Query().Get("port")
 	if port == "" {
 		port = "/dev/ttyUSB0"
 	}
 
-	status := h.readGPSStatus(port)
+	// HF05-01: Validate serial port path
+	if err := validateSerialPort(port); err != nil {
+		errorResponse(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	status := h.readGPSStatus(r.Context(), port)
 	jsonResponse(w, http.StatusOK, status)
 }
 
@@ -107,14 +114,21 @@ func (h *HALHandler) GetGPSStatus(w http.ResponseWriter, r *http.Request) {
 // @Accept json
 // @Produce json
 // @Param port query string false "GPS port" default(/dev/ttyUSB0)
-// @Param timeout query int false "Read timeout in seconds" default(5)
+// @Param timeout query int false "Read timeout in seconds (1-30)" default(5)
 // @Success 200 {object} GPSPosition
+// @Failure 400 {object} ErrorResponse
 // @Failure 500 {object} ErrorResponse
-// @Router /gps/position [get]
+// @Router /hal/gps/position [get]
 func (h *HALHandler) GetGPSPosition(w http.ResponseWriter, r *http.Request) {
 	port := r.URL.Query().Get("port")
 	if port == "" {
 		port = "/dev/ttyUSB0"
+	}
+
+	// HF05-01: Validate serial port path
+	if err := validateSerialPort(port); err != nil {
+		errorResponse(w, http.StatusBadRequest, err.Error())
+		return
 	}
 
 	timeoutParam := r.URL.Query().Get("timeout")
@@ -125,7 +139,12 @@ func (h *HALHandler) GetGPSPosition(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	position := h.readGPSPosition(port, timeout)
+	// HF05-10: Bound GPS timeout to max 30 seconds
+	if timeout > 30 {
+		timeout = 30
+	}
+
+	position := h.readGPSPosition(r.Context(), port, timeout)
 	jsonResponse(w, http.StatusOK, position)
 }
 
@@ -151,16 +170,15 @@ func (h *HALHandler) scanGPSDevices() []GPSDevice {
 				Active:   true,
 			}
 
-			// Try to get USB device info
+			// Try to get USB device info — devName comes from hardcoded ports list (safe)
 			if strings.Contains(port, "USB") || strings.Contains(port, "ACM") {
-				// Get device info from sysfs
-				devName := filepath.Base(port)
+				devName := strings.TrimPrefix(port, "/dev/")
 				sysPath := "/sys/class/tty/" + devName + "/device"
 
-				if vendorData, err := os.ReadFile(filepath.Join(sysPath, "../manufacturer")); err == nil {
+				if vendorData, err := os.ReadFile(sysPath + "/../manufacturer"); err == nil {
 					device.Vendor = strings.TrimSpace(string(vendorData))
 				}
-				if productData, err := os.ReadFile(filepath.Join(sysPath, "../product")); err == nil {
+				if productData, err := os.ReadFile(sysPath + "/../product"); err == nil {
 					device.Product = strings.TrimSpace(string(productData))
 					device.Name = device.Product
 				}
@@ -177,7 +195,7 @@ func (h *HALHandler) scanGPSDevices() []GPSDevice {
 	return devices
 }
 
-func (h *HALHandler) readGPSStatus(port string) GPSStatus {
+func (h *HALHandler) readGPSStatus(ctx context.Context, port string) GPSStatus {
 	status := GPSStatus{
 		Available: false,
 	}
@@ -190,7 +208,7 @@ func (h *HALHandler) readGPSStatus(port string) GPSStatus {
 	status.Available = true
 
 	// Try to read NMEA sentences
-	position := h.readGPSPosition(port, 3)
+	position := h.readGPSPosition(ctx, port, 3)
 	if position.Valid {
 		status.HasFix = true
 		status.Satellites = position.Satellites
@@ -215,106 +233,120 @@ func (h *HALHandler) readGPSStatus(port string) GPSStatus {
 	return status
 }
 
-func (h *HALHandler) readGPSPosition(port string, timeout int) GPSPosition {
+// HF05-06: Fixed goroutine leak — scanner now runs synchronously in the calling goroutine.
+// A helper goroutine closes the file on context expiry to unblock scanner.Scan().
+// Old code: unbuffered done channel + fire-and-forget goroutine → goroutine stuck on Scan()
+// after timeout, then blocked forever on unbuffered channel send.
+func (h *HALHandler) readGPSPosition(ctx context.Context, port string, timeout int) GPSPosition {
 	position := GPSPosition{
 		Valid:     false,
 		Timestamp: time.Now().UTC().Format(time.RFC3339),
 	}
 
-	// Configure serial port and read
-	// First, set baud rate
-	exec.Command("stty", "-F", port, "9600", "raw", "-echo").Run()
+	// HF05-11: Configure serial port with bounded timeout
+	sttyCtx, sttyCancel := context.WithTimeout(ctx, 5*time.Second)
+	defer sttyCancel()
+	if _, err := execWithTimeout(sttyCtx, "stty", "-F", port, "9600", "raw", "-echo"); err != nil {
+		log.Printf("gps: stty configure failed for %s: %v", port, err)
+	}
 
-	// Open port with timeout
+	// Open port
 	f, err := os.Open(port)
 	if err != nil {
 		return position
 	}
 	defer f.Close()
 
-	// Read with timeout
-	done := make(chan bool)
+	// Create a timeout context for the read operation
+	readCtx, readCancel := context.WithTimeout(ctx, time.Duration(timeout)*time.Second)
+	defer readCancel()
+
+	// Close file on context expiry to unblock blocking scanner.Scan()
+	closeDone := make(chan struct{})
 	go func() {
-		scanner := bufio.NewScanner(f)
-		deadline := time.Now().Add(time.Duration(timeout) * time.Second)
+		select {
+		case <-readCtx.Done():
+			f.Close() // unblocks scanner.Scan()
+		case <-closeDone:
+		}
+	}()
+	defer close(closeDone)
 
-		for scanner.Scan() && time.Now().Before(deadline) {
-			line := scanner.Text()
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		if readCtx.Err() != nil {
+			break
+		}
 
-			// Parse GGA sentence (position + fix quality)
-			if strings.HasPrefix(line, "$GPGGA") || strings.HasPrefix(line, "$GNGGA") {
-				parts := strings.Split(line, ",")
-				if len(parts) >= 10 {
-					// Fix quality
-					if fq, err := strconv.Atoi(parts[6]); err == nil {
-						position.FixQuality = fq
-						position.Valid = fq > 0
-					}
+		line := scanner.Text()
 
-					// Satellites
-					if sats, err := strconv.Atoi(parts[7]); err == nil {
-						position.Satellites = sats
-					}
+		// Parse GGA sentence (position + fix quality)
+		if strings.HasPrefix(line, "$GPGGA") || strings.HasPrefix(line, "$GNGGA") {
+			parts := strings.Split(line, ",")
+			if len(parts) >= 10 {
+				// Fix quality
+				if fq, err := strconv.Atoi(parts[6]); err == nil {
+					position.FixQuality = fq
+					position.Valid = fq > 0
+				}
 
-					// HDOP
-					if hdop, err := strconv.ParseFloat(parts[8], 64); err == nil {
-						position.HDOP = hdop
-					}
+				// Satellites
+				if sats, err := strconv.Atoi(parts[7]); err == nil {
+					position.Satellites = sats
+				}
 
-					// Latitude
-					if parts[2] != "" && parts[3] != "" {
-						if lat := parseNMEACoord(parts[2], parts[3]); lat != 0 {
-							position.Latitude = lat
-						}
-					}
+				// HDOP
+				if hdop, err := strconv.ParseFloat(parts[8], 64); err == nil {
+					position.HDOP = hdop
+				}
 
-					// Longitude
-					if parts[4] != "" && parts[5] != "" {
-						if lon := parseNMEACoord(parts[4], parts[5]); lon != 0 {
-							position.Longitude = lon
-						}
-					}
-
-					// Altitude
-					if parts[9] != "" {
-						if alt, err := strconv.ParseFloat(parts[9], 64); err == nil {
-							position.Altitude = alt
-						}
+				// Latitude
+				if parts[2] != "" && parts[3] != "" {
+					if lat := parseNMEACoord(parts[2], parts[3]); lat != 0 {
+						position.Latitude = lat
 					}
 				}
-			}
 
-			// Parse RMC sentence (speed + course)
-			if strings.HasPrefix(line, "$GPRMC") || strings.HasPrefix(line, "$GNRMC") {
-				parts := strings.Split(line, ",")
-				if len(parts) >= 9 {
-					// Speed (knots to km/h)
-					if parts[7] != "" {
-						if speed, err := strconv.ParseFloat(parts[7], 64); err == nil {
-							position.Speed = speed * 1.852 // knots to km/h
-						}
-					}
-
-					// Course
-					if parts[8] != "" {
-						if course, err := strconv.ParseFloat(parts[8], 64); err == nil {
-							position.Course = course
-						}
+				// Longitude
+				if parts[4] != "" && parts[5] != "" {
+					if lon := parseNMEACoord(parts[4], parts[5]); lon != 0 {
+						position.Longitude = lon
 					}
 				}
-			}
 
-			// If we have a valid position, we're done
-			if position.Valid && position.Latitude != 0 {
-				break
+				// Altitude
+				if parts[9] != "" {
+					if alt, err := strconv.ParseFloat(parts[9], 64); err == nil {
+						position.Altitude = alt
+					}
+				}
 			}
 		}
-		done <- true
-	}()
 
-	select {
-	case <-done:
-	case <-time.After(time.Duration(timeout) * time.Second):
+		// Parse RMC sentence (speed + course)
+		if strings.HasPrefix(line, "$GPRMC") || strings.HasPrefix(line, "$GNRMC") {
+			parts := strings.Split(line, ",")
+			if len(parts) >= 9 {
+				// Speed (knots to km/h)
+				if parts[7] != "" {
+					if speed, err := strconv.ParseFloat(parts[7], 64); err == nil {
+						position.Speed = speed * 1.852 // knots to km/h
+					}
+				}
+
+				// Course
+				if parts[8] != "" {
+					if course, err := strconv.ParseFloat(parts[8], 64); err == nil {
+						position.Course = course
+					}
+				}
+			}
+		}
+
+		// If we have a valid position, we're done
+		if position.Valid && position.Latitude != 0 {
+			break
+		}
 	}
 
 	return position
