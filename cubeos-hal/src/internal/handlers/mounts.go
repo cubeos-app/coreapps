@@ -1,11 +1,12 @@
 package handlers
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"os"
-	"os/exec"
 	"strings"
 )
 
@@ -63,6 +64,14 @@ type UnmountRequest struct {
 	Lazy       bool   `json:"lazy,omitempty" example:"false"`
 }
 
+// CheckSMBRequest represents SMB server check request.
+// @Description SMB server check parameters (password in body, not query string)
+type CheckSMBRequest struct {
+	Server   string `json:"server" example:"192.168.1.100"`
+	Username string `json:"username,omitempty" example:"user"`
+	Password string `json:"password,omitempty" example:"secret"`
+}
+
 // ============================================================================
 // Network Mount Handlers
 // ============================================================================
@@ -96,20 +105,57 @@ func (h *HALHandler) GetNetworkMounts(w http.ResponseWriter, r *http.Request) {
 // @Failure 500 {object} ErrorResponse
 // @Router /mounts/smb [post]
 func (h *HALHandler) MountSMB(w http.ResponseWriter, r *http.Request) {
+	r = limitBody(r, 1<<20)
 	var req SMBMountRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		errorResponse(w, http.StatusBadRequest, "invalid request: "+err.Error())
+		errorResponse(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
 
-	if req.Server == "" || req.Share == "" || req.Mountpoint == "" {
-		errorResponse(w, http.StatusBadRequest, "server, share, and mountpoint required")
+	// Validate server
+	if err := validateHostnameOrIP(req.Server); err != nil {
+		errorResponse(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	// Validate share name
+	if err := validateShareName(req.Share); err != nil {
+		errorResponse(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	// Validate mountpoint (restricts to /mnt/ or /media/) — HF03-05/08
+	if err := validateMountpoint(req.Mountpoint); err != nil {
+		errorResponse(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	// Validate SMB version
+	if err := validateSMBVersion(req.Version); err != nil {
+		errorResponse(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	// Validate credential fields against comma injection — HF03-03
+	if req.Username != "" {
+		if err := validateSMBCredentialField(req.Username, "username"); err != nil {
+			errorResponse(w, http.StatusBadRequest, err.Error())
+			return
+		}
+	}
+	if req.Password != "" {
+		if err := validateSMBCredentialField(req.Password, "password"); err != nil {
+			errorResponse(w, http.StatusBadRequest, err.Error())
+			return
+		}
+	}
+	if req.Domain != "" {
+		if err := validateSMBCredentialField(req.Domain, "domain"); err != nil {
+			errorResponse(w, http.StatusBadRequest, err.Error())
+			return
+		}
+	}
 
-	// Create mountpoint
+	// Create mountpoint (already validated to be under /mnt/ or /media/)
 	if err := os.MkdirAll(req.Mountpoint, 0755); err != nil {
-		errorResponse(w, http.StatusInternalServerError, "failed to create mountpoint: "+err.Error())
+		log.Printf("MountSMB MkdirAll(%s): %v", req.Mountpoint, err)
+		errorResponse(w, http.StatusInternalServerError, "failed to create mountpoint")
 		return
 	}
 
@@ -140,9 +186,10 @@ func (h *HALHandler) MountSMB(w http.ResponseWriter, r *http.Request) {
 	optString := strings.Join(options, ",")
 
 	// Mount
-	cmd := exec.Command("mount", "-t", "cifs", "-o", optString, source, req.Mountpoint)
-	if output, err := cmd.CombinedOutput(); err != nil {
-		errorResponse(w, http.StatusInternalServerError, fmt.Sprintf("mount failed: %s - %s", err, string(output)))
+	out, err := execWithTimeout(r.Context(), "mount", "-t", "cifs", "-o", optString, source, req.Mountpoint)
+	if err != nil {
+		log.Printf("MountSMB mount(%s -> %s): %v: %s", source, req.Mountpoint, err, out)
+		errorResponse(w, http.StatusInternalServerError, sanitizeExecError("SMB mount", err))
 		return
 	}
 
@@ -161,20 +208,43 @@ func (h *HALHandler) MountSMB(w http.ResponseWriter, r *http.Request) {
 // @Failure 500 {object} ErrorResponse
 // @Router /mounts/nfs [post]
 func (h *HALHandler) MountNFS(w http.ResponseWriter, r *http.Request) {
+	r = limitBody(r, 1<<20)
 	var req NFSMountRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		errorResponse(w, http.StatusBadRequest, "invalid request: "+err.Error())
+		errorResponse(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
 
-	if req.Server == "" || req.Export == "" || req.Mountpoint == "" {
-		errorResponse(w, http.StatusBadRequest, "server, export, and mountpoint required")
+	// Validate server
+	if err := validateHostnameOrIP(req.Server); err != nil {
+		errorResponse(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	// Validate export path
+	if err := validateExportPath(req.Export); err != nil {
+		errorResponse(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	// Validate mountpoint (restricts to /mnt/ or /media/) — HF03-05/08
+	if err := validateMountpoint(req.Mountpoint); err != nil {
+		errorResponse(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	// Validate NFS options against allowlist — HF03-04
+	if err := validateNFSOptions(req.Options); err != nil {
+		errorResponse(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	// Validate NFS version
+	if err := validateNFSVersion(req.Version); err != nil {
+		errorResponse(w, http.StatusBadRequest, err.Error())
 		return
 	}
 
-	// Create mountpoint
+	// Create mountpoint (already validated to be under /mnt/ or /media/)
 	if err := os.MkdirAll(req.Mountpoint, 0755); err != nil {
-		errorResponse(w, http.StatusInternalServerError, "failed to create mountpoint: "+err.Error())
+		log.Printf("MountNFS MkdirAll(%s): %v", req.Mountpoint, err)
+		errorResponse(w, http.StatusInternalServerError, "failed to create mountpoint")
 		return
 	}
 
@@ -197,9 +267,10 @@ func (h *HALHandler) MountNFS(w http.ResponseWriter, r *http.Request) {
 	args = append(args, source, req.Mountpoint)
 
 	// Mount
-	cmd := exec.Command("mount", args...)
-	if output, err := cmd.CombinedOutput(); err != nil {
-		errorResponse(w, http.StatusInternalServerError, fmt.Sprintf("mount failed: %s - %s", err, string(output)))
+	out, err := execWithTimeout(r.Context(), "mount", args...)
+	if err != nil {
+		log.Printf("MountNFS mount(%s -> %s): %v: %s", source, req.Mountpoint, err, out)
+		errorResponse(w, http.StatusInternalServerError, sanitizeExecError("NFS mount", err))
 		return
 	}
 
@@ -218,19 +289,21 @@ func (h *HALHandler) MountNFS(w http.ResponseWriter, r *http.Request) {
 // @Failure 500 {object} ErrorResponse
 // @Router /mounts/unmount [post]
 func (h *HALHandler) UnmountNetwork(w http.ResponseWriter, r *http.Request) {
+	r = limitBody(r, 1<<20)
 	var req UnmountRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		errorResponse(w, http.StatusBadRequest, "invalid request: "+err.Error())
+		errorResponse(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
 
-	if req.Mountpoint == "" {
-		errorResponse(w, http.StatusBadRequest, "mountpoint required")
+	// Validate mountpoint — restrict to /mnt/ and /media/ only (HF03-05)
+	if err := validateMountpoint(req.Mountpoint); err != nil {
+		errorResponse(w, http.StatusBadRequest, err.Error())
 		return
 	}
 
 	// Sync first
-	exec.Command("sync").Run()
+	execWithTimeout(r.Context(), "sync")
 
 	// Build umount command
 	args := []string{}
@@ -242,9 +315,10 @@ func (h *HALHandler) UnmountNetwork(w http.ResponseWriter, r *http.Request) {
 	}
 	args = append(args, req.Mountpoint)
 
-	cmd := exec.Command("umount", args...)
-	if output, err := cmd.CombinedOutput(); err != nil {
-		errorResponse(w, http.StatusInternalServerError, fmt.Sprintf("unmount failed: %s - %s", err, string(output)))
+	out, err := execWithTimeout(r.Context(), "umount", args...)
+	if err != nil {
+		log.Printf("UnmountNetwork(%s): %v: %s", req.Mountpoint, err, out)
+		errorResponse(w, http.StatusInternalServerError, sanitizeExecError("unmount", err))
 		return
 	}
 
@@ -257,45 +331,55 @@ func (h *HALHandler) UnmountNetwork(w http.ResponseWriter, r *http.Request) {
 // @Tags Mounts
 // @Accept json
 // @Produce json
-// @Param server query string true "Server address" example(192.168.1.100)
-// @Param username query string false "Username"
-// @Param password query string false "Password"
+// @Param request body CheckSMBRequest true "SMB check parameters"
 // @Success 200 {object} map[string]interface{}
 // @Failure 400 {object} ErrorResponse
 // @Failure 500 {object} ErrorResponse
-// @Router /mounts/smb/check [get]
+// @Router /mounts/smb/check [post]
 func (h *HALHandler) CheckSMBServer(w http.ResponseWriter, r *http.Request) {
-	server := r.URL.Query().Get("server")
-	if server == "" {
-		errorResponse(w, http.StatusBadRequest, "server required")
+	r = limitBody(r, 1<<20)
+	var req CheckSMBRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		errorResponse(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
 
-	username := r.URL.Query().Get("username")
-	password := r.URL.Query().Get("password")
+	// Validate server
+	if err := validateHostnameOrIP(req.Server); err != nil {
+		errorResponse(w, http.StatusBadRequest, err.Error())
+		return
+	}
 
 	// Use smbclient to list shares
-	args := []string{"-L", server, "-N"} // -N for no password
-	if username != "" {
-		args = []string{"-L", server, "-U", username}
-		if password != "" {
-			args = []string{"-L", server, "-U", username + "%" + password}
+	args := []string{"-L", req.Server, "-N"} // -N for no password
+	if req.Username != "" {
+		if err := validateSMBCredentialField(req.Username, "username"); err != nil {
+			errorResponse(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		if req.Password != "" {
+			if err := validateSMBCredentialField(req.Password, "password"); err != nil {
+				errorResponse(w, http.StatusBadRequest, err.Error())
+				return
+			}
+			args = []string{"-L", req.Server, "-U", req.Username + "%" + req.Password}
+		} else {
+			args = []string{"-L", req.Server, "-U", req.Username}
 		}
 	}
 
-	cmd := exec.Command("smbclient", args...)
-	output, err := cmd.CombinedOutput()
+	out, err := execWithTimeout(r.Context(), "smbclient", args...)
 	if err != nil {
-		errorResponse(w, http.StatusInternalServerError, fmt.Sprintf("SMB check failed: %s - %s", err, string(output)))
+		log.Printf("CheckSMBServer(%s): %v: %s", req.Server, err, out)
+		errorResponse(w, http.StatusInternalServerError, sanitizeExecError("SMB check", err))
 		return
 	}
 
 	// Parse shares from output
 	var shares []string
-	lines := strings.Split(string(output), "\n")
+	lines := strings.Split(out, "\n")
 	for _, line := range lines {
 		line = strings.TrimSpace(line)
-		// Share lines typically start with share name
 		if strings.Contains(line, "Disk") || strings.Contains(line, "IPC") || strings.Contains(line, "Printer") {
 			parts := strings.Fields(line)
 			if len(parts) >= 1 {
@@ -305,7 +389,7 @@ func (h *HALHandler) CheckSMBServer(w http.ResponseWriter, r *http.Request) {
 	}
 
 	jsonResponse(w, http.StatusOK, map[string]interface{}{
-		"server":    server,
+		"server":    req.Server,
 		"available": true,
 		"shares":    shares,
 	})
@@ -324,22 +408,22 @@ func (h *HALHandler) CheckSMBServer(w http.ResponseWriter, r *http.Request) {
 // @Router /mounts/nfs/check [get]
 func (h *HALHandler) CheckNFSServer(w http.ResponseWriter, r *http.Request) {
 	server := r.URL.Query().Get("server")
-	if server == "" {
-		errorResponse(w, http.StatusBadRequest, "server required")
+	if err := validateHostnameOrIP(server); err != nil {
+		errorResponse(w, http.StatusBadRequest, err.Error())
 		return
 	}
 
 	// Use showmount to list exports
-	cmd := exec.Command("showmount", "-e", server)
-	output, err := cmd.CombinedOutput()
+	out, err := execWithTimeout(r.Context(), "showmount", "-e", server)
 	if err != nil {
-		errorResponse(w, http.StatusInternalServerError, fmt.Sprintf("NFS check failed: %s - %s", err, string(output)))
+		log.Printf("CheckNFSServer(%s): %v: %s", server, err, out)
+		errorResponse(w, http.StatusInternalServerError, sanitizeExecError("NFS check", err))
 		return
 	}
 
 	// Parse exports from output
 	var exports []string
-	lines := strings.Split(string(output), "\n")
+	lines := strings.Split(out, "\n")
 	for i, line := range lines {
 		if i == 0 { // Skip header
 			continue
@@ -413,13 +497,13 @@ func (h *HALHandler) scanNetworkMounts() []NetworkMount {
 }
 
 func (h *HALHandler) getMountUsage(mountpoint string) map[string]int64 {
-	cmd := exec.Command("df", "-B1", mountpoint)
-	output, err := cmd.Output()
+	ctx := context.Background()
+	out, err := execWithTimeout(ctx, "df", "-B1", mountpoint)
 	if err != nil {
 		return nil
 	}
 
-	lines := strings.Split(string(output), "\n")
+	lines := strings.Split(out, "\n")
 	if len(lines) < 2 {
 		return nil
 	}

@@ -272,7 +272,7 @@ func SetupRoutes(r chi.Router, h *HALHandler) {
 		r.Post("/smb", h.MountSMB)
 		r.Post("/nfs", h.MountNFS)
 		r.Post("/unmount", h.UnmountNetwork)
-		r.Get("/smb/check", h.CheckSMBServer)
+		r.Post("/smb/check", h.CheckSMBServer)
 		r.Get("/nfs/check", h.CheckNFSServer)
 	})
 }

@@ -1,10 +1,13 @@
 package handlers
 
 import (
+	"bufio"
+	"context"
 	"fmt"
+	"log"
+	"net"
 	"net/http"
 	"os"
-	"os/exec"
 	"strings"
 
 	"github.com/go-chi/chi/v5"
@@ -93,14 +96,15 @@ func (h *HALHandler) GetVPNStatus(w http.ResponseWriter, r *http.Request) {
 // @Router /vpn/wireguard/up/{name} [post]
 func (h *HALHandler) WireGuardUp(w http.ResponseWriter, r *http.Request) {
 	name := chi.URLParam(r, "name")
-	if name == "" {
-		errorResponse(w, http.StatusBadRequest, "interface name required")
+	if !isValidVPNName(name) {
+		errorResponse(w, http.StatusBadRequest, "invalid VPN interface name")
 		return
 	}
 
-	cmd := exec.Command("wg-quick", "up", name)
-	if output, err := cmd.CombinedOutput(); err != nil {
-		errorResponse(w, http.StatusInternalServerError, fmt.Sprintf("failed to bring up WireGuard: %s - %s", err, string(output)))
+	out, err := execWithTimeout(r.Context(), "wg-quick", "up", name)
+	if err != nil {
+		log.Printf("WireGuardUp(%s): %v: %s", name, err, out)
+		errorResponse(w, http.StatusInternalServerError, sanitizeExecError("WireGuard up", err))
 		return
 	}
 
@@ -120,14 +124,15 @@ func (h *HALHandler) WireGuardUp(w http.ResponseWriter, r *http.Request) {
 // @Router /vpn/wireguard/down/{name} [post]
 func (h *HALHandler) WireGuardDown(w http.ResponseWriter, r *http.Request) {
 	name := chi.URLParam(r, "name")
-	if name == "" {
-		errorResponse(w, http.StatusBadRequest, "interface name required")
+	if !isValidVPNName(name) {
+		errorResponse(w, http.StatusBadRequest, "invalid VPN interface name")
 		return
 	}
 
-	cmd := exec.Command("wg-quick", "down", name)
-	if output, err := cmd.CombinedOutput(); err != nil {
-		errorResponse(w, http.StatusInternalServerError, fmt.Sprintf("failed to bring down WireGuard: %s - %s", err, string(output)))
+	out, err := execWithTimeout(r.Context(), "wg-quick", "down", name)
+	if err != nil {
+		log.Printf("WireGuardDown(%s): %v: %s", name, err, out)
+		errorResponse(w, http.StatusInternalServerError, sanitizeExecError("WireGuard down", err))
 		return
 	}
 
@@ -151,15 +156,16 @@ func (h *HALHandler) WireGuardDown(w http.ResponseWriter, r *http.Request) {
 // @Router /vpn/openvpn/up/{name} [post]
 func (h *HALHandler) OpenVPNUp(w http.ResponseWriter, r *http.Request) {
 	name := chi.URLParam(r, "name")
-	if name == "" {
-		errorResponse(w, http.StatusBadRequest, "connection name required")
+	if !isValidVPNName(name) {
+		errorResponse(w, http.StatusBadRequest, "invalid VPN connection name")
 		return
 	}
 
 	serviceName := fmt.Sprintf("openvpn-client@%s", name)
-	cmd := exec.Command("systemctl", "start", serviceName)
-	if output, err := cmd.CombinedOutput(); err != nil {
-		errorResponse(w, http.StatusInternalServerError, fmt.Sprintf("failed to start OpenVPN: %s - %s", err, string(output)))
+	out, err := execWithTimeout(r.Context(), "systemctl", "start", serviceName)
+	if err != nil {
+		log.Printf("OpenVPNUp(%s): %v: %s", name, err, out)
+		errorResponse(w, http.StatusInternalServerError, sanitizeExecError("OpenVPN start", err))
 		return
 	}
 
@@ -179,15 +185,16 @@ func (h *HALHandler) OpenVPNUp(w http.ResponseWriter, r *http.Request) {
 // @Router /vpn/openvpn/down/{name} [post]
 func (h *HALHandler) OpenVPNDown(w http.ResponseWriter, r *http.Request) {
 	name := chi.URLParam(r, "name")
-	if name == "" {
-		errorResponse(w, http.StatusBadRequest, "connection name required")
+	if !isValidVPNName(name) {
+		errorResponse(w, http.StatusBadRequest, "invalid VPN connection name")
 		return
 	}
 
 	serviceName := fmt.Sprintf("openvpn-client@%s", name)
-	cmd := exec.Command("systemctl", "stop", serviceName)
-	if output, err := cmd.CombinedOutput(); err != nil {
-		errorResponse(w, http.StatusInternalServerError, fmt.Sprintf("failed to stop OpenVPN: %s - %s", err, string(output)))
+	out, err := execWithTimeout(r.Context(), "systemctl", "stop", serviceName)
+	if err != nil {
+		log.Printf("OpenVPNDown(%s): %v: %s", name, err, out)
+		errorResponse(w, http.StatusInternalServerError, sanitizeExecError("OpenVPN stop", err))
 		return
 	}
 
@@ -222,9 +229,10 @@ func (h *HALHandler) GetTorStatus(w http.ResponseWriter, r *http.Request) {
 // @Failure 500 {object} ErrorResponse
 // @Router /vpn/tor/start [post]
 func (h *HALHandler) StartTor(w http.ResponseWriter, r *http.Request) {
-	cmd := exec.Command("systemctl", "start", "tor")
-	if output, err := cmd.CombinedOutput(); err != nil {
-		errorResponse(w, http.StatusInternalServerError, fmt.Sprintf("failed to start Tor: %s - %s", err, string(output)))
+	out, err := execWithTimeout(r.Context(), "systemctl", "start", "tor")
+	if err != nil {
+		log.Printf("StartTor: %v: %s", err, out)
+		errorResponse(w, http.StatusInternalServerError, sanitizeExecError("Tor start", err))
 		return
 	}
 
@@ -241,9 +249,10 @@ func (h *HALHandler) StartTor(w http.ResponseWriter, r *http.Request) {
 // @Failure 500 {object} ErrorResponse
 // @Router /vpn/tor/stop [post]
 func (h *HALHandler) StopTor(w http.ResponseWriter, r *http.Request) {
-	cmd := exec.Command("systemctl", "stop", "tor")
-	if output, err := cmd.CombinedOutput(); err != nil {
-		errorResponse(w, http.StatusInternalServerError, fmt.Sprintf("failed to stop Tor: %s - %s", err, string(output)))
+	out, err := execWithTimeout(r.Context(), "systemctl", "stop", "tor")
+	if err != nil {
+		log.Printf("StopTor: %v: %s", err, out)
+		errorResponse(w, http.StatusInternalServerError, sanitizeExecError("Tor stop", err))
 		return
 	}
 
@@ -260,10 +269,11 @@ func (h *HALHandler) StopTor(w http.ResponseWriter, r *http.Request) {
 // @Failure 500 {object} ErrorResponse
 // @Router /vpn/tor/newcircuit [post]
 func (h *HALHandler) NewTorCircuit(w http.ResponseWriter, r *http.Request) {
-	// Send NEWNYM signal to Tor control port
-	cmd := exec.Command("bash", "-c", `echo -e 'AUTHENTICATE ""\nSIGNAL NEWNYM\nQUIT' | nc localhost 9051`)
-	if output, err := cmd.CombinedOutput(); err != nil {
-		errorResponse(w, http.StatusInternalServerError, fmt.Sprintf("failed to request new circuit: %s - %s", err, string(output)))
+	controlPort := getTorControlPort()
+	err := torControlCommand(r.Context(), controlPort, "SIGNAL NEWNYM")
+	if err != nil {
+		log.Printf("NewTorCircuit: %v", err)
+		errorResponse(w, http.StatusInternalServerError, "failed to request new Tor circuit")
 		return
 	}
 
@@ -306,19 +316,107 @@ func (h *HALHandler) GetTorConfig(w http.ResponseWriter, r *http.Request) {
 }
 
 // ============================================================================
+// Tor Control Protocol (replaces bash -c + nc) — HF03-13
+// ============================================================================
+
+// getTorControlPort returns the Tor control port from env or default.
+func getTorControlPort() string {
+	if port := os.Getenv("HAL_TOR_CONTROL_PORT"); port != "" {
+		return port
+	}
+	return "9051"
+}
+
+// torControlCommand connects to the Tor control port via net.Dial and sends a command.
+func torControlCommand(ctx context.Context, port string, command string) error {
+	var d net.Dialer
+	conn, err := d.DialContext(ctx, "tcp", "127.0.0.1:"+port)
+	if err != nil {
+		return fmt.Errorf("connect to Tor control port: %w", err)
+	}
+	defer conn.Close()
+
+	reader := bufio.NewReader(conn)
+
+	// Send AUTHENTICATE
+	fmt.Fprintf(conn, "AUTHENTICATE \"\"\r\n")
+	line, err := reader.ReadString('\n')
+	if err != nil {
+		return fmt.Errorf("read auth response: %w", err)
+	}
+	if !strings.HasPrefix(line, "250") {
+		return fmt.Errorf("auth failed: %s", strings.TrimSpace(line))
+	}
+
+	// Send command
+	fmt.Fprintf(conn, "%s\r\n", command)
+	line, err = reader.ReadString('\n')
+	if err != nil {
+		return fmt.Errorf("read command response: %w", err)
+	}
+	if !strings.HasPrefix(line, "250") {
+		return fmt.Errorf("command failed: %s", strings.TrimSpace(line))
+	}
+
+	// Send QUIT
+	fmt.Fprintf(conn, "QUIT\r\n")
+	return nil
+}
+
+// torControlQuery connects to the Tor control port and sends a GETINFO query.
+func torControlQuery(ctx context.Context, port string, query string) (string, error) {
+	var d net.Dialer
+	conn, err := d.DialContext(ctx, "tcp", "127.0.0.1:"+port)
+	if err != nil {
+		return "", fmt.Errorf("connect to Tor control port: %w", err)
+	}
+	defer conn.Close()
+
+	reader := bufio.NewReader(conn)
+
+	// Authenticate
+	fmt.Fprintf(conn, "AUTHENTICATE \"\"\r\n")
+	line, err := reader.ReadString('\n')
+	if err != nil {
+		return "", fmt.Errorf("read auth response: %w", err)
+	}
+	if !strings.HasPrefix(line, "250") {
+		return "", fmt.Errorf("auth failed: %s", strings.TrimSpace(line))
+	}
+
+	// Send GETINFO
+	fmt.Fprintf(conn, "GETINFO %s\r\n", query)
+	var result strings.Builder
+	for {
+		line, err = reader.ReadString('\n')
+		if err != nil {
+			break
+		}
+		result.WriteString(line)
+		if strings.HasPrefix(line, "250 ") {
+			break
+		}
+	}
+
+	// Quit
+	fmt.Fprintf(conn, "QUIT\r\n")
+	return result.String(), nil
+}
+
+// ============================================================================
 // Helper Functions
 // ============================================================================
 
 func (h *HALHandler) getWireGuardInterfaces() []VPNInterface {
 	var interfaces []VPNInterface
 
-	cmd := exec.Command("wg", "show", "interfaces")
-	output, err := cmd.Output()
+	ctx := context.Background()
+	out, err := execWithTimeout(ctx, "wg", "show", "interfaces")
 	if err != nil {
 		return interfaces
 	}
 
-	names := strings.Fields(string(output))
+	names := strings.Fields(out)
 	for _, name := range names {
 		iface := VPNInterface{
 			Name:   name,
@@ -327,9 +425,8 @@ func (h *HALHandler) getWireGuardInterfaces() []VPNInterface {
 		}
 
 		// Get more details
-		cmd := exec.Command("wg", "show", name)
-		if details, err := cmd.Output(); err == nil {
-			lines := strings.Split(string(details), "\n")
+		if details, err := execWithTimeout(ctx, "wg", "show", name); err == nil {
+			lines := strings.Split(details, "\n")
 			for _, line := range lines {
 				line = strings.TrimSpace(line)
 				if strings.HasPrefix(line, "endpoint:") {
@@ -342,9 +439,8 @@ func (h *HALHandler) getWireGuardInterfaces() []VPNInterface {
 		}
 
 		// Get local IP
-		cmd = exec.Command("ip", "-o", "addr", "show", name)
-		if ipOut, err := cmd.Output(); err == nil {
-			fields := strings.Fields(string(ipOut))
+		if ipOut, err := execWithTimeout(ctx, "ip", "-o", "addr", "show", name); err == nil {
+			fields := strings.Fields(ipOut)
 			for i, f := range fields {
 				if f == "inet" && i+1 < len(fields) {
 					iface.LocalIP = strings.Split(fields[i+1], "/")[0]
@@ -361,6 +457,8 @@ func (h *HALHandler) getWireGuardInterfaces() []VPNInterface {
 func (h *HALHandler) getOpenVPNConnections() []VPNInterface {
 	var interfaces []VPNInterface
 
+	ctx := context.Background()
+
 	// Check for tun interfaces
 	entries, _ := os.ReadDir("/sys/class/net")
 	for _, entry := range entries {
@@ -373,9 +471,8 @@ func (h *HALHandler) getOpenVPNConnections() []VPNInterface {
 			}
 
 			// Get local IP
-			cmd := exec.Command("ip", "-o", "addr", "show", name)
-			if ipOut, err := cmd.Output(); err == nil {
-				fields := strings.Fields(string(ipOut))
+			if ipOut, err := execWithTimeout(ctx, "ip", "-o", "addr", "show", name); err == nil {
+				fields := strings.Fields(ipOut)
 				for i, f := range fields {
 					if f == "inet" && i+1 < len(fields) {
 						iface.LocalIP = strings.Split(fields[i+1], "/")[0]
@@ -396,44 +493,40 @@ func (h *HALHandler) getTorStatus() TorStatus {
 		ControlPort: 9051,
 	}
 
+	ctx := context.Background()
+
 	// Check if Tor is running
-	cmd := exec.Command("systemctl", "is-active", "tor")
-	if output, err := cmd.Output(); err == nil {
-		status.Running = strings.TrimSpace(string(output)) == "active"
+	out, err := execWithTimeout(ctx, "systemctl", "is-active", "tor")
+	if err == nil {
+		status.Running = strings.TrimSpace(out) == "active"
 	}
 
 	if !status.Running {
 		return status
 	}
 
-	// Get bootstrap status from control port
-	cmd = exec.Command("bash", "-c", `echo -e 'AUTHENTICATE ""\nGETINFO status/bootstrap-phase\nQUIT' | nc localhost 9051`)
-	if output, err := cmd.Output(); err == nil {
-		outputStr := string(output)
-		if strings.Contains(outputStr, "PROGRESS=100") {
+	// Get bootstrap status via Tor control protocol (replaces bash -c + nc)
+	controlPort := getTorControlPort()
+	if resp, err := torControlQuery(ctx, controlPort, "status/bootstrap-phase"); err == nil {
+		if strings.Contains(resp, "PROGRESS=100") {
 			status.Bootstrapped = 100
 			status.CircuitReady = true
-		} else {
-			// Parse PROGRESS=XX
-			if idx := strings.Index(outputStr, "PROGRESS="); idx != -1 {
-				progressStr := outputStr[idx+9:]
-				if spaceIdx := strings.Index(progressStr, " "); spaceIdx != -1 {
-					progressStr = progressStr[:spaceIdx]
-				}
-				fmt.Sscanf(progressStr, "%d", &status.Bootstrapped)
+		} else if idx := strings.Index(resp, "PROGRESS="); idx != -1 {
+			progressStr := resp[idx+9:]
+			if spaceIdx := strings.Index(progressStr, " "); spaceIdx != -1 {
+				progressStr = progressStr[:spaceIdx]
 			}
+			fmt.Sscanf(progressStr, "%d", &status.Bootstrapped)
 		}
 	}
 
 	// Get exit IP through Tor
-	cmd = exec.Command("curl", "-s", "--socks5-hostname", "localhost:9050", "https://check.torproject.org/api/ip")
-	if output, err := cmd.Output(); err == nil {
-		// Response is JSON: {"IsTor":true,"IP":"x.x.x.x"}
-		outputStr := string(output)
-		if idx := strings.Index(outputStr, `"IP":"`); idx != -1 {
+	if exitOut, err := execWithTimeout(ctx, "curl", "-s", "--max-time", "10",
+		"--socks5-hostname", "localhost:9050", "https://check.torproject.org/api/ip"); err == nil {
+		if idx := strings.Index(exitOut, `"IP":"`); idx != -1 {
 			ipStart := idx + 6
-			if ipEnd := strings.Index(outputStr[ipStart:], `"`); ipEnd != -1 {
-				status.ExitIP = outputStr[ipStart : ipStart+ipEnd]
+			if ipEnd := strings.Index(exitOut[ipStart:], `"`); ipEnd != -1 {
+				status.ExitIP = exitOut[ipStart : ipStart+ipEnd]
 			}
 		}
 	}

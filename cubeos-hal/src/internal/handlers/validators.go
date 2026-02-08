@@ -265,6 +265,27 @@ func validateSMBVersion(ver string) error {
 	return nil
 }
 
+// validateSMBCredentialField checks that an SMB credential field (username, password, domain)
+// does not contain characters that could inject mount options (commas, newlines, null bytes).
+func validateSMBCredentialField(field, name string) error {
+	if strings.ContainsAny(field, ",\n\r\x00") {
+		return fmt.Errorf("%s contains disallowed characters", name)
+	}
+	if len(field) > 256 {
+		return fmt.Errorf("%s too long (max 256)", name)
+	}
+	return nil
+}
+
+// validateNFSVersion validates an NFS protocol version string.
+func validateNFSVersion(ver string) error {
+	allowed := map[string]bool{"": true, "3": true, "4": true, "4.1": true, "4.2": true}
+	if !allowed[ver] {
+		return fmt.Errorf("invalid NFS version")
+	}
+	return nil
+}
+
 // validateNFSOptions validates NFS mount options against an allowlist.
 func validateNFSOptions(opts string) error {
 	if opts == "" {
