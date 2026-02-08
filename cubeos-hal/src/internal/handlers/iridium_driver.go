@@ -42,9 +42,16 @@ type IridiumDriver struct {
 	model     string
 
 	// Ring alert monitoring
-	ringCh     chan struct{} // signals when SBDRING is detected
-	stopRingCh chan struct{} // stops the ring monitor goroutine
-	ringActive bool
+	ringCh      chan struct{} // signals when SBDRING is detected
+	stopRingCh  chan struct{} // stops the ring monitor goroutine
+	ringActive  bool
+	monitorDone chan struct{} // closed when monitor goroutine exits
+
+	// Auto-reconnect
+	lastPort         string // last successfully connected port (for reconnect)
+	reconnecting     bool
+	stopReconnect    chan struct{}
+	reconnectBackoff time.Duration
 
 	// SSE subscribers for events
 	eventMu      sync.RWMutex
@@ -81,10 +88,20 @@ func (r SBDIXResult) MOSuccess() bool {
 
 // NewIridiumDriver creates a new Iridium driver instance.
 func NewIridiumDriver() *IridiumDriver {
+	sbdixTimeout := 90 * time.Second
+	if envTimeout := os.Getenv("IRIDIUM_SBDIX_TIMEOUT"); envTimeout != "" {
+		if parsed, err := time.ParseDuration(envTimeout); err == nil && parsed >= 10*time.Second && parsed <= 300*time.Second {
+			sbdixTimeout = parsed
+			log.Printf("iridium: SBDIX timeout set to %v from env", sbdixTimeout)
+		} else {
+			log.Printf("iridium: invalid IRIDIUM_SBDIX_TIMEOUT %q (must be 10s-300s duration), using default 90s", envTimeout)
+		}
+	}
+
 	return &IridiumDriver{
 		baudRate:     19200,
 		readTimeout:  3 * time.Second,
-		sbdixTimeout: 90 * time.Second,
+		sbdixTimeout: sbdixTimeout,
 		ringCh:       make(chan struct{}, 1),
 		stopRingCh:   make(chan struct{}),
 		eventClients: make(map[uint64]chan IridiumEvent),
@@ -169,19 +186,26 @@ func (d *IridiumDriver) Connect(ctx context.Context, port string) error {
 	}
 
 	log.Printf("iridium: connected to %s (IMEI: %s, Model: %s)", port, d.imei, d.model)
+	d.lastPort = port
 	d.emitEvent(IridiumEvent{
 		Type:    "connected",
 		Message: fmt.Sprintf("Connected to %s (IMEI: %s)", port, d.imei),
 	})
 
+	// Start ring alert monitor goroutine
+	d.startMonitorLocked()
+
 	return nil
 }
 
 // Disconnect closes the serial connection and stops monitoring.
+// This is an explicit user action — stops reconnect and clears lastPort.
 func (d *IridiumDriver) Disconnect() {
 	d.mu.Lock()
 	defer d.mu.Unlock()
+	d.stopReconnectLocked() // Stop auto-reconnect first
 	d.closeLocked()
+	d.lastPort = "" // Explicit disconnect — don't auto-reconnect
 	d.emitEvent(IridiumEvent{
 		Type:    "disconnected",
 		Message: "Modem disconnected",
@@ -218,7 +242,12 @@ func (d *IridiumDriver) Model() string {
 
 // closeLocked closes the connection without acquiring the mutex.
 // Caller must hold d.mu.
+// NOTE: Does NOT stop reconnect — only Disconnect() should do that,
+// because reconnectLoop calls Connect which calls closeLocked.
 func (d *IridiumDriver) closeLocked() {
+	// Stop ring alert monitor
+	d.stopMonitorLocked()
+
 	if d.file != nil {
 		d.file.Close()
 		d.file = nil
@@ -749,6 +778,227 @@ func (d *IridiumDriver) DisableRingAlerts(ctx context.Context) error {
 		return fmt.Errorf("failed to disable ring alerts")
 	}
 	return nil
+}
+
+// startMonitorLocked starts the ring alert monitor goroutine.
+// Caller must hold d.mu.
+func (d *IridiumDriver) startMonitorLocked() {
+	if d.ringActive {
+		return
+	}
+	d.stopRingCh = make(chan struct{})
+	d.monitorDone = make(chan struct{})
+	d.ringActive = true
+	go d.monitorLoop()
+	log.Printf("iridium: ring alert monitor started")
+}
+
+// stopMonitorLocked stops the ring alert monitor goroutine.
+// Caller must hold d.mu.
+func (d *IridiumDriver) stopMonitorLocked() {
+	if !d.ringActive {
+		return
+	}
+	d.ringActive = false
+
+	// Check if monitor already exited (e.g., serial error → reconnectLoop)
+	select {
+	case <-d.monitorDone:
+		// Monitor already exited — just clean up state
+	default:
+		// Monitor is still running — signal it to stop and wait
+		close(d.stopRingCh)
+		done := d.monitorDone
+		d.mu.Unlock()
+		select {
+		case <-done:
+		case <-time.After(2 * time.Second):
+			log.Printf("iridium: monitor goroutine did not exit in time")
+		}
+		d.mu.Lock()
+	}
+	log.Printf("iridium: ring alert monitor stopped")
+}
+
+// stopReconnectLocked stops any auto-reconnect goroutine.
+// Caller must hold d.mu.
+func (d *IridiumDriver) stopReconnectLocked() {
+	if d.reconnecting {
+		close(d.stopReconnect)
+		d.reconnecting = false
+	}
+}
+
+// monitorLoop continuously reads the serial port for unsolicited SBDRING alerts.
+// It acquires/releases the mutex for each read cycle to allow SendAT() fair access.
+// On serial error, it emits a disconnected event and starts auto-reconnect.
+func (d *IridiumDriver) monitorLoop() {
+	defer close(d.monitorDone)
+
+	buf := make([]byte, 1)
+	var line []byte
+
+	for {
+		// Check for stop signal
+		select {
+		case <-d.stopRingCh:
+			return
+		default:
+		}
+
+		d.mu.Lock()
+		if d.file == nil {
+			d.mu.Unlock()
+			return
+		}
+
+		// Set short read deadline so we release the lock frequently
+		f := d.file
+		d.mu.Unlock()
+
+		// Read outside the lock using the file handle — the 100ms deadline
+		// means we yield quickly. We still hold no lock during the blocking read.
+		// NOTE: SetDeadline on os.File works on Linux /dev/tty* via poll.
+		// For serial files that don't support SetDeadline, Read will block
+		// until data arrives or the file is closed. The stopRingCh check above
+		// and file closure in closeLocked() ensure we exit.
+		f.SetDeadline(time.Now().Add(100 * time.Millisecond))
+		n, err := f.Read(buf)
+
+		if err != nil {
+			if isTimeoutError(err) {
+				continue // Normal — no data available
+			}
+			// Check if we were told to stop
+			select {
+			case <-d.stopRingCh:
+				return
+			default:
+			}
+			// Real serial error — modem disconnected
+			log.Printf("iridium: monitor detected serial error: %v", err)
+			d.emitEvent(IridiumEvent{
+				Type:    "disconnected",
+				Message: "Serial connection lost",
+			})
+			// Start auto-reconnect
+			d.mu.Lock()
+			d.connected = false
+			if d.file != nil {
+				d.file.Close()
+				d.file = nil
+			}
+			lastPort := d.lastPort
+			d.mu.Unlock()
+			go d.reconnectLoop(lastPort)
+			return
+		}
+
+		if n > 0 {
+			line = append(line, buf[0])
+			if buf[0] == '\n' {
+				s := strings.TrimSpace(string(line))
+				if s == "SBDRING" {
+					log.Printf("iridium: SBDRING received — MT message waiting")
+					d.emitEvent(IridiumEvent{
+						Type:    "ring_alert",
+						Message: "MT message waiting at gateway",
+					})
+					// Signal on ringCh (non-blocking)
+					select {
+					case d.ringCh <- struct{}{}:
+					default:
+					}
+				} else if s != "" {
+					// Log unexpected unsolicited output for debugging
+					log.Printf("iridium: unsolicited output: %q", s)
+				}
+				line = line[:0]
+			}
+			// Prevent unbounded accumulation
+			if len(line) > 256 {
+				line = line[:0]
+			}
+		}
+	}
+}
+
+// isTimeoutError checks if an error is a timeout (net or os deadline).
+func isTimeoutError(err error) bool {
+	if os.IsTimeout(err) {
+		return true
+	}
+	// Also check for the interface method
+	type timeouter interface {
+		Timeout() bool
+	}
+	if te, ok := err.(timeouter); ok {
+		return te.Timeout()
+	}
+	return false
+}
+
+// reconnectLoop attempts to reconnect with exponential backoff.
+// It runs as a separate goroutine started by monitorLoop on disconnect.
+func (d *IridiumDriver) reconnectLoop(lastPort string) {
+	d.mu.Lock()
+	if d.reconnecting {
+		d.mu.Unlock()
+		return
+	}
+	d.reconnecting = true
+	d.stopReconnect = make(chan struct{})
+	d.mu.Unlock()
+
+	backoff := 1 * time.Second
+	maxBackoff := 30 * time.Second
+
+	log.Printf("iridium: starting auto-reconnect to %s", lastPort)
+	d.emitEvent(IridiumEvent{
+		Type:    "reconnecting",
+		Message: fmt.Sprintf("Attempting to reconnect to %s", lastPort),
+	})
+
+	for {
+		select {
+		case <-d.stopReconnect:
+			log.Printf("iridium: reconnect cancelled")
+			return
+		case <-time.After(backoff):
+		}
+
+		// Try to reconnect
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		err := d.Connect(ctx, lastPort)
+		cancel()
+
+		if err == nil {
+			log.Printf("iridium: reconnected successfully to %s", lastPort)
+			d.emitEvent(IridiumEvent{
+				Type:    "reconnected",
+				Message: fmt.Sprintf("Reconnected to %s", lastPort),
+			})
+			d.mu.Lock()
+			d.reconnecting = false
+			d.mu.Unlock()
+			return
+		}
+
+		log.Printf("iridium: reconnect failed (%v), retrying in %v", err, backoff)
+
+		// Exponential backoff with cap
+		backoff = backoff * 2
+		if backoff > maxBackoff {
+			backoff = maxBackoff
+		}
+
+		select {
+		case <-d.stopReconnect:
+			log.Printf("iridium: reconnect cancelled")
+			return
+		default:
+		}
+	}
 }
 
 // ============================================================================
