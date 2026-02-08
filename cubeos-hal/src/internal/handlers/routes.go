@@ -187,10 +187,14 @@ func SetupRoutes(r chi.Router, h *HALHandler) {
 		r.Get("/devices", h.GetIridiumDevices)
 		r.Get("/status", h.GetIridiumStatus)
 		r.Get("/signal", h.GetIridiumSignal)
+		r.Post("/connect", h.ConnectIridium)
+		r.Post("/disconnect", h.DisconnectIridium)
 		r.Post("/send", h.SendIridiumMessage)
+		r.Post("/mailbox_check", h.CheckIridiumMailbox)
 		r.Get("/receive", h.ReceiveIridiumMessage)
-		r.Get("/messages", h.GetIridiumMessages)
-		r.Post("/check", h.CheckIridiumMailbox)
+		r.Get("/messages", h.GetIridiumMessages) // backward compat alias
+		r.Post("/clear", h.ClearIridiumBuffers)
+		r.Get("/events", h.StreamIridiumEvents)
 	})
 
 	// Camera

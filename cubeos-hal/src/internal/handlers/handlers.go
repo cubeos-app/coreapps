@@ -13,12 +13,14 @@ import (
 // HALHandler handles all HAL API endpoints.
 type HALHandler struct {
 	powerMonitor *PowerMonitor
+	iridium      *IridiumDriver
 }
 
 // NewHALHandler creates a new HAL handler instance.
 func NewHALHandler() *HALHandler {
 	return &HALHandler{
 		powerMonitor: NewPowerMonitor(),
+		iridium:      NewIridiumDriver(),
 	}
 }
 
