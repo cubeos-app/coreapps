@@ -444,6 +444,170 @@ func (h *HALHandler) CheckNFSServer(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// TestMountConnection tests connectivity to a remote share
+// @Summary Test mount connection
+// @Description Tests if a remote SMB/NFS share is reachable without actually mounting it
+// @Tags Mounts
+// @Accept json
+// @Produce json
+// @Param request body object true "Mount test parameters" example({"type":"smb","remote_path":"//server/share","username":"user","password":"secret"})
+// @Success 200 {object} map[string]interface{}
+// @Failure 400 {object} ErrorResponse
+// @Failure 500 {object} ErrorResponse
+// @Router /mounts/test [post]
+func (h *HALHandler) TestMountConnection(w http.ResponseWriter, r *http.Request) {
+	r = limitBody(r, 1<<20)
+
+	var req struct {
+		Type       string `json:"type"`
+		RemotePath string `json:"remote_path"`
+		Username   string `json:"username"`
+		Password   string `json:"password"`
+	}
+
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		errorResponse(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+
+	if req.Type == "" || req.RemotePath == "" {
+		errorResponse(w, http.StatusBadRequest, "type and remote_path are required")
+		return
+	}
+
+	switch req.Type {
+	case "smb":
+		// Extract server from //server/share format
+		parts := strings.SplitN(strings.TrimPrefix(req.RemotePath, "//"), "/", 2)
+		if len(parts) < 1 || parts[0] == "" {
+			errorResponse(w, http.StatusBadRequest, "invalid SMB path format (expected //server/share)")
+			return
+		}
+		server := parts[0]
+		if err := validateHostnameOrIP(server); err != nil {
+			errorResponse(w, http.StatusBadRequest, err.Error())
+			return
+		}
+
+		// Use smbclient to test connectivity
+		args := []string{"-L", server, "-N"}
+		if req.Username != "" {
+			if err := validateSMBCredentialField(req.Username, "username"); err != nil {
+				errorResponse(w, http.StatusBadRequest, err.Error())
+				return
+			}
+			if req.Password != "" {
+				if err := validateSMBCredentialField(req.Password, "password"); err != nil {
+					errorResponse(w, http.StatusBadRequest, err.Error())
+					return
+				}
+				args = []string{"-L", server, "-U", req.Username + "%" + req.Password}
+			} else {
+				args = []string{"-L", server, "-U", req.Username}
+			}
+		}
+
+		_, err := execWithTimeout(r.Context(), "smbclient", args...)
+		if err != nil {
+			jsonResponse(w, http.StatusOK, map[string]interface{}{
+				"reachable":   false,
+				"type":        req.Type,
+				"remote_path": req.RemotePath,
+				"error":       sanitizeExecError("SMB test", err),
+			})
+			return
+		}
+
+		jsonResponse(w, http.StatusOK, map[string]interface{}{
+			"reachable":   true,
+			"type":        req.Type,
+			"remote_path": req.RemotePath,
+		})
+
+	case "nfs":
+		// Extract server from server:/export format
+		parts := strings.SplitN(req.RemotePath, ":", 2)
+		if len(parts) < 1 || parts[0] == "" {
+			errorResponse(w, http.StatusBadRequest, "invalid NFS path format (expected server:/export)")
+			return
+		}
+		server := parts[0]
+		if err := validateHostnameOrIP(server); err != nil {
+			errorResponse(w, http.StatusBadRequest, err.Error())
+			return
+		}
+
+		_, err := execWithTimeout(r.Context(), "showmount", "-e", server)
+		if err != nil {
+			jsonResponse(w, http.StatusOK, map[string]interface{}{
+				"reachable":   false,
+				"type":        req.Type,
+				"remote_path": req.RemotePath,
+				"error":       sanitizeExecError("NFS test", err),
+			})
+			return
+		}
+
+		jsonResponse(w, http.StatusOK, map[string]interface{}{
+			"reachable":   true,
+			"type":        req.Type,
+			"remote_path": req.RemotePath,
+		})
+
+	default:
+		errorResponse(w, http.StatusBadRequest, "type must be 'smb' or 'nfs'")
+	}
+}
+
+// CheckMounted checks if a path is currently mounted
+// @Summary Check if path is mounted
+// @Description Checks if the specified path is an active mount point
+// @Tags Mounts
+// @Produce json
+// @Param path query string true "Path to check" example(/mnt/nas)
+// @Success 200 {object} map[string]interface{}
+// @Failure 400 {object} ErrorResponse
+// @Router /mounts/check [get]
+func (h *HALHandler) CheckMounted(w http.ResponseWriter, r *http.Request) {
+	path := r.URL.Query().Get("path")
+	if path == "" {
+		errorResponse(w, http.StatusBadRequest, "path query parameter is required")
+		return
+	}
+	if err := validateMountpoint(path); err != nil {
+		errorResponse(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	// Check /proc/mounts for the path
+	data, err := os.ReadFile("/proc/mounts")
+	if err != nil {
+		log.Printf("CheckMounted: read /proc/mounts: %v", err)
+		errorResponse(w, http.StatusInternalServerError, "failed to read mount table")
+		return
+	}
+
+	mounted := false
+	var fsType, source string
+	lines := strings.Split(string(data), "\n")
+	for _, line := range lines {
+		fields := strings.Fields(line)
+		if len(fields) >= 3 && fields[1] == path {
+			mounted = true
+			source = fields[0]
+			fsType = fields[2]
+			break
+		}
+	}
+
+	jsonResponse(w, http.StatusOK, map[string]interface{}{
+		"mounted": mounted,
+		"path":    path,
+		"source":  source,
+		"fstype":  fsType,
+	})
+}
+
 // ============================================================================
 // Helper Functions
 // ============================================================================

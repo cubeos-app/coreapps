@@ -90,6 +90,11 @@ func SetupRoutes(r chi.Router, h *HALHandler) {
 		r.Get("/ap/clients", h.GetAPClients)
 		r.Post("/ap/disconnect", h.DisconnectAPClient)
 		r.Post("/ap/block", h.BlockAPClient)
+		r.Post("/ap/unblock/{mac}", h.UnblockAPClient)
+
+		// DHCP & Static IP
+		r.Post("/dhcp/request", h.RequestDHCP)
+		r.Post("/ip/static", h.SetStaticIP)
 	})
 
 	// Firewall
@@ -104,6 +109,9 @@ func SetupRoutes(r chi.Router, h *HALHandler) {
 		r.Post("/forward/enable", h.EnableIPForward)
 		r.Post("/forward/disable", h.DisableIPForward)
 		r.Get("/status", h.GetFirewallStatus)
+		r.Post("/save", h.SaveFirewallRules)
+		r.Post("/restore", h.RestoreFirewallRules)
+		r.Post("/reset", h.ResetFirewall)
 	})
 
 	// VPN
@@ -164,6 +172,7 @@ func SetupRoutes(r chi.Router, h *HALHandler) {
 		r.Get("/status", h.GetCellularStatus)
 		r.Get("/signal", h.GetCellularSignal)
 		r.Post("/connect", h.ConnectCellular)
+		r.Post("/connect/{modem}", h.ConnectCellular) // HF07-06: API client sends modem index in path
 		r.Post("/disconnect/{modem}", h.DisconnectCellular)
 
 		// Android tethering
@@ -288,5 +297,7 @@ func SetupRoutes(r chi.Router, h *HALHandler) {
 		r.Post("/unmount", h.UnmountNetwork)
 		r.Post("/smb/check", h.CheckSMBServer)
 		r.Get("/nfs/check", h.CheckNFSServer)
+		r.Post("/test", h.TestMountConnection)
+		r.Get("/check", h.CheckMounted)
 	})
 }

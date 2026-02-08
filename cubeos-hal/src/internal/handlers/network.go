@@ -673,3 +673,163 @@ func (h *HALHandler) BlockAPClient(w http.ResponseWriter, r *http.Request) {
 
 	successResponse(w, fmt.Sprintf("client %s blocked", req.MAC))
 }
+
+// UnblockAPClient removes a MAC address from the AP blocklist
+// @Summary Unblock AP client
+// @Description Removes a MAC address from the access point deny list using hostapd_cli
+// @Tags Network
+// @Produce json
+// @Param mac path string true "MAC address to unblock"
+// @Success 200 {object} SuccessResponse
+// @Failure 400 {object} ErrorResponse
+// @Failure 500 {object} ErrorResponse
+// @Router /network/ap/unblock/{mac} [post]
+func (h *HALHandler) UnblockAPClient(w http.ResponseWriter, r *http.Request) {
+	mac := chi.URLParam(r, "mac")
+	if err := validateMACAddress(mac); err != nil {
+		errorResponse(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	_, err := execWithTimeout(r.Context(), "hostapd_cli", "deny_acl", "DEL_MAC", mac)
+	if err != nil {
+		log.Printf("UnblockAPClient(%s): %v", mac, err)
+		errorResponse(w, http.StatusInternalServerError, sanitizeExecError("unblock AP client", err))
+		return
+	}
+
+	successResponse(w, fmt.Sprintf("client %s unblocked", mac))
+}
+
+// RequestDHCP requests a DHCP lease on an interface
+// @Summary Request DHCP lease
+// @Description Requests a DHCP lease on the specified network interface using dhclient
+// @Tags Network
+// @Accept json
+// @Produce json
+// @Param request body object true "DHCP request" example({"interface":"eth0"})
+// @Success 200 {object} SuccessResponse
+// @Failure 400 {object} ErrorResponse
+// @Failure 500 {object} ErrorResponse
+// @Router /network/dhcp/request [post]
+func (h *HALHandler) RequestDHCP(w http.ResponseWriter, r *http.Request) {
+	r = limitBody(r, 1<<20)
+
+	var req struct {
+		Interface string `json:"interface"`
+	}
+
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		errorResponse(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+
+	if req.Interface == "" {
+		errorResponse(w, http.StatusBadRequest, "interface is required")
+		return
+	}
+	if err := validateInterfaceName(req.Interface); err != nil {
+		errorResponse(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	// Release existing lease first (best effort)
+	_, _ = execWithTimeout(r.Context(), "dhclient", "-r", req.Interface)
+
+	// Request new lease
+	_, err := execWithTimeout(r.Context(), "dhclient", req.Interface)
+	if err != nil {
+		log.Printf("RequestDHCP(%s): %v", req.Interface, err)
+		errorResponse(w, http.StatusInternalServerError, sanitizeExecError("DHCP request", err))
+		return
+	}
+
+	jsonResponse(w, http.StatusOK, map[string]interface{}{
+		"success":   true,
+		"interface": req.Interface,
+		"message":   "DHCP lease requested",
+	})
+}
+
+// SetStaticIP sets a static IP address on an interface
+// @Summary Set static IP
+// @Description Sets a static IP address on the specified network interface using ip addr
+// @Tags Network
+// @Accept json
+// @Produce json
+// @Param request body object true "Static IP config" example({"interface":"eth0","ip":"10.42.24.100/24","gateway":"10.42.24.1"})
+// @Success 200 {object} SuccessResponse
+// @Failure 400 {object} ErrorResponse
+// @Failure 500 {object} ErrorResponse
+// @Router /network/ip/static [post]
+func (h *HALHandler) SetStaticIP(w http.ResponseWriter, r *http.Request) {
+	r = limitBody(r, 1<<20)
+
+	var req struct {
+		Interface string `json:"interface"`
+		IP        string `json:"ip"`
+		Gateway   string `json:"gateway"`
+	}
+
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		errorResponse(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+
+	if req.Interface == "" || req.IP == "" {
+		errorResponse(w, http.StatusBadRequest, "interface and ip are required")
+		return
+	}
+	if err := validateInterfaceName(req.Interface); err != nil {
+		errorResponse(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if err := validateCIDROrIP(req.IP); err != nil {
+		errorResponse(w, http.StatusBadRequest, "invalid IP: "+err.Error())
+		return
+	}
+	if req.Gateway != "" {
+		if err := validateCIDROrIP(req.Gateway); err != nil {
+			errorResponse(w, http.StatusBadRequest, "invalid gateway: "+err.Error())
+			return
+		}
+	}
+
+	// Flush existing addresses on interface
+	_, _ = execWithTimeout(r.Context(), "ip", "addr", "flush", "dev", req.Interface)
+
+	// Add static IP
+	_, err := execWithTimeout(r.Context(), "ip", "addr", "add", req.IP, "dev", req.Interface)
+	if err != nil {
+		log.Printf("SetStaticIP(%s, %s): addr add: %v", req.Interface, req.IP, err)
+		errorResponse(w, http.StatusInternalServerError, sanitizeExecError("set static IP", err))
+		return
+	}
+
+	// Set default gateway if provided
+	if req.Gateway != "" {
+		// Remove existing default route via this interface (best effort)
+		_, _ = execWithTimeout(r.Context(), "ip", "route", "del", "default", "dev", req.Interface)
+
+		_, err := execWithTimeout(r.Context(), "ip", "route", "add", "default", "via", req.Gateway, "dev", req.Interface)
+		if err != nil {
+			log.Printf("SetStaticIP(%s): route add default via %s: %v", req.Interface, req.Gateway, err)
+			// Don't fail — IP is already set, just warn about gateway
+			jsonResponse(w, http.StatusOK, map[string]interface{}{
+				"success":   true,
+				"interface": req.Interface,
+				"ip":        req.IP,
+				"warning":   "IP set but gateway route failed",
+			})
+			return
+		}
+	}
+
+	jsonResponse(w, http.StatusOK, map[string]interface{}{
+		"success":   true,
+		"interface": req.Interface,
+		"ip":        req.IP,
+		"gateway":   req.Gateway,
+		"message":   "static IP configured",
+	})
+}

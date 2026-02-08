@@ -1,11 +1,15 @@
 package handlers
 
 import (
+	"bytes"
+	"context"
 	"encoding/json"
 	"log"
 	"net/http"
 	"os"
+	"os/exec"
 	"strings"
+	"time"
 )
 
 // getDefaultNATSource returns the default NAT source CIDR.
@@ -446,6 +450,137 @@ func (h *HALHandler) DisableIPForward(w http.ResponseWriter, r *http.Request) {
 	jsonResponse(w, http.StatusOK, map[string]interface{}{
 		"success": true,
 		"enabled": false,
+	})
+}
+
+// getFirewallSavePath returns the path for persistent iptables rules.
+func getFirewallSavePath() string {
+	if p := os.Getenv("HAL_IPTABLES_SAVE_PATH"); p != "" {
+		return p
+	}
+	return "/etc/iptables/rules.v4"
+}
+
+// SaveFirewallRules saves current iptables rules to persistent storage
+// @Summary Save firewall rules
+// @Description Saves current iptables rules to /etc/iptables/rules.v4 (or HAL_IPTABLES_SAVE_PATH)
+// @Tags Firewall
+// @Produce json
+// @Success 200 {object} SuccessResponse
+// @Failure 500 {object} ErrorResponse
+// @Router /firewall/save [post]
+func (h *HALHandler) SaveFirewallRules(w http.ResponseWriter, r *http.Request) {
+	savePath := getFirewallSavePath()
+
+	output, err := execWithTimeout(r.Context(), "iptables-save")
+	if err != nil {
+		log.Printf("SaveFirewallRules: iptables-save: %v", err)
+		errorResponse(w, http.StatusInternalServerError, sanitizeExecError("save firewall rules", err))
+		return
+	}
+
+	// Ensure directory exists
+	dir := savePath[:strings.LastIndex(savePath, "/")]
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		log.Printf("SaveFirewallRules: mkdir %s: %v", dir, err)
+		errorResponse(w, http.StatusInternalServerError, "failed to create rules directory")
+		return
+	}
+
+	if err := os.WriteFile(savePath, []byte(output), 0600); err != nil {
+		log.Printf("SaveFirewallRules: write %s: %v", savePath, err)
+		errorResponse(w, http.StatusInternalServerError, "failed to write firewall rules")
+		return
+	}
+
+	jsonResponse(w, http.StatusOK, map[string]interface{}{
+		"success": true,
+		"path":    savePath,
+		"message": "firewall rules saved",
+	})
+}
+
+// RestoreFirewallRules restores iptables rules from persistent storage
+// @Summary Restore firewall rules
+// @Description Restores iptables rules from /etc/iptables/rules.v4 (or HAL_IPTABLES_SAVE_PATH)
+// @Tags Firewall
+// @Produce json
+// @Success 200 {object} SuccessResponse
+// @Failure 404 {object} ErrorResponse
+// @Failure 500 {object} ErrorResponse
+// @Router /firewall/restore [post]
+func (h *HALHandler) RestoreFirewallRules(w http.ResponseWriter, r *http.Request) {
+	savePath := getFirewallSavePath()
+
+	data, err := os.ReadFile(savePath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			errorResponse(w, http.StatusNotFound, "no saved firewall rules found")
+			return
+		}
+		log.Printf("RestoreFirewallRules: read %s: %v", savePath, err)
+		errorResponse(w, http.StatusInternalServerError, "failed to read saved rules")
+		return
+	}
+
+	// iptables-restore reads from stdin
+	ctx := r.Context()
+	if _, ok := ctx.Deadline(); !ok {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, 30*time.Second)
+		defer cancel()
+	}
+
+	cmd := exec.CommandContext(ctx, "iptables-restore")
+	cmd.Stdin = bytes.NewReader(data)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		log.Printf("RestoreFirewallRules: iptables-restore: %v: %s", err, string(out))
+		errorResponse(w, http.StatusInternalServerError, sanitizeExecError("restore firewall rules", err))
+		return
+	}
+
+	jsonResponse(w, http.StatusOK, map[string]interface{}{
+		"success": true,
+		"path":    savePath,
+		"message": "firewall rules restored",
+	})
+}
+
+// ResetFirewall flushes all iptables rules and resets to default ACCEPT policy
+// @Summary Reset firewall
+// @Description Flushes all iptables rules in filter and nat tables, resets default policies to ACCEPT
+// @Tags Firewall
+// @Produce json
+// @Success 200 {object} SuccessResponse
+// @Failure 500 {object} ErrorResponse
+// @Router /firewall/reset [post]
+func (h *HALHandler) ResetFirewall(w http.ResponseWriter, r *http.Request) {
+	// Reset default policies to ACCEPT
+	commands := []struct {
+		args []string
+		desc string
+	}{
+		{[]string{"-P", "INPUT", "ACCEPT"}, "reset INPUT policy"},
+		{[]string{"-P", "FORWARD", "ACCEPT"}, "reset FORWARD policy"},
+		{[]string{"-P", "OUTPUT", "ACCEPT"}, "reset OUTPUT policy"},
+		{[]string{"-F"}, "flush filter rules"},
+		{[]string{"-X"}, "delete custom chains"},
+		{[]string{"-t", "nat", "-F"}, "flush NAT rules"},
+		{[]string{"-t", "nat", "-X"}, "delete NAT custom chains"},
+	}
+
+	for _, cmd := range commands {
+		if _, err := execWithTimeout(r.Context(), "iptables", cmd.args...); err != nil {
+			log.Printf("ResetFirewall: %s: %v", cmd.desc, err)
+			errorResponse(w, http.StatusInternalServerError, sanitizeExecError(cmd.desc, err))
+			return
+		}
+	}
+
+	jsonResponse(w, http.StatusOK, map[string]interface{}{
+		"success": true,
+		"message": "firewall reset to default ACCEPT policy",
 	})
 }
 
