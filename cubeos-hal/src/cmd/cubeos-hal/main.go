@@ -15,6 +15,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -62,14 +63,23 @@ func main() {
 		handlers.SetupRoutes(r, h)
 	})
 
-	// Wrap entire router with request timeout (60s default)
+	// Wrap router with request timeout, but bypass for SSE endpoints
+	// (http.TimeoutHandler wraps ResponseWriter, stripping http.Flusher)
 	requestTimeout := 60 * time.Second
 	if v := os.Getenv("HAL_REQUEST_TIMEOUT"); v != "" {
 		if d, err := time.ParseDuration(v); err == nil {
 			requestTimeout = d
 		}
 	}
-	handler := http.TimeoutHandler(r, requestTimeout, `{"error":"request timeout","code":504}`)
+	timeoutHandler := http.TimeoutHandler(r, requestTimeout, `{"error":"request timeout","code":504}`)
+	handler := http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		// SSE endpoints need http.Flusher — serve directly without timeout wrapper
+		if strings.HasSuffix(req.URL.Path, "/events") {
+			r.ServeHTTP(w, req)
+			return
+		}
+		timeoutHandler.ServeHTTP(w, req)
+	})
 
 	// Configure HTTP server with timeouts
 	addr := fmt.Sprintf("%s:%s", host, port)

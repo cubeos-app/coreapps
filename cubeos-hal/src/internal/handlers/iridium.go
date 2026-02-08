@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"strings"
 	"time"
 )
 
@@ -439,6 +440,15 @@ func (h *HALHandler) ClearIridiumBuffers(w http.ResponseWriter, r *http.Request)
 
 	if req.Buffer == "" {
 		errorResponse(w, http.StatusBadRequest, "buffer field is required (mo, mt, or both)")
+		return
+	}
+
+	// Validate buffer value before checking connection
+	switch strings.ToLower(req.Buffer) {
+	case "mo", "mt", "both":
+		// valid
+	default:
+		errorResponse(w, http.StatusBadRequest, "invalid buffer (must be mo, mt, or both)")
 		return
 	}
 
