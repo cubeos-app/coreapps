@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"math"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -133,13 +134,20 @@ type MeshtasticTransport interface {
 
 // NewMeshtasticDriver creates a new Meshtastic driver instance.
 func NewMeshtasticDriver() *MeshtasticDriver {
+	// BLE adapter selection: env var → auto-detect (prefer USB over onboard)
+	bleAdapter := os.Getenv("BLE_ADAPTER")
+	if bleAdapter == "" {
+		bleAdapter = findBestBLEAdapter()
+	}
+	log.Printf("meshtastic: using BLE adapter %s", bleAdapter)
+
 	d := &MeshtasticDriver{
 		nodes:        make(map[uint32]*MeshNode),
 		messages:     make([]*MeshMessage, 0, 1000),
 		msgBufSize:   1000,
 		eventClients: make(map[uint64]chan MeshEvent),
 		serialBaud:   115200,
-		bleAdapter:   "hci0",
+		bleAdapter:   bleAdapter,
 	}
 	// Start BLE reconnector (monitors connection, auto-reconnects BLE on drop)
 	d.reconnector = NewBLEReconnector(d, DefaultBLEReconnectConfig())
@@ -174,9 +182,13 @@ func (d *MeshtasticDriver) Connect(ctx context.Context, port string) error {
 	case IsBLEAddress(port):
 		// Explicit BLE: "ble://AA:BB:CC:DD:EE:FF" or "ble://" (auto-scan)
 		addr := strings.TrimPrefix(port, "ble://")
-		adapter, _ := sanitizeBLEAdapterName(d.bleAdapter)
-		transport = NewBLETransport(addr, adapter)
-		log.Printf("meshtastic: connecting via BLE (address=%q, adapter=%s)", addr, adapter)
+		// Safety gate: check BLE/WiFi coexistence before proceeding
+		safeAdapter, safeErr := CheckBLESafety(d.bleAdapter)
+		if safeErr != nil {
+			return safeErr
+		}
+		transport = NewBLETransport(addr, safeAdapter)
+		log.Printf("meshtastic: connecting via BLE (address=%q, adapter=%s)", addr, safeAdapter)
 
 	case port != "":
 		// Explicit serial port
@@ -218,11 +230,18 @@ func (d *MeshtasticDriver) Connect(ctx context.Context, port string) error {
 		}
 
 		if transport == nil {
-			// Try BLE fallback
-			if IsBLEAvailable(d.bleAdapter) {
-				log.Printf("meshtastic: auto-detect trying BLE")
-				adapter, _ := sanitizeBLEAdapterName(d.bleAdapter)
-				bleTransport := NewBLETransport(d.bleAddress, adapter)
+			// Try BLE fallback — but only if safe (not disrupting WiFi AP)
+			safeAdapter, safeErr := CheckBLESafety(d.bleAdapter)
+			if safeErr != nil {
+				// BLE blocked by safety gate — report alongside any serial error
+				if transportErr != nil {
+					transportErr = fmt.Errorf("serial: %v; %w", transportErr, safeErr)
+				} else {
+					transportErr = safeErr
+				}
+			} else if IsBLEAvailable(safeAdapter) {
+				log.Printf("meshtastic: auto-detect trying BLE via %s", safeAdapter)
+				bleTransport := NewBLETransport(d.bleAddress, safeAdapter)
 				if err := bleTransport.Connect(ctx); err == nil {
 					transport = bleTransport
 				} else {
@@ -656,16 +675,26 @@ func (d *MeshtasticDriver) GetPosition() *MeshNode {
 
 // ScanDevices scans for Meshtastic devices on serial ports and BLE.
 // This is independent of the persistent connection.
-func (d *MeshtasticDriver) ScanDevices(ctx context.Context) []MeshtasticDeviceInfo {
+func (d *MeshtasticDriver) ScanDevices(ctx context.Context) ([]MeshtasticDeviceInfo, *BLESafetyError) {
 	// Scan serial ports
 	devices := scanMeshtasticPorts(ctx)
 
-	// Scan BLE devices (best effort — may fail if BlueZ unavailable)
+	// Scan BLE devices (may be skipped if safety gate blocks)
 	adapter, _ := sanitizeBLEAdapterName(d.bleAdapter)
-	bleDevices := ScanBLEDevices(ctx, adapter)
+	bleDevices, bleWarning := ScanBLEDevices(ctx, adapter)
 	devices = append(devices, bleDevices...)
 
-	return devices
+	// Emit SSE event if BLE was blocked so dashboard can show warning
+	if bleWarning != nil {
+		d.emitEvent(MeshEvent{
+			Type:    "ble_blocked",
+			Message: bleWarning.Message,
+			Data:    map[string]string{"reason": "shared_radio"},
+			Time:    time.Now().UTC().Format(time.RFC3339),
+		})
+	}
+
+	return devices, bleWarning
 }
 
 // MeshtasticDeviceInfo holds info about a detected Meshtastic device.

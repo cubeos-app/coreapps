@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -23,11 +24,15 @@ import (
 // @Success 200 {object} map[string]interface{}
 // @Router /meshtastic/devices [get]
 func (h *HALHandler) GetMeshtasticDevices(w http.ResponseWriter, r *http.Request) {
-	devices := h.meshtastic.ScanDevices(r.Context())
-	jsonResponse(w, http.StatusOK, map[string]interface{}{
+	devices, bleWarning := h.meshtastic.ScanDevices(r.Context())
+	response := map[string]interface{}{
 		"count":   len(devices),
 		"devices": devices,
-	})
+	}
+	if bleWarning != nil {
+		response["ble_warning"] = bleWarning.Message
+	}
+	jsonResponse(w, http.StatusOK, response)
 }
 
 // GetMeshtasticStatus returns Meshtastic connection and radio status.
@@ -213,6 +218,12 @@ func (h *HALHandler) ConnectMeshtastic(w http.ResponseWriter, r *http.Request) {
 
 	if err := h.meshtastic.Connect(ctx, connectTarget); err != nil {
 		log.Printf("meshtastic: connect failed: %v", err)
+		// BLE safety gate → 409 Conflict (not 500)
+		var safetyErr *BLESafetyError
+		if errors.As(err, &safetyErr) {
+			errorResponse(w, http.StatusConflict, safetyErr.Message)
+			return
+		}
 		errorResponse(w, http.StatusInternalServerError, fmt.Sprintf("connection failed: %v", err))
 		return
 	}
@@ -302,6 +313,11 @@ func (h *HALHandler) SendMeshtasticMessage(w http.ResponseWriter, r *http.Reques
 		ctx, cancel := getConnectContext(r.Context(), 30*time.Second)
 		defer cancel()
 		if err := h.meshtastic.Connect(ctx, ""); err != nil {
+			var safetyErr *BLESafetyError
+			if errors.As(err, &safetyErr) {
+				errorResponse(w, http.StatusConflict, safetyErr.Message)
+				return
+			}
 			errorResponse(w, http.StatusInternalServerError, "not connected and auto-connect failed")
 			return
 		}
@@ -378,6 +394,11 @@ func (h *HALHandler) SendMeshtasticRaw(w http.ResponseWriter, r *http.Request) {
 		ctx, cancel := getConnectContext(r.Context(), 30*time.Second)
 		defer cancel()
 		if err := h.meshtastic.Connect(ctx, ""); err != nil {
+			var safetyErr *BLESafetyError
+			if errors.As(err, &safetyErr) {
+				errorResponse(w, http.StatusConflict, safetyErr.Message)
+				return
+			}
 			errorResponse(w, http.StatusInternalServerError, "not connected and auto-connect failed")
 			return
 		}

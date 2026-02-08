@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -66,10 +67,92 @@ const (
 	dbusObjectManager = "org.freedesktop.DBus.ObjectManager"
 
 	// BLE timeouts
-	bleScanTimeout    = 15 * time.Second
+	bleScanTimeout    = 5 * time.Second
 	bleConnectTimeout = 10 * time.Second
 	bleMTUTarget      = 512
 )
+
+// BLESafetyError is returned when BLE operation is blocked due to shared radio conflict.
+type BLESafetyError struct {
+	Message string
+}
+
+func (e *BLESafetyError) Error() string {
+	return e.Message
+}
+
+// isBLEOnOnboardAdapter checks if the BLE adapter shares the radio with WiFi.
+// On Raspberry Pi, the onboard Broadcom chip handles both WiFi and BLE on the
+// same 2.4GHz radio. A USB BLE dongle gets its own radio and is safe to scan.
+func isBLEOnOnboardAdapter(adapter string) bool {
+	if adapter == "" || adapter == "hci0" {
+		devicePath := "/sys/class/bluetooth/hci0/device"
+		link, err := os.Readlink(devicePath)
+		if err != nil {
+			// Can't determine — assume onboard for safety
+			return true
+		}
+		// Onboard: symlink contains "platform" or "uart"
+		// USB dongle: symlink contains "usb"
+		return !strings.Contains(link, "usb")
+	}
+	// Non-hci0 adapters are always USB dongles
+	return false
+}
+
+// isHostapdActive checks if the WiFi Access Point is running.
+func isHostapdActive() bool {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	out, err := execWithTimeout(ctx, "systemctl", "is-active", "hostapd")
+	return err == nil && strings.TrimSpace(out) == "active"
+}
+
+// findBestBLEAdapter returns the best available BLE adapter.
+// Prefers USB adapters (hci1+) over the onboard adapter (hci0) because
+// onboard BLE shares the 2.4GHz radio with WiFi on Raspberry Pi.
+func findBestBLEAdapter() string {
+	for i := 1; i <= 5; i++ {
+		path := fmt.Sprintf("/sys/class/bluetooth/hci%d", i)
+		if _, err := os.Stat(path); err == nil {
+			return fmt.Sprintf("hci%d", i)
+		}
+	}
+	return "hci0" // fallback to onboard
+}
+
+// CheckBLESafety verifies that BLE operations are safe to proceed.
+// Returns the adapter to use, or a BLESafetyError if BLE would disrupt WiFi AP.
+//
+// Logic:
+//  1. If BLE_ADAPTER env var forces a specific adapter, use it (user override)
+//  2. Otherwise, auto-select the best adapter (prefer USB over onboard)
+//  3. If selected adapter is onboard AND hostapd is active → block
+func CheckBLESafety(requestedAdapter string) (string, error) {
+	// Resolve adapter: env var → requested → auto-detect
+	adapter := os.Getenv("BLE_ADAPTER")
+	if adapter == "" {
+		adapter = requestedAdapter
+	}
+	if adapter == "" {
+		adapter = findBestBLEAdapter()
+	}
+
+	// Sanitize
+	adapter, err := sanitizeBLEAdapterName(adapter)
+	if err != nil {
+		return "", err
+	}
+
+	// Safety check: onboard adapter + active AP = blocked
+	if isBLEOnOnboardAdapter(adapter) && isHostapdActive() {
+		return "", &BLESafetyError{
+			Message: "BLE scan blocked: onboard Bluetooth shares radio with WiFi AP. Connect a USB Bluetooth adapter or use USB serial.",
+		}
+	}
+
+	return adapter, nil
+}
 
 // NewBLETransport creates a new BLE transport.
 // If address is empty, auto-scanning for Meshtastic service UUID will be used.
@@ -358,7 +441,20 @@ func (t *BLETransport) findMeshtasticDevice() (string, bool) {
 
 // ScanBLEDevices performs a non-destructive BLE scan and returns detected Meshtastic devices.
 // This is independent of any active connection — used by the ScanDevices endpoint.
-func ScanBLEDevices(ctx context.Context, adapter string) []MeshtasticDeviceInfo {
+// Returns nil (no BLE results) if scanning is blocked by the safety gate.
+func ScanBLEDevices(ctx context.Context, adapter string) ([]MeshtasticDeviceInfo, *BLESafetyError) {
+	// Safety gate: check if BLE scanning is safe
+	safeAdapter, err := CheckBLESafety(adapter)
+	if err != nil {
+		if safetyErr, ok := err.(*BLESafetyError); ok {
+			log.Printf("meshtastic: BLE scan skipped — %s", safetyErr.Message)
+			return nil, safetyErr
+		}
+		log.Printf("meshtastic: BLE scan skipped — adapter error: %v", err)
+		return nil, nil
+	}
+	adapter = safeAdapter
+
 	if adapter == "" {
 		adapter = "hci0"
 	}
@@ -366,7 +462,7 @@ func ScanBLEDevices(ctx context.Context, adapter string) []MeshtasticDeviceInfo 
 	conn, err := dbus.SystemBus()
 	if err != nil {
 		log.Printf("meshtastic: BLE scan failed to connect to DBus: %v", err)
-		return nil
+		return nil, nil
 	}
 	// Note: Do NOT close conn — it's a shared cached system bus connection
 
@@ -377,7 +473,7 @@ func ScanBLEDevices(ctx context.Context, adapter string) []MeshtasticDeviceInfo 
 	powered, err := getDBusProperty[bool](conn, adapterPath, bluezAdapter1, "Powered")
 	if err != nil || !powered {
 		log.Printf("meshtastic: BLE adapter %s not powered or unavailable", adapter)
-		return nil
+		return nil, nil
 	}
 
 	// Set discovery filter
@@ -407,10 +503,10 @@ func ScanBLEDevices(ctx context.Context, adapter string) []MeshtasticDeviceInfo 
 	var objects map[dbus.ObjectPath]map[string]map[string]dbus.Variant
 	call = root.Call(dbusObjectManager+".GetManagedObjects", 0)
 	if call.Err != nil {
-		return nil
+		return nil, nil
 	}
 	if err := call.Store(&objects); err != nil {
-		return nil
+		return nil, nil
 	}
 
 	for path, ifaces := range objects {
@@ -463,7 +559,7 @@ func ScanBLEDevices(ctx context.Context, adapter string) []MeshtasticDeviceInfo 
 		devices = append(devices, info)
 	}
 
-	return devices
+	return devices, nil
 }
 
 // ============================================================================
