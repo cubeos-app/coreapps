@@ -470,6 +470,9 @@ func (d *MeshtasticDriver) processFromRadio(data []byte) {
 	if fr.ModuleConfigRaw != nil {
 		d.storeConfigSection("module_config", fr.ModuleConfigRaw, moduleConfigSectionNames)
 	}
+	if fr.ChannelRaw != nil {
+		d.storeChannelFromHandshake(fr.ChannelRaw)
+	}
 }
 
 // handleMeshPacket processes a decoded MeshPacket.
@@ -1120,7 +1123,224 @@ func (d *MeshtasticDriver) GetConfig() map[string]interface{} {
 		result["module_config"] = moduleConfig
 	}
 
+	// Include channel data if available
+	channels := make(map[string]interface{})
+	for key, val := range d.configData {
+		if len(key) > 8 && key[:8] == "channel." {
+			channels[key[8:]] = val
+		}
+	}
+	if len(channels) > 0 {
+		result["channels"] = channels
+	}
+
 	return result
+}
+
+// storeChannelFromHandshake parses a Channel protobuf message from the handshake
+// and stores it in configData keyed by channel index (e.g., "channel.0").
+// Channel proto: field 1 = index (uint32), field 2 = settings (ChannelSettings), field 3 = role (enum).
+func (d *MeshtasticDriver) storeChannelFromHandshake(raw []byte) {
+	var chIndex uint32
+	var role uint64
+	var settings map[string]interface{}
+
+	pos := 0
+	for pos < len(raw) {
+		fieldNum, wireType, newPos, err := readTag(raw, pos)
+		if err != nil {
+			return
+		}
+		pos = newPos
+
+		switch fieldNum {
+		case 1: // index (uint32)
+			val, n := readVarint(raw, pos)
+			if n <= 0 {
+				return
+			}
+			chIndex = uint32(val)
+			pos += n
+		case 2: // settings (ChannelSettings, length-delimited)
+			if wireType == 2 {
+				inner, newPos, err := readLengthDelimited(raw, pos)
+				if err != nil {
+					return
+				}
+				settings = decodeProtoToMap(inner)
+				pos = newPos
+			} else {
+				pos = skipField(raw, pos, wireType)
+				if pos < 0 {
+					return
+				}
+			}
+		case 3: // role (enum = varint)
+			val, n := readVarint(raw, pos)
+			if n <= 0 {
+				return
+			}
+			role = val
+			pos += n
+		default:
+			pos = skipField(raw, pos, wireType)
+			if pos < 0 {
+				return
+			}
+		}
+	}
+
+	channelData := map[string]interface{}{
+		"index": chIndex,
+		"role":  channelRoleName(role),
+	}
+	if settings != nil {
+		channelData["settings"] = settings
+	}
+
+	key := fmt.Sprintf("channel.%d", chIndex)
+	d.mu.Lock()
+	d.configData[key] = channelData
+	d.mu.Unlock()
+}
+
+// channelRoleName returns a human-readable name for a Channel.Role enum value.
+func channelRoleName(role uint64) string {
+	switch role {
+	case 0:
+		return "DISABLED"
+	case 1:
+		return "PRIMARY"
+	case 2:
+		return "SECONDARY"
+	default:
+		return fmt.Sprintf("ROLE_%d", role)
+	}
+}
+
+// ChannelConfig holds the parameters for setting a Meshtastic channel.
+type ChannelConfig struct {
+	Index           uint32 // 0 = primary, 1-7 = secondary
+	Name            string // Channel name
+	PSK             []byte // Pre-shared key: 0, 1, 16, or 32 bytes
+	Role            uint32 // 0=DISABLED, 1=PRIMARY, 2=SECONDARY
+	UplinkEnabled   bool
+	DownlinkEnabled bool
+}
+
+// SetChannel sends a channel configuration to the connected Meshtastic radio.
+// Uses AdminMessage (portnum 6) self-addressed to own node.
+func (d *MeshtasticDriver) SetChannel(ctx context.Context, ch ChannelConfig) error {
+	d.mu.RLock()
+	if !d.connected || d.transport == nil {
+		d.mu.RUnlock()
+		return fmt.Errorf("not connected to Meshtastic device")
+	}
+	myNode := d.myNodeNum
+	d.mu.RUnlock()
+
+	if myNode == 0 {
+		return fmt.Errorf("own node number not known (config handshake may not have completed)")
+	}
+
+	// Build the AdminMessage → MeshPacket → ToRadio chain
+	toRadio := buildSetChannelToRadio(myNode, ch)
+	if err := d.transport.SendToRadio(toRadio); err != nil {
+		return fmt.Errorf("send channel config failed: %w", err)
+	}
+
+	return nil
+}
+
+// buildSetChannelToRadio builds a complete ToRadio message containing an AdminMessage
+// with set_channel (field 2) to configure a Meshtastic channel.
+//
+// Wire structure:
+//
+//	ToRadio { field 1: MeshPacket {
+//	  from: myNodeNum, to: myNodeNum,
+//	  decoded: Data { portnum: ADMIN_APP(6), payload: AdminMessage {
+//	    field 2: Channel { index, settings: ChannelSettings { psk, name, ... }, role }
+//	  }},
+//	  want_ack: true
+//	}}
+func buildSetChannelToRadio(myNodeNum uint32, ch ChannelConfig) []byte {
+	// Step 1: Build ChannelSettings (innermost)
+	settings := make([]byte, 0, 64)
+	// ChannelSettings field 3: psk (bytes)
+	if len(ch.PSK) > 0 {
+		settings = append(settings, 0x1A) // field 3, length-delimited
+		settings = appendVarint(settings, uint64(len(ch.PSK)))
+		settings = append(settings, ch.PSK...)
+	}
+	// ChannelSettings field 4: name (string)
+	if ch.Name != "" {
+		settings = append(settings, 0x22) // field 4, length-delimited
+		settings = appendVarint(settings, uint64(len(ch.Name)))
+		settings = append(settings, []byte(ch.Name)...)
+	}
+	// ChannelSettings field 6: uplink_enabled (bool)
+	if ch.UplinkEnabled {
+		settings = append(settings, 0x30, 0x01) // field 6, varint 1
+	}
+	// ChannelSettings field 7: downlink_enabled (bool)
+	if ch.DownlinkEnabled {
+		settings = append(settings, 0x38, 0x01) // field 7, varint 1
+	}
+
+	// Step 2: Build Channel message
+	channel := make([]byte, 0, len(settings)+16)
+	// Channel field 1: index (uint32)
+	channel = append(channel, 0x08) // field 1, varint
+	channel = appendVarint(channel, uint64(ch.Index))
+	// Channel field 2: settings (ChannelSettings)
+	if len(settings) > 0 {
+		channel = append(channel, 0x12) // field 2, length-delimited
+		channel = appendVarint(channel, uint64(len(settings)))
+		channel = append(channel, settings...)
+	}
+	// Channel field 3: role (enum)
+	if ch.Role > 0 {
+		channel = append(channel, 0x18) // field 3, varint
+		channel = appendVarint(channel, uint64(ch.Role))
+	}
+
+	// Step 3: Build AdminMessage with field 2 = set_channel
+	admin := make([]byte, 0, len(channel)+8)
+	admin = append(admin, 0x12) // field 2, length-delimited
+	admin = appendVarint(admin, uint64(len(channel)))
+	admin = append(admin, channel...)
+
+	// Step 4: Build Data submessage (portnum=ADMIN_APP, payload=AdminMessage)
+	data := make([]byte, 0, len(admin)+16)
+	data = append(data, 0x08) // Data field 1: portnum (varint)
+	data = appendVarint(data, uint64(PortNumAdminApp))
+	data = append(data, 0x12) // Data field 2: payload (bytes)
+	data = appendVarint(data, uint64(len(admin)))
+	data = append(data, admin...)
+	// Data field 3: want_response = true
+	data = append(data, 0x18, 0x01)
+
+	// Step 5: Build MeshPacket (self-addressed admin packet)
+	pkt := make([]byte, 0, len(data)+32)
+	// MeshPacket field 1: from (uint32)
+	pkt = append(pkt, 0x08) // field 1, varint
+	pkt = appendVarint(pkt, uint64(myNodeNum))
+	// MeshPacket field 2: to (uint32)
+	pkt = append(pkt, 0x10) // field 2, varint
+	pkt = appendVarint(pkt, uint64(myNodeNum))
+	// MeshPacket field 4: decoded (Data, length-delimited)
+	pkt = append(pkt, 0x22) // field 4, length-delimited
+	pkt = appendVarint(pkt, uint64(len(data)))
+	pkt = append(pkt, data...)
+	// MeshPacket field 7: want_ack = true
+	pkt = append(pkt, 0x38, 0x01) // field 7, varint 1
+	// MeshPacket field 9: hop_limit = 3
+	pkt = append(pkt, 0x48) // field 9, varint
+	pkt = appendVarint(pkt, 3)
+
+	// Step 6: Wrap in ToRadio
+	return buildToRadioPacket(pkt)
 }
 
 // ============================================================================
@@ -1144,8 +1364,9 @@ const (
 	PortNumTextMessage = 1
 	PortNumPosition    = 3
 	PortNumNodeInfo    = 4
-	PortNumTelemetry   = 67
+	PortNumAdminApp    = 6
 	PortNumSerial      = 64
+	PortNumTelemetry   = 67
 	PortNumPrivate     = 256
 )
 
@@ -1157,6 +1378,8 @@ func portNumName(pn int) string {
 		return "POSITION_APP"
 	case PortNumNodeInfo:
 		return "NODEINFO_APP"
+	case PortNumAdminApp:
+		return "ADMIN_APP"
 	case PortNumTelemetry:
 		return "TELEMETRY_APP"
 	case PortNumSerial:
@@ -1209,6 +1432,7 @@ type ProtoFromRadio struct {
 	ConfigCompleteID uint32
 	ConfigRaw        []byte // Field 5: Config message (raw protobuf)
 	ModuleConfigRaw  []byte // Field 7: ModuleConfig message (raw protobuf)
+	ChannelRaw       []byte // Field 8: Channel message (raw protobuf)
 }
 
 // ProtoMeshPacket represents a parsed MeshPacket.
@@ -1335,6 +1559,14 @@ func parseFromRadio(data []byte) (*ProtoFromRadio, error) {
 				return fr, nil
 			}
 			fr.ModuleConfigRaw = val
+			pos = newPos
+
+		case 8: // channel (Channel message)
+			val, newPos, err := readLengthDelimited(data, pos)
+			if err != nil {
+				return fr, nil
+			}
+			fr.ChannelRaw = val
 			pos = newPos
 
 		default:

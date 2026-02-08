@@ -487,15 +487,110 @@ func (h *HALHandler) StreamMeshtasticEvents(w http.ResponseWriter, r *http.Reque
 	}
 }
 
-// SetMeshtasticChannel configures a Meshtastic channel.
+// SetMeshtasticChannel configures a Meshtastic channel via AdminMessage.
 // @Summary Set Meshtastic channel
-// @Description Configures a Meshtastic channel (not yet implemented — requires radio config protobuf)
+// @Description Configures a Meshtastic channel by sending an AdminMessage to the connected radio. Supports primary (index 0) and secondary (1-7) channels with PSK, name, role, and uplink/downlink settings. Auto-connects if not already connected.
 // @Tags Meshtastic
+// @Accept json
 // @Produce json
-// @Failure 501 {object} ErrorResponse
+// @Param request body MeshtasticChannelRequest true "Channel configuration"
+// @Success 200 {object} SuccessResponse
+// @Failure 400 {object} ErrorResponse
+// @Failure 409 {object} ErrorResponse "BLE safety gate conflict"
+// @Failure 500 {object} ErrorResponse
 // @Router /meshtastic/channel [post]
 func (h *HALHandler) SetMeshtasticChannel(w http.ResponseWriter, r *http.Request) {
-	errorResponse(w, http.StatusNotImplemented, "Meshtastic channel configuration not yet implemented (requires config protobuf, deferred to Phase 2b)")
+	r = limitBody(r, 1<<10) // 1KB max
+
+	var req MeshtasticChannelRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		errorResponse(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+
+	// Validate index: 0-7
+	if req.Index > 7 {
+		errorResponse(w, http.StatusBadRequest, "channel index must be 0-7")
+		return
+	}
+
+	// Validate role
+	var roleVal uint32
+	switch req.Role {
+	case "PRIMARY":
+		roleVal = 1
+	case "SECONDARY":
+		roleVal = 2
+	case "DISABLED":
+		roleVal = 0
+	default:
+		errorResponse(w, http.StatusBadRequest, "role must be PRIMARY, SECONDARY, or DISABLED")
+		return
+	}
+
+	// Enforce role/index consistency
+	if req.Index == 0 && roleVal == 2 {
+		errorResponse(w, http.StatusBadRequest, "channel 0 cannot be SECONDARY (must be PRIMARY or DISABLED)")
+		return
+	}
+	if req.Index > 0 && roleVal == 1 {
+		errorResponse(w, http.StatusBadRequest, "only channel 0 can be PRIMARY")
+		return
+	}
+
+	// Validate and decode PSK
+	var pskBytes []byte
+	if req.PSK != "" {
+		decoded, err := base64.StdEncoding.DecodeString(req.PSK)
+		if err != nil {
+			errorResponse(w, http.StatusBadRequest, "psk must be valid base64")
+			return
+		}
+		pskLen := len(decoded)
+		if pskLen != 0 && pskLen != 1 && pskLen != 16 && pskLen != 32 {
+			errorResponse(w, http.StatusBadRequest, fmt.Sprintf("psk must be 0, 1, 16, or 32 bytes (got %d)", pskLen))
+			return
+		}
+		pskBytes = decoded
+	}
+
+	// Validate channel name length (Meshtastic limit: 11 bytes for name)
+	if len(req.Name) > 11 {
+		errorResponse(w, http.StatusBadRequest, "channel name must be 11 characters or fewer")
+		return
+	}
+
+	// Auto-connect if needed (same pattern as SendMeshtasticText)
+	if !h.meshtastic.IsConnected() {
+		ctx, cancel := getConnectContext(r.Context(), 30*time.Second)
+		defer cancel()
+		if err := h.meshtastic.Connect(ctx, ""); err != nil {
+			var safetyErr *BLESafetyError
+			if errors.As(err, &safetyErr) {
+				errorResponse(w, http.StatusConflict, safetyErr.Message)
+				return
+			}
+			errorResponse(w, http.StatusInternalServerError, "not connected and auto-connect failed")
+			return
+		}
+	}
+
+	ch := ChannelConfig{
+		Index:           uint32(req.Index),
+		Name:            req.Name,
+		PSK:             pskBytes,
+		Role:            roleVal,
+		UplinkEnabled:   req.UplinkEnabled,
+		DownlinkEnabled: req.DownlinkEnabled,
+	}
+
+	if err := h.meshtastic.SetChannel(r.Context(), ch); err != nil {
+		log.Printf("meshtastic: set channel failed: %v", err)
+		errorResponse(w, http.StatusInternalServerError, fmt.Sprintf("set channel failed: %v", err))
+		return
+	}
+
+	successResponse(w, fmt.Sprintf("channel %d configured as %s", req.Index, req.Role))
 }
 
 // GetMeshtasticConfig returns the current radio config.
@@ -528,6 +623,17 @@ type MeshtasticSendRequest struct {
 	Text    string `json:"text" example:"Hello mesh!"`
 	To      string `json:"to,omitempty" example:"!a1b2c3d4"`
 	Channel int    `json:"channel,omitempty" example:"0"`
+}
+
+// MeshtasticChannelRequest represents a channel configuration request.
+// @Description Meshtastic channel configuration parameters
+type MeshtasticChannelRequest struct {
+	Index           int    `json:"index" example:"0"`
+	Name            string `json:"name" example:"CubeOS"`
+	PSK             string `json:"psk,omitempty" example:"AQ=="`
+	Role            string `json:"role" example:"PRIMARY"`
+	UplinkEnabled   bool   `json:"uplink_enabled,omitempty" example:"false"`
+	DownlinkEnabled bool   `json:"downlink_enabled,omitempty" example:"false"`
 }
 
 // MeshtasticRawRequest represents a raw packet send request.
