@@ -223,6 +223,54 @@ func (h *HALHandler) SendIridiumMessage(w http.ResponseWriter, r *http.Request) 
 		}
 	}
 
+	// Validate inputs BEFORE auto-connect (users deserve proper 400 errors)
+	var textMsg string
+	var binaryData []byte
+
+	switch req.Format {
+	case "text":
+		textMsg = req.Text
+		if textMsg == "" {
+			// Fallback: decode data as text
+			decoded, decErr := base64.StdEncoding.DecodeString(req.Data)
+			if decErr != nil {
+				errorResponse(w, http.StatusBadRequest, "data is not valid base64")
+				return
+			}
+			textMsg = string(decoded)
+		}
+
+		// Validate text message
+		if err := validateIridiumMessage(textMsg); err != nil {
+			errorResponse(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		if len(textMsg) > 120 {
+			errorResponse(w, http.StatusBadRequest, "text message too long (max 120 chars for AT+SBDWT, use binary for larger)")
+			return
+		}
+
+	case "binary":
+		var decErr error
+		binaryData, decErr = base64.StdEncoding.DecodeString(req.Data)
+		if decErr != nil {
+			errorResponse(w, http.StatusBadRequest, "data is not valid base64")
+			return
+		}
+		if len(binaryData) == 0 {
+			errorResponse(w, http.StatusBadRequest, "data is empty")
+			return
+		}
+		if len(binaryData) > 340 {
+			errorResponse(w, http.StatusBadRequest, "binary data too large (max 340 bytes for SBD)")
+			return
+		}
+
+	default:
+		errorResponse(w, http.StatusBadRequest, "format must be 'text' or 'binary'")
+		return
+	}
+
 	// Auto-connect if needed
 	if !h.iridium.IsConnected() {
 		port := r.URL.Query().Get("port")
@@ -237,45 +285,10 @@ func (h *HALHandler) SendIridiumMessage(w http.ResponseWriter, r *http.Request) 
 
 	switch req.Format {
 	case "text":
-		msg := req.Text
-		if msg == "" {
-			// Fallback: decode data as text
-			decoded, decErr := base64.StdEncoding.DecodeString(req.Data)
-			if decErr != nil {
-				errorResponse(w, http.StatusBadRequest, "data is not valid base64")
-				return
-			}
-			msg = string(decoded)
-		}
-
-		// Validate text message
-		if err := validateIridiumMessage(msg); err != nil {
-			errorResponse(w, http.StatusBadRequest, err.Error())
-			return
-		}
-		if len(msg) > 120 {
-			errorResponse(w, http.StatusBadRequest, "text message too long (max 120 chars for AT+SBDWT, use binary for larger)")
-			return
-		}
-
-		result, err = h.iridium.SendText(ctx, msg)
+		result, err = h.iridium.SendText(ctx, textMsg)
 
 	case "binary":
-		data, decErr := base64.StdEncoding.DecodeString(req.Data)
-		if decErr != nil {
-			errorResponse(w, http.StatusBadRequest, "data is not valid base64")
-			return
-		}
-		if len(data) > 340 {
-			errorResponse(w, http.StatusBadRequest, "binary data too large (max 340 bytes)")
-			return
-		}
-		if len(data) == 0 {
-			errorResponse(w, http.StatusBadRequest, "data is empty")
-			return
-		}
-
-		result, err = h.iridium.SendBinary(ctx, data)
+		result, err = h.iridium.SendBinary(ctx, binaryData)
 
 	default:
 		errorResponse(w, http.StatusBadRequest, "format must be 'text' or 'binary'")
