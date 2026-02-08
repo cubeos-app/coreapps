@@ -47,6 +47,7 @@ func SetupRoutes(r chi.Router, h *HALHandler) {
 		r.Post("/battery/quickstart", h.QuickStartBattery)
 		r.Post("/monitor/start", h.StartPowerMonitor)
 		r.Post("/monitor/stop", h.StopPowerMonitor)
+		r.Get("/monitor/status", h.GetMonitorStatus)
 	})
 
 	// RTC

@@ -11,11 +11,20 @@ import (
 )
 
 // HALHandler handles all HAL API endpoints.
-type HALHandler struct{}
+type HALHandler struct {
+	powerMonitor *PowerMonitor
+}
 
 // NewHALHandler creates a new HAL handler instance.
 func NewHALHandler() *HALHandler {
-	return &HALHandler{}
+	return &HALHandler{
+		powerMonitor: NewPowerMonitor(),
+	}
+}
+
+// PowerMonitorRef returns a reference to the power monitor for shutdown wiring.
+func (h *HALHandler) PowerMonitorRef() *PowerMonitor {
+	return h.powerMonitor
 }
 
 // ErrorResponse represents an error response.

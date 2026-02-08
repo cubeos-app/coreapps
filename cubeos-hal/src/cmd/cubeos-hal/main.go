@@ -40,6 +40,20 @@ func main() {
 	// Create handler
 	h := handlers.NewHALHandler()
 
+	// Auto-start power monitor if configured
+	if handlers.ShouldAutostart() {
+		log.Printf("Power monitor autostart enabled")
+		go func() {
+			// Small delay to let the HTTP server start first
+			time.Sleep(2 * time.Second)
+			if msg, err := h.PowerMonitorRef().Start(); err != nil {
+				log.Printf("Power monitor autostart failed: %v", err)
+			} else {
+				log.Printf("Power monitor autostart: %s", msg)
+			}
+		}()
+	}
+
 	// Health check at root (outside timeout wrapper — must always respond fast)
 	r.Get("/health", h.HealthCheck)
 
@@ -83,6 +97,9 @@ func main() {
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 	sig := <-quit
 	log.Printf("Received signal %s, shutting down gracefully...", sig)
+
+	// Stop power monitor first
+	h.PowerMonitorRef().Shutdown()
 
 	// Give 15 seconds for graceful shutdown (aligned with Pi watchdog timeout)
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)

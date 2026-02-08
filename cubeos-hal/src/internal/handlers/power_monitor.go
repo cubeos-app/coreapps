@@ -1,0 +1,419 @@
+package handlers
+
+import (
+	"context"
+	"fmt"
+	"log"
+	"os"
+	"strconv"
+	"sync"
+	"time"
+)
+
+// ============================================================================
+// Power Monitor
+// ============================================================================
+
+const (
+	defaultMonitorInterval      = 30 * time.Second
+	defaultLowBatteryThreshold  = 15.0
+	defaultCritBatteryThreshold = 5.0
+	defaultShutdownDelay        = 30 * time.Second
+	maxEvents                   = 50
+)
+
+// PowerEvent represents a notable power state change.
+type PowerEvent struct {
+	Timestamp string `json:"timestamp"`
+	Type      string `json:"type"` // started, stopped, ac_lost, ac_restored, low_battery, critical_battery, shutdown_pending, shutdown_cancelled
+	Message   string `json:"message"`
+}
+
+// MonitorStatus is the response payload for GET /power/monitor/status.
+type MonitorStatus struct {
+	Running         bool            `json:"running"`
+	DetectedDevice  string          `json:"detected_device"`
+	IntervalSeconds int             `json:"interval_seconds"`
+	LastReading     *BatteryReading `json:"last_reading"`
+	ACPowerLost     bool            `json:"ac_power_lost"`
+	ShutdownPending bool            `json:"shutdown_pending"`
+	ShutdownAt      *string         `json:"shutdown_at"`
+	Events          []PowerEvent    `json:"events"`
+}
+
+// PowerMonitor runs a background goroutine that periodically reads UPS status
+// and takes action on power events (AC loss, low battery, critical shutdown).
+type PowerMonitor struct {
+	mu              sync.Mutex
+	running         bool
+	cancel          context.CancelFunc
+	interval        time.Duration
+	lowThreshold    float64
+	critThreshold   float64
+	shutdownDelay   time.Duration
+	lastReading     *BatteryReading
+	acPowerLost     bool
+	shutdownPending bool
+	shutdownAt      *time.Time
+	shutdownCancel  context.CancelFunc
+	events          []PowerEvent
+	driver          UPSDriver
+}
+
+// NewPowerMonitor creates a PowerMonitor with configuration from environment variables.
+func NewPowerMonitor() *PowerMonitor {
+	interval := defaultMonitorInterval
+	if v := os.Getenv("HAL_POWER_MONITOR_INTERVAL"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil && d >= 5*time.Second {
+			interval = d
+		}
+	}
+
+	lowThreshold := defaultLowBatteryThreshold
+	if v := os.Getenv("HAL_UPS_LOW_BATTERY_THRESHOLD"); v != "" {
+		if f, err := strconv.ParseFloat(v, 64); err == nil && f > 0 && f < 100 {
+			lowThreshold = f
+		}
+	}
+
+	critThreshold := defaultCritBatteryThreshold
+	if v := os.Getenv("HAL_UPS_CRITICAL_BATTERY_THRESHOLD"); v != "" {
+		if f, err := strconv.ParseFloat(v, 64); err == nil && f > 0 && f < 100 {
+			critThreshold = f
+		}
+	}
+
+	shutdownDelay := defaultShutdownDelay
+	if v := os.Getenv("HAL_UPS_SHUTDOWN_DELAY"); v != "" {
+		if secs, err := strconv.Atoi(v); err == nil && secs > 0 {
+			shutdownDelay = time.Duration(secs) * time.Second
+		}
+	}
+
+	return &PowerMonitor{
+		interval:      interval,
+		lowThreshold:  lowThreshold,
+		critThreshold: critThreshold,
+		shutdownDelay: shutdownDelay,
+		events:        make([]PowerEvent, 0, maxEvents),
+	}
+}
+
+// Start begins background power monitoring. Auto-detects the UPS device
+// (or uses HAL_UPS_MODEL override), calls driver.OnBoot(), and starts polling.
+// Returns an error message if already running. Thread-safe.
+func (pm *PowerMonitor) Start() (string, error) {
+	pm.mu.Lock()
+	defer pm.mu.Unlock()
+
+	if pm.running {
+		return "already running", nil
+	}
+
+	// Detect UPS device
+	driver := DetectUPS()
+	pm.driver = driver
+
+	deviceName := "none"
+	if driver != nil {
+		deviceName = driver.Name()
+
+		// Run boot-time initialization
+		bootCtx, bootCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer bootCancel()
+		if err := driver.OnBoot(bootCtx); err != nil {
+			log.Printf("PowerMonitor: OnBoot error for %s: %v", deviceName, err)
+			// Non-fatal — continue starting the monitor
+		}
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	pm.cancel = cancel
+	pm.running = true
+
+	pm.addEventLocked("started", fmt.Sprintf("power monitoring started (%s)", deviceName))
+	log.Printf("PowerMonitor: started with %s, interval=%s, low=%g%%, crit=%g%%",
+		deviceName, pm.interval, pm.lowThreshold, pm.critThreshold)
+
+	go pm.pollLoop(ctx)
+
+	return "power monitoring started", nil
+}
+
+// Stop halts the background monitoring goroutine and cancels any pending shutdown.
+// Thread-safe.
+func (pm *PowerMonitor) Stop() (string, error) {
+	pm.mu.Lock()
+	defer pm.mu.Unlock()
+
+	if !pm.running {
+		return "not running", nil
+	}
+
+	if pm.cancel != nil {
+		pm.cancel()
+		pm.cancel = nil
+	}
+
+	// Cancel any pending shutdown countdown
+	if pm.shutdownCancel != nil {
+		pm.shutdownCancel()
+		pm.shutdownCancel = nil
+		pm.shutdownPending = false
+		pm.shutdownAt = nil
+		pm.addEventLocked("shutdown_cancelled", "pending shutdown cancelled (monitor stopped)")
+	}
+
+	pm.running = false
+	pm.addEventLocked("stopped", "power monitoring stopped")
+	log.Printf("PowerMonitor: stopped")
+
+	return "power monitoring stopped", nil
+}
+
+// Status returns the current monitor status. Thread-safe.
+func (pm *PowerMonitor) Status() MonitorStatus {
+	pm.mu.Lock()
+	defer pm.mu.Unlock()
+
+	status := MonitorStatus{
+		Running:         pm.running,
+		IntervalSeconds: int(pm.interval.Seconds()),
+		LastReading:     pm.lastReading,
+		ACPowerLost:     pm.acPowerLost,
+		ShutdownPending: pm.shutdownPending,
+		Events:          make([]PowerEvent, len(pm.events)),
+	}
+
+	copy(status.Events, pm.events)
+
+	if pm.driver != nil {
+		status.DetectedDevice = pm.driver.Name()
+	} else {
+		status.DetectedDevice = "none"
+	}
+
+	if pm.shutdownAt != nil {
+		t := pm.shutdownAt.UTC().Format(time.RFC3339)
+		status.ShutdownAt = &t
+	}
+
+	return status
+}
+
+// Shutdown gracefully stops the monitor. Called during HAL shutdown.
+func (pm *PowerMonitor) Shutdown() {
+	pm.mu.Lock()
+	if !pm.running {
+		pm.mu.Unlock()
+		return
+	}
+	pm.mu.Unlock()
+
+	pm.Stop()
+}
+
+// ============================================================================
+// Polling Loop
+// ============================================================================
+
+func (pm *PowerMonitor) pollLoop(ctx context.Context) {
+	// Do an immediate first poll
+	pm.poll(ctx)
+
+	ticker := time.NewTicker(pm.interval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			log.Printf("PowerMonitor: poll loop exiting")
+			return
+		case <-ticker.C:
+			pm.poll(ctx)
+		}
+	}
+}
+
+func (pm *PowerMonitor) poll(ctx context.Context) {
+	pm.mu.Lock()
+	driver := pm.driver
+	pm.mu.Unlock()
+
+	if driver == nil {
+		// No UPS detected — try re-detection periodically
+		newDriver := DetectUPS()
+		if newDriver != nil {
+			pm.mu.Lock()
+			pm.driver = newDriver
+			pm.addEventLocked("detected", fmt.Sprintf("UPS detected: %s", newDriver.Name()))
+			pm.mu.Unlock()
+
+			// Run OnBoot for newly detected device
+			bootCtx, bootCancel := context.WithTimeout(ctx, 10*time.Second)
+			defer bootCancel()
+			if err := newDriver.OnBoot(bootCtx); err != nil {
+				log.Printf("PowerMonitor: OnBoot error for %s: %v", newDriver.Name(), err)
+			}
+		}
+		return
+	}
+
+	// Read battery status
+	readCtx, readCancel := context.WithTimeout(ctx, 10*time.Second)
+	defer readCancel()
+
+	reading, err := driver.ReadStatus(readCtx)
+	if err != nil {
+		log.Printf("PowerMonitor: read error: %v", err)
+		return
+	}
+
+	pm.mu.Lock()
+	defer pm.mu.Unlock()
+
+	prevReading := pm.lastReading
+	pm.lastReading = reading
+
+	if !reading.Available {
+		return
+	}
+
+	// Detect AC power state transitions
+	if prevReading != nil && prevReading.Available {
+		if prevReading.ACPresent && !reading.ACPresent {
+			// AC power lost
+			pm.acPowerLost = true
+			pm.addEventLocked("ac_lost", fmt.Sprintf("AC power lost, running on battery (%.1f%%, %.2fV)", reading.Percentage, reading.Voltage))
+			log.Printf("PowerMonitor: AC power lost — battery at %.1f%% (%.2fV)", reading.Percentage, reading.Voltage)
+		} else if !prevReading.ACPresent && reading.ACPresent {
+			// AC power restored
+			pm.acPowerLost = false
+			pm.addEventLocked("ac_restored", fmt.Sprintf("AC power restored (%.1f%%)", reading.Percentage))
+			log.Printf("PowerMonitor: AC power restored — battery at %.1f%%", reading.Percentage)
+
+			// Cancel any pending shutdown
+			if pm.shutdownPending && pm.shutdownCancel != nil {
+				pm.shutdownCancel()
+				pm.shutdownCancel = nil
+				pm.shutdownPending = false
+				pm.shutdownAt = nil
+				pm.addEventLocked("shutdown_cancelled", "pending shutdown cancelled (AC power restored)")
+				log.Printf("PowerMonitor: pending shutdown cancelled — AC power restored")
+			}
+		}
+	} else if prevReading == nil {
+		// First reading — initialize AC state
+		pm.acPowerLost = !reading.ACPresent
+	}
+
+	// Skip battery threshold checks if AC is present
+	if reading.ACPresent {
+		return
+	}
+
+	// Low battery warning (event deduplication — only on transition)
+	if reading.Percentage < pm.lowThreshold {
+		if prevReading == nil || prevReading.Percentage >= pm.lowThreshold {
+			pm.addEventLocked("low_battery", fmt.Sprintf("battery low: %.1f%% (threshold: %.0f%%)", reading.Percentage, pm.lowThreshold))
+			log.Printf("PowerMonitor: LOW BATTERY — %.1f%% (threshold: %.0f%%)", reading.Percentage, pm.lowThreshold)
+		}
+	}
+
+	// Critical battery — initiate shutdown countdown
+	if reading.Percentage < pm.critThreshold && !pm.shutdownPending {
+		pm.shutdownPending = true
+		shutdownTime := time.Now().Add(pm.shutdownDelay)
+		pm.shutdownAt = &shutdownTime
+		pm.addEventLocked("critical_battery", fmt.Sprintf("CRITICAL battery: %.1f%% — shutdown in %s", reading.Percentage, pm.shutdownDelay))
+		log.Printf("PowerMonitor: CRITICAL BATTERY — %.1f%% — initiating shutdown in %s", reading.Percentage, pm.shutdownDelay)
+
+		// Launch shutdown countdown goroutine
+		shutdownCtx, shutdownCancel := context.WithCancel(context.Background())
+		pm.shutdownCancel = shutdownCancel
+
+		go pm.shutdownCountdown(shutdownCtx, driver)
+	}
+}
+
+// ============================================================================
+// Shutdown Countdown
+// ============================================================================
+
+func (pm *PowerMonitor) shutdownCountdown(ctx context.Context, driver UPSDriver) {
+	pm.mu.Lock()
+	delay := pm.shutdownDelay
+	pm.mu.Unlock()
+
+	select {
+	case <-ctx.Done():
+		// Shutdown was cancelled (AC restored or monitor stopped)
+		return
+	case <-time.After(delay):
+		// Countdown expired — execute shutdown
+	}
+
+	// Use the powerActionInProgress guard to prevent concurrent shutdown/reboot
+	if !powerActionInProgress.CompareAndSwap(false, true) {
+		log.Printf("PowerMonitor: shutdown aborted — another power action in progress")
+		pm.mu.Lock()
+		pm.shutdownPending = false
+		pm.shutdownAt = nil
+		pm.addEventLocked("shutdown_cancelled", "shutdown aborted (another power action in progress)")
+		pm.mu.Unlock()
+		return
+	}
+
+	log.Printf("PowerMonitor: executing critical battery shutdown")
+
+	pm.mu.Lock()
+	pm.addEventLocked("shutdown_executing", "critical battery shutdown executing")
+	pm.mu.Unlock()
+
+	// Device-specific shutdown sequence
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer shutdownCancel()
+
+	if err := driver.InitiateShutdown(shutdownCtx); err != nil {
+		log.Printf("PowerMonitor: driver shutdown error: %v", err)
+		// Continue with system shutdown anyway
+	}
+
+	// Execute system poweroff
+	log.Printf("PowerMonitor: executing systemctl poweroff")
+	if _, err := execWithTimeout(context.Background(), "systemctl", "poweroff"); err != nil {
+		log.Printf("PowerMonitor: systemctl poweroff failed: %v", err)
+		powerActionInProgress.Store(false)
+	}
+}
+
+// ============================================================================
+// Event Management
+// ============================================================================
+
+// addEventLocked appends an event to the ring buffer. Caller must hold pm.mu.
+func (pm *PowerMonitor) addEventLocked(eventType, message string) {
+	event := PowerEvent{
+		Timestamp: time.Now().UTC().Format(time.RFC3339),
+		Type:      eventType,
+		Message:   message,
+	}
+
+	if len(pm.events) >= maxEvents {
+		// Ring buffer: drop oldest event
+		copy(pm.events, pm.events[1:])
+		pm.events[len(pm.events)-1] = event
+	} else {
+		pm.events = append(pm.events, event)
+	}
+}
+
+// ============================================================================
+// Autostart Helper
+// ============================================================================
+
+// ShouldAutostart returns true if HAL_POWER_MONITOR_AUTOSTART is not "false".
+func ShouldAutostart() bool {
+	v := os.Getenv("HAL_POWER_MONITOR_AUTOSTART")
+	return v != "false" && v != "0" && v != "no"
+}

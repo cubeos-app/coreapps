@@ -225,26 +225,51 @@ func (h *HALHandler) QuickStartBattery(w http.ResponseWriter, r *http.Request) {
 
 // StartPowerMonitor starts power monitoring.
 // @Summary Start power monitor
-// @Description Starts background power monitoring (not yet implemented)
+// @Description Starts background power monitoring with UPS auto-detection
 // @Tags Power
 // @Accept json
 // @Produce json
-// @Success 501 {object} ErrorResponse
+// @Success 200 {object} SuccessResponse
+// @Failure 500 {object} ErrorResponse
 // @Router /power/monitor/start [post]
 func (h *HALHandler) StartPowerMonitor(w http.ResponseWriter, r *http.Request) {
-	errorResponse(w, http.StatusNotImplemented, "power monitoring not yet implemented")
+	msg, err := h.powerMonitor.Start()
+	if err != nil {
+		errorResponse(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	successResponse(w, msg)
 }
 
 // StopPowerMonitor stops power monitoring.
 // @Summary Stop power monitor
-// @Description Stops background power monitoring (not yet implemented)
+// @Description Stops background power monitoring and cancels pending shutdown
 // @Tags Power
 // @Accept json
 // @Produce json
-// @Success 501 {object} ErrorResponse
+// @Success 200 {object} SuccessResponse
+// @Failure 500 {object} ErrorResponse
 // @Router /power/monitor/stop [post]
 func (h *HALHandler) StopPowerMonitor(w http.ResponseWriter, r *http.Request) {
-	errorResponse(w, http.StatusNotImplemented, "power monitoring not yet implemented")
+	msg, err := h.powerMonitor.Stop()
+	if err != nil {
+		errorResponse(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	successResponse(w, msg)
+}
+
+// GetMonitorStatus returns power monitor status.
+// @Summary Get power monitor status
+// @Description Returns monitor state, detected UPS device, last reading, and power events
+// @Tags Power
+// @Accept json
+// @Produce json
+// @Success 200 {object} MonitorStatus
+// @Router /power/monitor/status [get]
+func (h *HALHandler) GetMonitorStatus(w http.ResponseWriter, r *http.Request) {
+	status := h.powerMonitor.Status()
+	jsonResponse(w, http.StatusOK, status)
 }
 
 // ============================================================================
