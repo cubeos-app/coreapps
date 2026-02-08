@@ -500,13 +500,22 @@ func (h *HALHandler) SetMeshtasticChannel(w http.ResponseWriter, r *http.Request
 
 // GetMeshtasticConfig returns the current radio config.
 // @Summary Get Meshtastic config
-// @Description Returns the current Meshtastic radio configuration (not yet implemented)
+// @Description Returns the Meshtastic radio configuration received during the want_config_id handshake. Returns available:false if not connected or no config received yet.
 // @Tags Meshtastic
 // @Produce json
-// @Failure 501 {object} ErrorResponse
+// @Success 200 {object} map[string]interface{}
 // @Router /meshtastic/config [get]
 func (h *HALHandler) GetMeshtasticConfig(w http.ResponseWriter, r *http.Request) {
-	errorResponse(w, http.StatusNotImplemented, "Meshtastic config read not yet implemented (deferred to Phase 2b)")
+	configResult := h.meshtastic.GetConfig()
+	if configResult == nil {
+		jsonResponse(w, http.StatusOK, map[string]interface{}{
+			"available": false,
+		})
+		return
+	}
+
+	configResult["available"] = true
+	jsonResponse(w, http.StatusOK, configResult)
 }
 
 // ============================================================================

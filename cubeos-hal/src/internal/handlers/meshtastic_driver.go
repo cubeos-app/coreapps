@@ -2,11 +2,13 @@ package handlers
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/binary"
 	"fmt"
 	"log"
 	"math"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -62,6 +64,9 @@ type MeshtasticDriver struct {
 	serialPort string // Preferred port (empty = auto-detect)
 	bleAddress string // Preferred BLE address (empty = auto-scan)
 	bleAdapter string // BlueZ adapter (default: hci0)
+
+	// Radio config received during want_config_id handshake
+	configData map[string]interface{}
 
 	// BLE reconnect manager
 	reconnector *BLEReconnector
@@ -148,6 +153,7 @@ func NewMeshtasticDriver() *MeshtasticDriver {
 		eventClients: make(map[uint64]chan MeshEvent),
 		serialBaud:   115200,
 		bleAdapter:   bleAdapter,
+		configData:   make(map[string]interface{}),
 	}
 	// Start BLE reconnector (monitors connection, auto-reconnects BLE on drop)
 	d.reconnector = NewBLEReconnector(d, DefaultBLEReconnectConfig())
@@ -272,6 +278,7 @@ func (d *MeshtasticDriver) Connect(ctx context.Context, port string) error {
 	d.connected = true
 	d.configComplete = false
 	d.nodes = make(map[uint32]*MeshNode)
+	d.configData = make(map[string]interface{})
 
 	// Generate random config ID for handshake
 	d.configID = uint32(time.Now().UnixNano() & 0xFFFFFFFF)
@@ -454,6 +461,14 @@ func (d *MeshtasticDriver) processFromRadio(data []byte) {
 
 	case fr.Packet != nil:
 		d.handleMeshPacket(fr.Packet)
+	}
+
+	// Store config/module_config packets received during handshake (independent of above cases)
+	if fr.ConfigRaw != nil {
+		d.storeConfigSection("config", fr.ConfigRaw, configSectionNames)
+	}
+	if fr.ModuleConfigRaw != nil {
+		d.storeConfigSection("module_config", fr.ModuleConfigRaw, moduleConfigSectionNames)
 	}
 }
 
@@ -877,6 +892,238 @@ func buildMeshPacket(decodedData []byte, to uint32, channel uint32) []byte {
 }
 
 // ============================================================================
+// Config Storage (populated during want_config_id handshake)
+// ============================================================================
+
+// configSectionNames maps FromRadio.Config field numbers to readable names.
+// Meshtastic protobuf: Config is a one-of with these fields.
+var configSectionNames = map[uint32]string{
+	1: "device",
+	2: "position",
+	3: "power",
+	4: "network",
+	5: "display",
+	6: "lora",
+	7: "bluetooth",
+}
+
+// moduleConfigSectionNames maps FromRadio.ModuleConfig field numbers to readable names.
+var moduleConfigSectionNames = map[uint32]string{
+	1: "mqtt",
+	2: "serial",
+	3: "external_notification",
+	4: "store_forward",
+	5: "range_test",
+	6: "telemetry",
+	7: "canned_message",
+	8: "audio",
+	9: "remote_hardware",
+}
+
+// storeConfigSection parses a Config or ModuleConfig protobuf message to identify the
+// section (by field number), then stores a generic decode of the inner message.
+// category is "config" or "module_config".
+func (d *MeshtasticDriver) storeConfigSection(category string, raw []byte, nameMap map[uint32]string) {
+	pos := 0
+	for pos < len(raw) {
+		fieldNum, wireType, newPos, err := readTag(raw, pos)
+		if err != nil {
+			return
+		}
+		pos = newPos
+
+		if wireType == 2 { // Length-delimited — this is the nested config section
+			inner, newPos, err := readLengthDelimited(raw, pos)
+			if err != nil {
+				return
+			}
+			pos = newPos
+
+			sectionName, ok := nameMap[fieldNum]
+			if !ok {
+				sectionName = fmt.Sprintf("unknown_%d", fieldNum)
+			}
+
+			decoded := decodeProtoToMap(inner)
+			key := category + "." + sectionName
+
+			d.mu.Lock()
+			d.configData[key] = decoded
+			d.mu.Unlock()
+		} else {
+			// Skip non-embedded fields (shouldn't occur in Config/ModuleConfig one-of)
+			pos = skipField(raw, pos, wireType)
+			if pos < 0 {
+				return
+			}
+		}
+	}
+}
+
+// decodeProtoToMap performs a generic decode of protobuf bytes into a map.
+// Keys are field numbers as strings. Values are varints (uint64), fixed values,
+// strings (valid UTF-8 length-delimited), or nested maps (invalid UTF-8 length-delimited).
+// Repeated fields are collected into slices.
+func decodeProtoToMap(data []byte) map[string]interface{} {
+	result := make(map[string]interface{})
+	pos := 0
+
+	for pos < len(data) {
+		fieldNum, wireType, newPos, err := readTag(data, pos)
+		if err != nil {
+			break
+		}
+		pos = newPos
+		key := strconv.FormatUint(uint64(fieldNum), 10)
+
+		var value interface{}
+		switch wireType {
+		case 0: // Varint
+			val, n := readVarint(data, pos)
+			if n <= 0 {
+				return result
+			}
+			pos += n
+			value = val
+
+		case 1: // Fixed 64-bit
+			if pos+8 > len(data) {
+				return result
+			}
+			val := uint64(data[pos]) | uint64(data[pos+1])<<8 | uint64(data[pos+2])<<16 |
+				uint64(data[pos+3])<<24 | uint64(data[pos+4])<<32 | uint64(data[pos+5])<<40 |
+				uint64(data[pos+6])<<48 | uint64(data[pos+7])<<56
+			pos += 8
+			value = val
+
+		case 2: // Length-delimited (string, bytes, or nested message)
+			val, newPos, err := readLengthDelimited(data, pos)
+			if err != nil {
+				return result
+			}
+			pos = newPos
+
+			if len(val) == 0 {
+				value = ""
+			} else if isValidUTF8String(val) {
+				value = string(val)
+			} else {
+				// Try to parse as nested message
+				nested := decodeProtoToMap(val)
+				if len(nested) > 0 {
+					value = nested
+				} else {
+					value = base64.StdEncoding.EncodeToString(val)
+				}
+			}
+
+		case 5: // Fixed 32-bit
+			if pos+4 > len(data) {
+				return result
+			}
+			val := uint32(data[pos]) | uint32(data[pos+1])<<8 | uint32(data[pos+2])<<16 |
+				uint32(data[pos+3])<<24
+			pos += 4
+			value = val
+
+		default:
+			pos = skipField(data, pos, wireType)
+			if pos < 0 {
+				return result
+			}
+			continue
+		}
+
+		// Handle repeated fields by collecting into slices
+		if existing, ok := result[key]; ok {
+			switch v := existing.(type) {
+			case []interface{}:
+				result[key] = append(v, value)
+			default:
+				result[key] = []interface{}{v, value}
+			}
+		} else {
+			result[key] = value
+		}
+	}
+
+	return result
+}
+
+// isValidUTF8String checks if bytes look like a valid UTF-8 string (not binary data).
+// Returns false for data with null bytes or non-printable control characters.
+func isValidUTF8String(data []byte) bool {
+	for _, b := range data {
+		if b == 0 {
+			return false // Null byte — likely binary
+		}
+		if b < 0x20 && b != '\n' && b != '\r' && b != '\t' {
+			return false // Non-printable control character
+		}
+	}
+	// Must be valid UTF-8
+	for i := 0; i < len(data); {
+		if data[i] < 0x80 {
+			i++
+			continue
+		}
+		// Multi-byte sequence validation
+		if data[i]&0xE0 == 0xC0 {
+			if i+1 >= len(data) || data[i+1]&0xC0 != 0x80 {
+				return false
+			}
+			i += 2
+		} else if data[i]&0xF0 == 0xE0 {
+			if i+2 >= len(data) || data[i+1]&0xC0 != 0x80 || data[i+2]&0xC0 != 0x80 {
+				return false
+			}
+			i += 3
+		} else if data[i]&0xF8 == 0xF0 {
+			if i+3 >= len(data) || data[i+1]&0xC0 != 0x80 || data[i+2]&0xC0 != 0x80 || data[i+3]&0xC0 != 0x80 {
+				return false
+			}
+			i += 4
+		} else {
+			return false
+		}
+	}
+	return true
+}
+
+// GetConfig returns the radio config data received during the handshake.
+// Returns nil if not connected or no config has been received.
+func (d *MeshtasticDriver) GetConfig() map[string]interface{} {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+
+	if !d.connected || len(d.configData) == 0 {
+		return nil
+	}
+
+	// Build structured response: separate config and module_config sections
+	config := make(map[string]interface{})
+	moduleConfig := make(map[string]interface{})
+
+	for key, val := range d.configData {
+		if len(key) > 7 && key[:7] == "config." {
+			config[key[7:]] = val
+		} else if len(key) > 14 && key[:14] == "module_config." {
+			moduleConfig[key[14:]] = val
+		}
+	}
+
+	result := make(map[string]interface{})
+	if len(config) > 0 {
+		result["config"] = config
+	}
+	if len(moduleConfig) > 0 {
+		result["module_config"] = moduleConfig
+	}
+
+	return result
+}
+
+// ============================================================================
 // Protobuf Varint Helpers
 // ============================================================================
 
@@ -960,6 +1207,8 @@ type ProtoFromRadio struct {
 	MyInfo           *ProtoMyNodeInfo
 	NodeInfo         *ProtoNodeInfo
 	ConfigCompleteID uint32
+	ConfigRaw        []byte // Field 5: Config message (raw protobuf)
+	ModuleConfigRaw  []byte // Field 7: ModuleConfig message (raw protobuf)
 }
 
 // ProtoMeshPacket represents a parsed MeshPacket.
@@ -1071,6 +1320,22 @@ func parseFromRadio(data []byte) (*ProtoFromRadio, error) {
 			}
 			fr.ConfigCompleteID = uint32(val)
 			pos += n
+
+		case 5: // config (Config message)
+			val, newPos, err := readLengthDelimited(data, pos)
+			if err != nil {
+				return fr, nil
+			}
+			fr.ConfigRaw = val
+			pos = newPos
+
+		case 7: // module_config (ModuleConfig message)
+			val, newPos, err := readLengthDelimited(data, pos)
+			if err != nil {
+				return fr, nil
+			}
+			fr.ModuleConfigRaw = val
+			pos = newPos
 
 		default:
 			// Skip unknown fields
