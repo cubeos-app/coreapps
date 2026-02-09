@@ -701,6 +701,38 @@ func (h *HALHandler) UnblockAPClient(w http.ResponseWriter, r *http.Request) {
 	successResponse(w, fmt.Sprintf("client %s unblocked", mac))
 }
 
+// APBlocklistResponse represents the list of blocked MAC addresses
+type APBlocklistResponse struct {
+	MACs []string `json:"macs"`
+}
+
+// GetAPBlocklist returns the list of blocked MAC addresses from hostapd deny ACL
+// @Summary Get AP blocklist
+// @Description Returns the list of MAC addresses blocked from the access point
+// @Tags Network
+// @Produce json
+// @Success 200 {object} APBlocklistResponse
+// @Failure 500 {object} ErrorResponse
+// @Router /network/ap/blocklist [get]
+func (h *HALHandler) GetAPBlocklist(w http.ResponseWriter, r *http.Request) {
+	output, err := execWithTimeout(r.Context(), "hostapd_cli", "deny_acl", "SHOW")
+	if err != nil {
+		// If hostapd isn't running, return empty list (not an error)
+		jsonResponse(w, http.StatusOK, APBlocklistResponse{MACs: []string{}})
+		return
+	}
+
+	macs := []string{}
+	for _, line := range strings.Split(strings.TrimSpace(output), "\n") {
+		mac := strings.TrimSpace(line)
+		if mac != "" && validateMACAddress(mac) == nil {
+			macs = append(macs, strings.ToUpper(mac))
+		}
+	}
+
+	jsonResponse(w, http.StatusOK, APBlocklistResponse{MACs: macs})
+}
+
 // RequestDHCP requests a DHCP lease on an interface
 // @Summary Request DHCP lease
 // @Description Requests a DHCP lease on the specified network interface using dhclient

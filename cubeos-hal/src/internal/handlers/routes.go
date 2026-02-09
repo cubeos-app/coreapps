@@ -91,6 +91,7 @@ func SetupRoutes(r chi.Router, h *HALHandler) {
 		// Access Point
 		r.Get("/ap/status", h.GetAPStatus)
 		r.Get("/ap/clients", h.GetAPClients)
+		r.Get("/ap/blocklist", h.GetAPBlocklist)
 		r.Post("/ap/disconnect", h.DisconnectAPClient)
 		r.Post("/ap/block", h.BlockAPClient)
 		r.Post("/ap/unblock/{mac}", h.UnblockAPClient)
