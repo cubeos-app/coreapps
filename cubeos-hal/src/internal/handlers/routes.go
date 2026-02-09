@@ -30,6 +30,7 @@ func SetupRoutes(r chi.Router, h *HALHandler) {
 		r.Get("/uptime", h.GetUptime)
 		r.Get("/hostname", h.GetHostname)
 		r.Post("/hostname", h.SetHostname)
+		r.Get("/os", h.GetOSInfo)
 		r.Post("/reboot", h.Reboot)
 		r.Post("/shutdown", h.Shutdown)
 

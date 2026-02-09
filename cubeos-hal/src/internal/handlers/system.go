@@ -76,6 +76,15 @@ type SetHostnameRequest struct {
 	Hostname string `json:"hostname" example:"my-cubeos"`
 }
 
+// OSInfoResponse represents the host OS information.
+// @Description Host operating system information
+type OSInfoResponse struct {
+	Name    string `json:"name" example:"Debian GNU/Linux"`
+	Version string `json:"version" example:"12"`
+	ID      string `json:"id" example:"debian"`
+	Pretty  string `json:"pretty_name" example:"Debian GNU/Linux 12 (bookworm)"`
+}
+
 // ServiceStatus represents a systemd service status.
 // @Description Systemd service status
 type ServiceStatus struct {
@@ -432,6 +441,39 @@ func (h *HALHandler) SetHostname(w http.ResponseWriter, r *http.Request) {
 	}
 
 	successResponse(w, "hostname set to "+hostname)
+}
+
+// GetOSInfo returns host operating system information.
+// @Summary Get OS info
+// @Description Returns host OS name and version from /etc/os-release. HAL runs with network_mode: host, so this returns the real host OS, not the container OS.
+// @Tags System
+// @Accept json
+// @Produce json
+// @Success 200 {object} OSInfoResponse
+// @Failure 500 {object} ErrorResponse
+// @Router /system/os [get]
+func (h *HALHandler) GetOSInfo(w http.ResponseWriter, r *http.Request) {
+	data, err := os.ReadFile("/etc/os-release")
+	if err != nil {
+		errorResponse(w, http.StatusInternalServerError, "failed to read /etc/os-release: "+err.Error())
+		return
+	}
+
+	info := make(map[string]string)
+	for _, line := range strings.Split(string(data), "\n") {
+		if idx := strings.Index(line, "="); idx > 0 {
+			key := line[:idx]
+			value := strings.Trim(line[idx+1:], `"`)
+			info[key] = value
+		}
+	}
+
+	jsonResponse(w, http.StatusOK, OSInfoResponse{
+		Name:    info["NAME"],
+		Version: info["VERSION_ID"],
+		ID:      info["ID"],
+		Pretty:  info["PRETTY_NAME"],
+	})
 }
 
 // ============================================================================
