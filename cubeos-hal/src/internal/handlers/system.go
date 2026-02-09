@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
@@ -61,6 +62,18 @@ type EEPROMInfo struct {
 type BootConfig struct {
 	Config map[string]string `json:"config"`
 	Raw    string            `json:"raw,omitempty"`
+}
+
+// HostnameResponse represents the system hostname.
+// @Description System hostname
+type HostnameResponse struct {
+	Hostname string `json:"hostname" example:"cubeos"`
+}
+
+// SetHostnameRequest represents a request to set the hostname.
+// @Description Set hostname request
+type SetHostnameRequest struct {
+	Hostname string `json:"hostname" example:"my-cubeos"`
 }
 
 // ServiceStatus represents a systemd service status.
@@ -334,6 +347,91 @@ func (h *HALHandler) GetBootConfig(w http.ResponseWriter, r *http.Request) {
 	}
 
 	jsonResponse(w, http.StatusOK, config)
+}
+
+// ============================================================================
+// Hostname Handlers
+// ============================================================================
+
+// GetHostname returns the system hostname.
+// @Summary Get hostname
+// @Description Returns the real host hostname. HAL runs with network_mode: host, so os.Hostname() returns the actual host hostname.
+// @Tags System
+// @Accept json
+// @Produce json
+// @Success 200 {object} HostnameResponse
+// @Failure 500 {object} ErrorResponse
+// @Router /system/hostname [get]
+func (h *HALHandler) GetHostname(w http.ResponseWriter, r *http.Request) {
+	// Try /etc/hostname first for consistency
+	if data, err := os.ReadFile("/etc/hostname"); err == nil {
+		hostname := strings.TrimSpace(string(data))
+		if hostname != "" {
+			jsonResponse(w, http.StatusOK, HostnameResponse{Hostname: hostname})
+			return
+		}
+	}
+
+	// Fall back to os.Hostname() — works because HAL has network_mode: host
+	hostname, err := os.Hostname()
+	if err != nil {
+		errorResponse(w, http.StatusInternalServerError, "failed to get hostname: "+err.Error())
+		return
+	}
+
+	jsonResponse(w, http.StatusOK, HostnameResponse{Hostname: hostname})
+}
+
+// SetHostname sets the system hostname.
+// @Summary Set hostname
+// @Description Sets the system hostname using hostnamectl. HAL has host PID namespace + privileged mode, so systemd commands work.
+// @Tags System
+// @Accept json
+// @Produce json
+// @Param request body SetHostnameRequest true "Hostname to set"
+// @Success 200 {object} SuccessResponse
+// @Failure 400 {object} ErrorResponse
+// @Failure 500 {object} ErrorResponse
+// @Router /system/hostname [post]
+func (h *HALHandler) SetHostname(w http.ResponseWriter, r *http.Request) {
+	var req SetHostnameRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		errorResponse(w, http.StatusBadRequest, "invalid request body: "+err.Error())
+		return
+	}
+
+	hostname := strings.TrimSpace(req.Hostname)
+	if hostname == "" {
+		errorResponse(w, http.StatusBadRequest, "hostname is required")
+		return
+	}
+	if len(hostname) > 253 {
+		errorResponse(w, http.StatusBadRequest, "hostname too long (max 253 characters)")
+		return
+	}
+	// Validate DNS-safe characters: lowercase letters, digits, hyphens; no leading/trailing hyphen
+	for i, c := range hostname {
+		if !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '-' || c == '.') {
+			errorResponse(w, http.StatusBadRequest, fmt.Sprintf("invalid character '%c' at position %d; only letters, digits, hyphens, and dots allowed", c, i))
+			return
+		}
+	}
+	if hostname[0] == '-' || hostname[len(hostname)-1] == '-' {
+		errorResponse(w, http.StatusBadRequest, "hostname cannot start or end with a hyphen")
+		return
+	}
+
+	// Use hostnamectl (HAL has host PID namespace + privileged mode)
+	if _, err := execWithTimeout(r.Context(), "hostnamectl", "set-hostname", hostname); err != nil {
+		log.Printf("SetHostname: hostnamectl failed: %v, falling back to /etc/hostname", err)
+		// Fall back to writing /etc/hostname directly
+		if writeErr := os.WriteFile("/etc/hostname", []byte(hostname+"\n"), 0644); writeErr != nil {
+			errorResponse(w, http.StatusInternalServerError, "failed to set hostname: "+writeErr.Error())
+			return
+		}
+	}
+
+	successResponse(w, "hostname set to "+hostname)
 }
 
 // ============================================================================

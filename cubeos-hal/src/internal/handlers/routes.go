@@ -28,6 +28,8 @@ func SetupRoutes(r chi.Router, h *HALHandler) {
 		r.Get("/eeprom", h.GetEEPROMInfo)
 		r.Get("/bootconfig", h.GetBootConfig)
 		r.Get("/uptime", h.GetUptime)
+		r.Get("/hostname", h.GetHostname)
+		r.Post("/hostname", h.SetHostname)
 		r.Post("/reboot", h.Reboot)
 		r.Post("/shutdown", h.Shutdown)
 
