@@ -25,11 +25,13 @@ services:
       - /etc/hostapd:/etc/hostapd:ro
       - /sys:/sys:ro
       - /proc:/proc:ro
+      - /:/host-root
     environment:
       - TZ=${TZ:-UTC}
       - CUBEOS_PORT=6010
       - CUBEOS_DATA_DIR=/cubeos/data
       - CUBEOS_DB_PATH=/cubeos/data/cubeos.db
+      - CUBEOS_HOST_ROOT=/host-root
       - HAL_URL=http://10.42.24.1:6005/hal
     env_file:
       - /cubeos/config/defaults.env
