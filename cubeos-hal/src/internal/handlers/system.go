@@ -453,9 +453,17 @@ func (h *HALHandler) SetHostname(w http.ResponseWriter, r *http.Request) {
 // @Failure 500 {object} ErrorResponse
 // @Router /system/os [get]
 func (h *HALHandler) GetOSInfo(w http.ResponseWriter, r *http.Request) {
-	data, err := os.ReadFile("/etc/os-release")
+	// Try host-mounted os-release first (container filesystem is Alpine, not the host OS)
+	var data []byte
+	var err error
+	for _, path := range []string{"/host/etc/os-release", "/etc/os-release"} {
+		data, err = os.ReadFile(path)
+		if err == nil {
+			break
+		}
+	}
 	if err != nil {
-		errorResponse(w, http.StatusInternalServerError, "failed to read /etc/os-release: "+err.Error())
+		errorResponse(w, http.StatusInternalServerError, "failed to read os-release: "+err.Error())
 		return
 	}
 

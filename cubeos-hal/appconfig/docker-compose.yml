@@ -100,6 +100,9 @@ services:
       # Boot config for EEPROM/config.txt access
       - /boot/firmware:/boot/firmware:ro
       
+      # Host OS identification (HAL container runs Alpine, need real host OS)
+      - /etc/os-release:/host/etc/os-release:ro
+      
       # NOTE: vcgencmd and /lib/aarch64-linux-gnu mounts REMOVED
       # These break Alpine (musl) containers - glibc binaries can't run on musl
       # HAL now uses sysfs for temperature/throttle which works everywhere
