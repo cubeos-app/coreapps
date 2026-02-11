@@ -152,7 +152,7 @@ func (h *HALHandler) WireGuardDown(w http.ResponseWriter, r *http.Request) {
 
 // OpenVPNUp brings up an OpenVPN connection.
 // @Summary Bring up OpenVPN connection
-// @Description Starts an OpenVPN connection using systemd service
+// @Description Starts an OpenVPN connection using the config file directly
 // @Tags VPN
 // @Accept json
 // @Produce json
@@ -168,8 +168,13 @@ func (h *HALHandler) OpenVPNUp(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	serviceName := fmt.Sprintf("openvpn-client@%s", name)
-	out, err := execWithTimeout(r.Context(), "systemctl", "start", serviceName)
+	confPath := "/cubeos/config/vpn/openvpn/" + name + ".ovpn"
+
+	// Run openvpn via nsenter on host, daemonized with a writepid file for clean shutdown
+	pidFile := "/run/openvpn-" + name + ".pid"
+	out, err := execWithTimeout(r.Context(), "nsenter", "-t", "1", "-m", "-n", "--",
+		"openvpn", "--config", confPath, "--daemon", "ovpn-"+name, "--writepid", pidFile,
+		"--log-append", "/var/log/openvpn-"+name+".log")
 	if err != nil {
 		log.Printf("OpenVPNUp(%s): %v: %s", name, err, out)
 		errorResponse(w, http.StatusInternalServerError, sanitizeExecError("OpenVPN start", err))
@@ -181,7 +186,7 @@ func (h *HALHandler) OpenVPNUp(w http.ResponseWriter, r *http.Request) {
 
 // OpenVPNDown brings down an OpenVPN connection.
 // @Summary Bring down OpenVPN connection
-// @Description Stops an OpenVPN connection using systemd service
+// @Description Stops an OpenVPN connection by sending SIGTERM to its process
 // @Tags VPN
 // @Accept json
 // @Produce json
@@ -197,13 +202,33 @@ func (h *HALHandler) OpenVPNDown(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	serviceName := fmt.Sprintf("openvpn-client@%s", name)
-	out, err := execWithTimeout(r.Context(), "systemctl", "stop", serviceName)
+	// Read PID file and kill the process
+	pidFile := "/run/openvpn-" + name + ".pid"
+	pidData, err := os.ReadFile(pidFile)
 	if err != nil {
-		log.Printf("OpenVPNDown(%s): %v: %s", name, err, out)
+		// Try pkill as fallback
+		out, killErr := execWithTimeout(r.Context(), "nsenter", "-t", "1", "-m", "-n", "--",
+			"pkill", "-f", "ovpn-"+name)
+		if killErr != nil {
+			log.Printf("OpenVPNDown(%s): no pidfile and pkill failed: %v: %s", name, killErr, out)
+			errorResponse(w, http.StatusInternalServerError, "OpenVPN process not found")
+			return
+		}
+		successResponse(w, fmt.Sprintf("OpenVPN connection %s stopped", name))
+		return
+	}
+
+	pid := strings.TrimSpace(string(pidData))
+	out, err := execWithTimeout(r.Context(), "nsenter", "-t", "1", "-m", "-n", "--",
+		"kill", pid)
+	if err != nil {
+		log.Printf("OpenVPNDown(%s): kill %s failed: %v: %s", name, pid, err, out)
 		errorResponse(w, http.StatusInternalServerError, sanitizeExecError("OpenVPN stop", err))
 		return
 	}
+
+	// Clean up pid file
+	_ = os.Remove(pidFile)
 
 	successResponse(w, fmt.Sprintf("OpenVPN connection %s stopped", name))
 }
