@@ -29,6 +29,17 @@ func getDefaultWiFiInterface() string {
 	return "wlan0"
 }
 
+// execWpaCli runs wpa_cli via nsenter to work around the reply-socket problem.
+// When HAL runs in a container, wpa_cli creates its reply socket in the container's
+// /tmp, but wpa_supplicant (on the host) tries to reply to the host's /tmp — causing
+// a timeout. nsenter -t 1 -m executes wpa_cli in the host's mount namespace so both
+// sockets share the same /tmp.
+func execWpaCli(ctx context.Context, args ...string) (string, error) {
+	nsenterArgs := []string{"-t", "1", "-m", "--", "wpa_cli"}
+	nsenterArgs = append(nsenterArgs, args...)
+	return execWithTimeout(ctx, "nsenter", nsenterArgs...)
+}
+
 // ListInterfaces returns all network interfaces
 // @Summary List network interfaces
 // @Description Returns all network interfaces with their status
@@ -548,8 +559,8 @@ func (h *HALHandler) ConnectWiFi(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Use wpa_cli to connect
-	output, err := execWithTimeout(r.Context(), "wpa_cli", "-i", req.Interface, "add_network")
+	// Use wpa_cli to connect (via nsenter for container compatibility)
+	output, err := execWpaCli(r.Context(), "-i", req.Interface, "add_network")
 	if err != nil {
 		log.Printf("ConnectWiFi: add_network: %v", err)
 		errorResponse(w, http.StatusInternalServerError, "failed to add network")
@@ -559,7 +570,7 @@ func (h *HALHandler) ConnectWiFi(w http.ResponseWriter, r *http.Request) {
 	networkID := strings.TrimSpace(output)
 
 	// Set SSID
-	_, err = execWithTimeout(r.Context(), "wpa_cli", "-i", req.Interface, "set_network", networkID, "ssid", fmt.Sprintf("\"%s\"", req.SSID))
+	_, err = execWpaCli(r.Context(), "-i", req.Interface, "set_network", networkID, "ssid", fmt.Sprintf("\"%s\"", req.SSID))
 	if err != nil {
 		log.Printf("ConnectWiFi: set_network ssid: %v", err)
 		errorResponse(w, http.StatusInternalServerError, "failed to set SSID")
@@ -568,14 +579,14 @@ func (h *HALHandler) ConnectWiFi(w http.ResponseWriter, r *http.Request) {
 
 	// Set password
 	if req.Password != "" {
-		_, err = execWithTimeout(r.Context(), "wpa_cli", "-i", req.Interface, "set_network", networkID, "psk", fmt.Sprintf("\"%s\"", req.Password))
+		_, err = execWpaCli(r.Context(), "-i", req.Interface, "set_network", networkID, "psk", fmt.Sprintf("\"%s\"", req.Password))
 		if err != nil {
 			log.Printf("ConnectWiFi: set_network psk: %v", err)
 			errorResponse(w, http.StatusInternalServerError, "failed to set password")
 			return
 		}
 	} else {
-		_, err = execWithTimeout(r.Context(), "wpa_cli", "-i", req.Interface, "set_network", networkID, "key_mgmt", "NONE")
+		_, err = execWpaCli(r.Context(), "-i", req.Interface, "set_network", networkID, "key_mgmt", "NONE")
 		if err != nil {
 			log.Printf("ConnectWiFi: set_network key_mgmt: %v", err)
 			errorResponse(w, http.StatusInternalServerError, "failed to set key management")
@@ -584,7 +595,7 @@ func (h *HALHandler) ConnectWiFi(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Enable network
-	_, err = execWithTimeout(r.Context(), "wpa_cli", "-i", req.Interface, "enable_network", networkID)
+	_, err = execWpaCli(r.Context(), "-i", req.Interface, "enable_network", networkID)
 	if err != nil {
 		log.Printf("ConnectWiFi: enable_network: %v", err)
 		errorResponse(w, http.StatusInternalServerError, "failed to enable network")
@@ -592,7 +603,7 @@ func (h *HALHandler) ConnectWiFi(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Save config (best effort)
-	_, _ = execWithTimeout(r.Context(), "wpa_cli", "-i", req.Interface, "save_config")
+	_, _ = execWpaCli(r.Context(), "-i", req.Interface, "save_config")
 
 	jsonResponse(w, http.StatusOK, map[string]interface{}{
 		"success":    true,
@@ -622,7 +633,7 @@ func (h *HALHandler) DisconnectWiFi(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	_, err := execWithTimeout(r.Context(), "wpa_cli", "-i", iface, "disconnect")
+	_, err := execWpaCli(r.Context(), "-i", iface, "disconnect")
 	if err != nil {
 		log.Printf("DisconnectWiFi(%s): %v", iface, err)
 		errorResponse(w, http.StatusInternalServerError, sanitizeExecError("WiFi disconnect", err))

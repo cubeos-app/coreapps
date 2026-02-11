@@ -61,8 +61,8 @@ func (h *HALHandler) GetSavedWiFiNetworks(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	// Try wpa_cli
-	output, err = execWithTimeout(r.Context(), "wpa_cli", "-i", iface, "list_networks")
+	// Try wpa_cli (via nsenter for container compatibility)
+	output, err = execWpaCli(r.Context(), "-i", iface, "list_networks")
 	if err == nil {
 		lines := strings.Split(output, "\n")
 		for _, line := range lines {
@@ -147,8 +147,8 @@ func (h *HALHandler) ForgetWiFiNetwork(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Try wpa_cli
-	output, err := execWithTimeout(r.Context(), "wpa_cli", "-i", iface, "list_networks")
+	// Try wpa_cli (via nsenter for container compatibility)
+	output, err := execWpaCli(r.Context(), "-i", iface, "list_networks")
 	if err != nil {
 		log.Printf("ForgetWiFiNetwork: list_networks: %v", err)
 		errorResponse(w, http.StatusInternalServerError, "failed to list networks")
@@ -172,7 +172,7 @@ func (h *HALHandler) ForgetWiFiNetwork(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Remove the network
-	_, err = execWithTimeout(r.Context(), "wpa_cli", "-i", iface, "remove_network", networkID)
+	_, err = execWpaCli(r.Context(), "-i", iface, "remove_network", networkID)
 	if err != nil {
 		log.Printf("ForgetWiFiNetwork: remove_network: %v", err)
 		errorResponse(w, http.StatusInternalServerError, "failed to remove network")
@@ -180,7 +180,7 @@ func (h *HALHandler) ForgetWiFiNetwork(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Save configuration (best effort)
-	_, _ = execWithTimeout(r.Context(), "wpa_cli", "-i", iface, "save_config")
+	_, _ = execWpaCli(r.Context(), "-i", iface, "save_config")
 
 	jsonResponse(w, http.StatusOK, map[string]interface{}{
 		"success": true,
