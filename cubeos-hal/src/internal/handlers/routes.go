@@ -99,6 +99,9 @@ func SetupRoutes(r chi.Router, h *HALHandler) {
 		// DHCP & Static IP
 		r.Post("/dhcp/request", h.RequestDHCP)
 		r.Post("/ip/static", h.SetStaticIP)
+
+		// Port scanning (host-level listening ports)
+		r.Get("/ports/listening", h.ListeningPortsHandler)
 	})
 
 	// Firewall
