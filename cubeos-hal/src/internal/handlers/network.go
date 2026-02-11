@@ -1110,11 +1110,17 @@ func (h *HALHandler) RequestDHCP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Release existing lease first (best effort)
-	_, _ = execWithTimeout(r.Context(), "dhclient", "-r", req.Interface)
+	// Release existing lease first (best effort) — via nsenter for host namespace
+	_, _ = execWithTimeout(r.Context(), "nsenter", "-t", "1", "-m", "-n", "--", "dhclient", "-r", req.Interface)
 
-	// Request new lease
-	_, err := execWithTimeout(r.Context(), "dhclient", req.Interface)
+	// Request new lease — try dhclient first, fall back to dhcpcd
+	// Must run in host namespace to properly configure host interfaces
+	_, err := execWithTimeout(r.Context(), "nsenter", "-t", "1", "-m", "-n", "--", "dhclient", req.Interface)
+	if err != nil {
+		// dhclient not available, try dhcpcd
+		log.Printf("RequestDHCP(%s): dhclient failed (%v), trying dhcpcd", req.Interface, err)
+		_, err = execWithTimeout(r.Context(), "nsenter", "-t", "1", "-m", "-n", "--", "dhcpcd", req.Interface)
+	}
 	if err != nil {
 		log.Printf("RequestDHCP(%s): %v", req.Interface, err)
 		errorResponse(w, http.StatusInternalServerError, sanitizeExecError("DHCP request", err))
