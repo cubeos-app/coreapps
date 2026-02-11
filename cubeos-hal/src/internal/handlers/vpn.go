@@ -169,14 +169,44 @@ func (h *HALHandler) OpenVPNUp(w http.ResponseWriter, r *http.Request) {
 	}
 
 	confPath := "/cubeos/config/vpn/openvpn/" + name + ".ovpn"
-
-	// Run openvpn via nsenter on host, daemonized with a writepid file for clean shutdown
+	authPath := "/cubeos/config/vpn/openvpn/" + name + ".auth"
 	pidFile := "/run/openvpn-" + name + ".pid"
-	out, err := execWithTimeout(r.Context(), "nsenter", "-t", "1", "-m", "-n", "--",
-		"openvpn", "--config", confPath, "--daemon", "ovpn-"+name, "--writepid", pidFile,
-		"--log-append", "/var/log/openvpn-"+name+".log")
+	logFile := "/var/log/openvpn-" + name + ".log"
+
+	// Build openvpn command arguments
+	ovpnArgs := []string{
+		"--config", confPath,
+		"--daemon", "ovpn-" + name,
+		"--writepid", pidFile,
+		"--log-append", logFile,
+	}
+
+	// If auth file exists, inject it (overrides any auth-user-pass in .ovpn)
+	if _, err := os.Stat(authPath); err == nil {
+		ovpnArgs = append(ovpnArgs, "--auth-user-pass", authPath)
+	}
+
+	// Disable up/down scripts that may not exist on host (e.g. update-resolv-conf)
+	// This prevents failures when the .ovpn references scripts from a different distro
+	ovpnArgs = append(ovpnArgs, "--script-security", "0")
+
+	// Build full nsenter command
+	nsenterArgs := []string{"-t", "1", "-m", "-n", "--", "openvpn"}
+	nsenterArgs = append(nsenterArgs, ovpnArgs...)
+
+	out, err := execWithTimeout(r.Context(), "nsenter", nsenterArgs...)
 	if err != nil {
 		log.Printf("OpenVPNUp(%s): %v: %s", name, err, out)
+		// Check log file for more details
+		if logContent, readErr := os.ReadFile(logFile); readErr == nil {
+			lines := strings.Split(string(logContent), "\n")
+			// Get last 5 lines for error context
+			start := len(lines) - 5
+			if start < 0 {
+				start = 0
+			}
+			log.Printf("OpenVPNUp(%s) log tail: %s", name, strings.Join(lines[start:], "\n"))
+		}
 		errorResponse(w, http.StatusInternalServerError, sanitizeExecError("OpenVPN start", err))
 		return
 	}
