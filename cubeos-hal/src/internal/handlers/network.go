@@ -696,16 +696,10 @@ func parseHostapdConf() (ssid string, channel int, iface string) {
 	return
 }
 
-// hostapdCLI runs hostapd_cli with the correct socket path for Alpine containers.
-// Tries container's hostapd_cli with explicit socket path first, falls back to nsenter.
+// hostapdCLI runs hostapd_cli via nsenter to use the host's binary.
+// Alpine's hostapd_cli times out on the control socket (version mismatch with host hostapd),
+// so we skip it entirely and go straight to nsenter which is instant.
 func hostapdCLI(ctx context.Context, args ...string) (string, error) {
-	// Try Alpine's hostapd_cli with explicit control interface path
-	cliArgs := append([]string{"-i", "wlan0", "-p", "/var/run/hostapd"}, args...)
-	output, err := execWithTimeout(ctx, "hostapd_cli", cliArgs...)
-	if err == nil {
-		return output, nil
-	}
-	// Fallback: run host's hostapd_cli via nsenter
 	nsArgs := append([]string{"-t", "1", "-m", "--", "hostapd_cli"}, args...)
 	return execWithTimeout(ctx, "nsenter", nsArgs...)
 }
