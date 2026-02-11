@@ -85,11 +85,11 @@ func (h *HALHandler) GetVPNStatus(w http.ResponseWriter, r *http.Request) {
 
 // WireGuardUp brings up a WireGuard interface.
 // @Summary Bring up WireGuard interface
-// @Description Activates a WireGuard VPN interface
+// @Description Activates a WireGuard VPN interface using its config file
 // @Tags VPN
 // @Accept json
 // @Produce json
-// @Param name path string true "Interface name" example(wg0)
+// @Param name path string true "Config name (sanitized, alphanumeric/hyphen/underscore)" example(wg0)
 // @Success 200 {object} SuccessResponse
 // @Failure 400 {object} ErrorResponse
 // @Failure 500 {object} ErrorResponse
@@ -101,7 +101,11 @@ func (h *HALHandler) WireGuardUp(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	out, err := execWithTimeout(r.Context(), "wg-quick", "up", name)
+	// Use full config path — configs are at /cubeos/config/vpn/wireguard/, not /etc/wireguard/
+	// Run via nsenter to access host's wg-quick and kernel WireGuard module
+	confPath := "/cubeos/config/vpn/wireguard/" + name + ".conf"
+	out, err := execWithTimeout(r.Context(), "nsenter", "-t", "1", "-m", "-n", "--",
+		"wg-quick", "up", confPath)
 	if err != nil {
 		log.Printf("WireGuardUp(%s): %v: %s", name, err, out)
 		errorResponse(w, http.StatusInternalServerError, sanitizeExecError("WireGuard up", err))
@@ -117,7 +121,7 @@ func (h *HALHandler) WireGuardUp(w http.ResponseWriter, r *http.Request) {
 // @Tags VPN
 // @Accept json
 // @Produce json
-// @Param name path string true "Interface name" example(wg0)
+// @Param name path string true "Config name (sanitized)" example(wg0)
 // @Success 200 {object} SuccessResponse
 // @Failure 400 {object} ErrorResponse
 // @Failure 500 {object} ErrorResponse
@@ -129,7 +133,10 @@ func (h *HALHandler) WireGuardDown(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	out, err := execWithTimeout(r.Context(), "wg-quick", "down", name)
+	// Use full config path via nsenter (matches WireGuardUp)
+	confPath := "/cubeos/config/vpn/wireguard/" + name + ".conf"
+	out, err := execWithTimeout(r.Context(), "nsenter", "-t", "1", "-m", "-n", "--",
+		"wg-quick", "down", confPath)
 	if err != nil {
 		log.Printf("WireGuardDown(%s): %v: %s", name, err, out)
 		errorResponse(w, http.StatusInternalServerError, sanitizeExecError("WireGuard down", err))
