@@ -80,6 +80,7 @@ func SetupRoutes(r chi.Router, h *HALHandler) {
 		r.Get("/traffic", h.GetTrafficStats)
 
 		// WiFi
+		r.Get("/wifi/status/{iface}", h.GetWiFiStatus)
 		r.Get("/wifi/scan/{iface}", h.ScanWiFi)
 		r.Post("/wifi/connect", h.ConnectWiFi)
 		r.Post("/wifi/disconnect/{iface}", h.DisconnectWiFi)
