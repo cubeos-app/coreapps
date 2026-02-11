@@ -162,24 +162,6 @@ func (h *HALHandler) GetWiFiStatus(w http.ResponseWriter, r *http.Request) {
 	jsonResponse(w, http.StatusOK, status)
 }
 
-// freqToChannel converts WiFi frequency (MHz) to channel number
-func freqToChannel(freq int) int {
-	switch {
-	case freq >= 2412 && freq <= 2484:
-		if freq == 2484 {
-			return 14
-		}
-		return (freq - 2407) / 5
-	case freq >= 5170 && freq <= 5825:
-		return (freq - 5000) / 5
-	case freq >= 5955 && freq <= 7115:
-		// 6 GHz (WiFi 6E)
-		return (freq - 5950) / 5
-	default:
-		return 0
-	}
-}
-
 // dbmToPercent converts signal strength in dBm to a percentage (0-100)
 // Using the common approximation: -30 dBm = 100%, -90 dBm = 0%
 func dbmToPercent(dbm int) int {
