@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -577,7 +578,7 @@ func (h *HALHandler) GetAPStatus(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Try hostapd_cli status first
-	output, err := execWithTimeout(r.Context(), "hostapd_cli", "status")
+	output, err := hostapdCLI(r.Context(), "status")
 	if err == nil {
 		raw := parseKeyValue(output)
 		// hostapd_cli uses keys like ssid[0], bssid[0] — normalize them
@@ -629,9 +630,9 @@ func (h *HALHandler) GetAPStatus(w http.ResponseWriter, r *http.Request) {
 		result["ssid"], result["channel"], result["interface"] = parseHostapdConf()
 	}
 
-	// Check if hostapd service is active (overrides hostapd_cli state if needed)
+	// Check if hostapd service is active (use nsenter since Alpine has no systemctl)
 	if !result["active"].(bool) {
-		svcOutput, err := execWithTimeout(r.Context(), "systemctl", "is-active", "hostapd")
+		svcOutput, err := execWithTimeout(r.Context(), "nsenter", "-t", "1", "-m", "--", "systemctl", "is-active", "hostapd")
 		if err == nil && strings.TrimSpace(svcOutput) == "active" {
 			result["active"] = true
 		}
@@ -695,6 +696,20 @@ func parseHostapdConf() (ssid string, channel int, iface string) {
 	return
 }
 
+// hostapdCLI runs hostapd_cli with the correct socket path for Alpine containers.
+// Tries container's hostapd_cli with explicit socket path first, falls back to nsenter.
+func hostapdCLI(ctx context.Context, args ...string) (string, error) {
+	// Try Alpine's hostapd_cli with explicit control interface path
+	cliArgs := append([]string{"-i", "wlan0", "-p", "/var/run/hostapd"}, args...)
+	output, err := execWithTimeout(ctx, "hostapd_cli", cliArgs...)
+	if err == nil {
+		return output, nil
+	}
+	// Fallback: run host's hostapd_cli via nsenter
+	nsArgs := append([]string{"-t", "1", "-m", "--", "hostapd_cli"}, args...)
+	return execWithTimeout(ctx, "nsenter", nsArgs...)
+}
+
 // GetAPClients returns connected AP clients
 // @Summary Get AP clients
 // @Description Returns list of clients connected to the access point, enriched with DHCP lease data
@@ -709,8 +724,8 @@ func (h *HALHandler) GetAPClients(w http.ResponseWriter, r *http.Request) {
 
 	var clients []map[string]interface{}
 
-	// Try hostapd_cli all_sta first
-	output, err := execWithTimeout(r.Context(), "hostapd_cli", "all_sta")
+	// Try hostapd_cli all_sta
+	output, err := hostapdCLI(r.Context(), "all_sta")
 	if err == nil {
 		var currentMAC string
 		var current map[string]interface{}
@@ -871,7 +886,7 @@ func (h *HALHandler) DisconnectAPClient(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	_, err := execWithTimeout(r.Context(), "hostapd_cli", "disassociate", req.MAC)
+	_, err := hostapdCLI(r.Context(), "disassociate", req.MAC)
 	if err != nil {
 		log.Printf("DisconnectAPClient(%s): %v", req.MAC, err)
 		errorResponse(w, http.StatusInternalServerError, sanitizeExecError("disconnect AP client", err))
@@ -910,9 +925,9 @@ func (h *HALHandler) BlockAPClient(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// First disconnect, then deny
-	_, _ = execWithTimeout(r.Context(), "hostapd_cli", "disassociate", req.MAC)
+	_, _ = hostapdCLI(r.Context(), "disassociate", req.MAC)
 
-	_, err := execWithTimeout(r.Context(), "hostapd_cli", "deny_acl", "ADD_MAC", req.MAC)
+	_, err := hostapdCLI(r.Context(), "deny_acl", "ADD_MAC", req.MAC)
 	if err != nil {
 		log.Printf("BlockAPClient(%s): %v", req.MAC, err)
 		errorResponse(w, http.StatusInternalServerError, sanitizeExecError("block AP client", err))
@@ -939,7 +954,7 @@ func (h *HALHandler) UnblockAPClient(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	_, err := execWithTimeout(r.Context(), "hostapd_cli", "deny_acl", "DEL_MAC", mac)
+	_, err := hostapdCLI(r.Context(), "deny_acl", "DEL_MAC", mac)
 	if err != nil {
 		log.Printf("UnblockAPClient(%s): %v", mac, err)
 		errorResponse(w, http.StatusInternalServerError, sanitizeExecError("unblock AP client", err))
@@ -963,7 +978,7 @@ type APBlocklistResponse struct {
 // @Failure 500 {object} ErrorResponse
 // @Router /network/ap/blocklist [get]
 func (h *HALHandler) GetAPBlocklist(w http.ResponseWriter, r *http.Request) {
-	output, err := execWithTimeout(r.Context(), "hostapd_cli", "deny_acl", "SHOW")
+	output, err := hostapdCLI(r.Context(), "deny_acl", "SHOW")
 	if err != nil {
 		// If hostapd isn't running, return empty list (not an error)
 		jsonResponse(w, http.StatusOK, APBlocklistResponse{MACs: []string{}})
