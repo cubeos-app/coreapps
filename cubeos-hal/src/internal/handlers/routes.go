@@ -125,6 +125,7 @@ func SetupRoutes(r chi.Router, h *HALHandler) {
 	// VPN
 	r.Route("/vpn", func(r chi.Router) {
 		r.Get("/status", h.GetVPNStatus)
+		r.Get("/public-ip", h.GetPublicIP)
 
 		// WireGuard
 		r.Post("/wireguard/up/{name}", h.WireGuardUp)

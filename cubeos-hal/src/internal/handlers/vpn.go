@@ -4,11 +4,13 @@ import (
 	"bufio"
 	"context"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"net/http"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 )
@@ -77,6 +79,58 @@ func (h *HALHandler) GetVPNStatus(w http.ResponseWriter, r *http.Request) {
 	}
 
 	jsonResponse(w, http.StatusOK, status)
+}
+
+// GetPublicIP returns the current public IP as seen from the host.
+// @Summary Get public IP address
+// @Description Returns the public IP address by querying external services from the host network.
+// @Description When a VPN tunnel is active, this returns the VPN exit IP since HAL runs on host networking.
+// @Tags VPN
+// @Produce json
+// @Success 200 {object} map[string]string "public_ip: current public IP"
+// @Failure 500 {object} ErrorResponse
+// @Router /vpn/public-ip [get]
+func (h *HALHandler) GetPublicIP(w http.ResponseWriter, r *http.Request) {
+	services := []string{
+		"https://api.ipify.org",
+		"https://ifconfig.me/ip",
+		"https://icanhazip.com",
+		"https://checkip.amazonaws.com",
+	}
+
+	client := &http.Client{Timeout: 5 * time.Second}
+
+	var lastErr error
+	for _, svc := range services {
+		req, err := http.NewRequestWithContext(r.Context(), http.MethodGet, svc, nil)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		req.Header.Set("User-Agent", "CubeOS/1.0")
+
+		resp, err := client.Do(req)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+
+		body, err := io.ReadAll(io.LimitReader(resp.Body, 256))
+		resp.Body.Close()
+		if err != nil || resp.StatusCode != http.StatusOK {
+			lastErr = fmt.Errorf("%s: status %d", svc, resp.StatusCode)
+			continue
+		}
+
+		ip := strings.TrimSpace(string(body))
+		if ip != "" && net.ParseIP(ip) != nil {
+			jsonResponse(w, http.StatusOK, map[string]string{"public_ip": ip})
+			return
+		}
+	}
+
+	log.Printf("GetPublicIP: all services failed: %v", lastErr)
+	errorResponse(w, http.StatusInternalServerError, "failed to determine public IP")
 }
 
 // ============================================================================
