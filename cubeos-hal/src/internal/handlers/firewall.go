@@ -598,6 +598,32 @@ func countIptablesRules(output string) int {
 	return count
 }
 
+// mapProtocol converts numeric protocol IDs from iptables -n to human-readable names.
+func mapProtocol(p string) string {
+	switch p {
+	case "0":
+		return "all"
+	case "6":
+		return "tcp"
+	case "17":
+		return "udp"
+	case "1":
+		return "icmp"
+	case "58":
+		return "icmpv6"
+	case "47":
+		return "gre"
+	case "50":
+		return "esp"
+	case "51":
+		return "ah"
+	case "132":
+		return "sctp"
+	default:
+		return p
+	}
+}
+
 func parseIptablesOutput(output string) []map[string]string {
 	var rules []map[string]string
 	lines := strings.Split(output, "\n")
@@ -629,7 +655,7 @@ func parseIptablesOutput(output string) []map[string]string {
 		rule := map[string]string{
 			"chain":         currentChain,
 			"target":        fields[3],
-			"prot":          fields[4],
+			"prot":          mapProtocol(fields[4]),
 			"source":        fields[8],
 			"destination":   fields[9],
 			"in_interface":  fields[6],
