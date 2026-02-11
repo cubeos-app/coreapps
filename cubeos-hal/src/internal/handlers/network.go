@@ -40,24 +40,87 @@ func getDefaultWiFiInterface() string {
 func (h *HALHandler) ListInterfaces(w http.ResponseWriter, r *http.Request) {
 	output, err := execWithTimeout(r.Context(), "ip", "-j", "addr")
 	if err != nil {
-		// Fallback to non-JSON output
-		output, err = execWithTimeout(r.Context(), "ip", "addr")
-		if err != nil {
-			log.Printf("ListInterfaces: %v", err)
-			errorResponse(w, http.StatusInternalServerError, "failed to get interfaces")
-			return
-		}
-		jsonResponse(w, http.StatusOK, map[string]interface{}{
-			"raw": output,
-		})
+		log.Printf("ListInterfaces: ip -j addr failed: %v", err)
+		errorResponse(w, http.StatusInternalServerError, "failed to get interfaces")
 		return
 	}
 
-	var interfaces []interface{}
-	if err := json.Unmarshal([]byte(output), &interfaces); err != nil {
+	// Parse raw ip -j addr output
+	var rawInterfaces []struct {
+		IfName   string   `json:"ifname"`
+		Flags    []string `json:"flags"`
+		MTU      int      `json:"mtu"`
+		Address  string   `json:"address"`
+		LinkType string   `json:"link_type"`
+		AddrInfo []struct {
+			Family    string `json:"family"`
+			Local     string `json:"local"`
+			PrefixLen int    `json:"prefixlen"`
+		} `json:"addr_info"`
+	}
+
+	if err := json.Unmarshal([]byte(output), &rawInterfaces); err != nil {
 		log.Printf("ListInterfaces: parse error: %v", err)
 		errorResponse(w, http.StatusInternalServerError, "failed to parse interfaces")
 		return
+	}
+
+	// Transform to structured format
+	type structuredInterface struct {
+		Name          string   `json:"name"`
+		IsUp          bool     `json:"is_up"`
+		MACAddress    string   `json:"mac_address"`
+		IPv4Addresses []string `json:"ipv4_addresses"`
+		IPv6Addresses []string `json:"ipv6_addresses"`
+		MTU           int      `json:"mtu"`
+		IsWireless    bool     `json:"is_wireless"`
+	}
+
+	var interfaces []structuredInterface
+	for _, raw := range rawInterfaces {
+		iface := structuredInterface{
+			Name:       raw.IfName,
+			MACAddress: raw.Address,
+			MTU:        raw.MTU,
+		}
+
+		// Check if UP from flags
+		for _, flag := range raw.Flags {
+			if flag == "UP" {
+				iface.IsUp = true
+				break
+			}
+		}
+
+		// Extract IPv4 and IPv6 addresses from addr_info
+		for _, addr := range raw.AddrInfo {
+			addrStr := fmt.Sprintf("%s/%d", addr.Local, addr.PrefixLen)
+			switch addr.Family {
+			case "inet":
+				iface.IPv4Addresses = append(iface.IPv4Addresses, addrStr)
+			case "inet6":
+				iface.IPv6Addresses = append(iface.IPv6Addresses, addrStr)
+			}
+		}
+
+		// Ensure non-nil slices for JSON
+		if iface.IPv4Addresses == nil {
+			iface.IPv4Addresses = []string{}
+		}
+		if iface.IPv6Addresses == nil {
+			iface.IPv6Addresses = []string{}
+		}
+
+		// Detect wireless interfaces
+		if strings.HasPrefix(raw.IfName, "wlan") || strings.HasPrefix(raw.IfName, "wlx") || strings.HasPrefix(raw.IfName, "wlp") {
+			iface.IsWireless = true
+		}
+
+		interfaces = append(interfaces, iface)
+	}
+
+	if interfaces == nil {
+		interfaces = []structuredInterface{}
 	}
 
 	jsonResponse(w, http.StatusOK, map[string]interface{}{
