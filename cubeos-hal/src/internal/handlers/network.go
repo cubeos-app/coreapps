@@ -559,6 +559,10 @@ func (h *HALHandler) ConnectWiFi(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Remove all existing networks to prevent orphan buildup
+	// (each dashboard connect attempt adds a network; old ones compete with new)
+	_, _ = execWpaCli(r.Context(), "-i", req.Interface, "remove_network", "all")
+
 	// Use wpa_cli to connect (via nsenter for container compatibility)
 	output, err := execWpaCli(r.Context(), "-i", req.Interface, "add_network")
 	if err != nil {
@@ -594,11 +598,13 @@ func (h *HALHandler) ConnectWiFi(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Enable network
-	_, err = execWpaCli(r.Context(), "-i", req.Interface, "enable_network", networkID)
+	// Select network (not enable_network) — forces connection to THIS network,
+	// disabling all others. enable_network just marks as allowed but doesn't
+	// force connection when other networks exist.
+	_, err = execWpaCli(r.Context(), "-i", req.Interface, "select_network", networkID)
 	if err != nil {
-		log.Printf("ConnectWiFi: enable_network: %v", err)
-		errorResponse(w, http.StatusInternalServerError, "failed to enable network")
+		log.Printf("ConnectWiFi: select_network: %v", err)
+		errorResponse(w, http.StatusInternalServerError, "failed to select network")
 		return
 	}
 
