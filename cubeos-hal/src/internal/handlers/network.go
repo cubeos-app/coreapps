@@ -559,49 +559,70 @@ func (h *HALHandler) ConnectWiFi(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Remove all existing networks to prevent orphan buildup
-	// (each dashboard connect attempt adds a network; old ones compete with new)
-	_, _ = execWpaCli(r.Context(), "-i", req.Interface, "remove_network", "all")
-
-	// Use wpa_cli to connect (via nsenter for container compatibility)
-	output, err := execWpaCli(r.Context(), "-i", req.Interface, "add_network")
-	if err != nil {
-		log.Printf("ConnectWiFi: add_network: %v", err)
-		errorResponse(w, http.StatusInternalServerError, "failed to add network")
-		return
-	}
-
-	networkID := strings.TrimSpace(output)
-
-	// Set SSID
-	_, err = execWpaCli(r.Context(), "-i", req.Interface, "set_network", networkID, "ssid", fmt.Sprintf("\"%s\"", req.SSID))
-	if err != nil {
-		log.Printf("ConnectWiFi: set_network ssid: %v", err)
-		errorResponse(w, http.StatusInternalServerError, "failed to set SSID")
-		return
-	}
-
-	// Set password
-	if req.Password != "" {
-		_, err = execWpaCli(r.Context(), "-i", req.Interface, "set_network", networkID, "psk", fmt.Sprintf("\"%s\"", req.Password))
-		if err != nil {
-			log.Printf("ConnectWiFi: set_network psk: %v", err)
-			errorResponse(w, http.StatusInternalServerError, "failed to set password")
-			return
+	// Check if this SSID already exists as a saved network
+	existingID := ""
+	listOutput, listErr := execWpaCli(r.Context(), "-i", req.Interface, "list_networks")
+	if listErr == nil {
+		for _, line := range strings.Split(listOutput, "\n") {
+			fields := strings.Fields(line)
+			if len(fields) >= 2 && fields[0] != "network" {
+				if _, err := strconv.Atoi(fields[0]); err == nil && fields[1] == req.SSID {
+					existingID = fields[0]
+					break
+				}
+			}
 		}
+	}
+
+	var networkID string
+
+	if existingID != "" && req.Password == "" {
+		// Saved network, no new password → just reconnect using stored credentials
+		networkID = existingID
+		log.Printf("ConnectWiFi: reusing saved network %s (id=%s)", req.SSID, networkID)
 	} else {
-		_, err = execWpaCli(r.Context(), "-i", req.Interface, "set_network", networkID, "key_mgmt", "NONE")
+		// New network or password update: remove only the old entry for this SSID (not all),
+		// then create a fresh one with the provided credentials
+		if existingID != "" {
+			_, _ = execWpaCli(r.Context(), "-i", req.Interface, "remove_network", existingID)
+		}
+
+		output, err := execWpaCli(r.Context(), "-i", req.Interface, "add_network")
 		if err != nil {
-			log.Printf("ConnectWiFi: set_network key_mgmt: %v", err)
-			errorResponse(w, http.StatusInternalServerError, "failed to set key management")
+			log.Printf("ConnectWiFi: add_network: %v", err)
+			errorResponse(w, http.StatusInternalServerError, "failed to add network")
 			return
+		}
+		networkID = strings.TrimSpace(output)
+
+		// Set SSID
+		_, err = execWpaCli(r.Context(), "-i", req.Interface, "set_network", networkID, "ssid", fmt.Sprintf("\"%s\"", req.SSID))
+		if err != nil {
+			log.Printf("ConnectWiFi: set_network ssid: %v", err)
+			errorResponse(w, http.StatusInternalServerError, "failed to set SSID")
+			return
+		}
+
+		// Set password or open network
+		if req.Password != "" {
+			_, err = execWpaCli(r.Context(), "-i", req.Interface, "set_network", networkID, "psk", fmt.Sprintf("\"%s\"", req.Password))
+			if err != nil {
+				log.Printf("ConnectWiFi: set_network psk: %v", err)
+				errorResponse(w, http.StatusInternalServerError, "failed to set password")
+				return
+			}
+		} else {
+			_, err = execWpaCli(r.Context(), "-i", req.Interface, "set_network", networkID, "key_mgmt", "NONE")
+			if err != nil {
+				log.Printf("ConnectWiFi: set_network key_mgmt: %v", err)
+				errorResponse(w, http.StatusInternalServerError, "failed to set key management")
+				return
+			}
 		}
 	}
 
-	// Select network (not enable_network) — forces connection to THIS network,
-	// disabling all others. enable_network just marks as allowed but doesn't
-	// force connection when other networks exist.
-	_, err = execWpaCli(r.Context(), "-i", req.Interface, "select_network", networkID)
+	// Select network — forces connection to THIS network, disabling all others
+	_, err := execWpaCli(r.Context(), "-i", req.Interface, "select_network", networkID)
 	if err != nil {
 		log.Printf("ConnectWiFi: select_network: %v", err)
 		errorResponse(w, http.StatusInternalServerError, "failed to select network")
