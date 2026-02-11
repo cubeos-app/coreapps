@@ -332,6 +332,8 @@ func (h *HALHandler) GetStorageUsage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	showAll := r.URL.Query().Get("all") == "true"
+
 	var filesystems []FilesystemUsage
 	lines := strings.Split(output, "\n")
 	for i, line := range lines {
@@ -341,6 +343,21 @@ func (h *HALHandler) GetStorageUsage(w http.ResponseWriter, r *http.Request) {
 
 		fields := strings.Fields(line)
 		if len(fields) >= 6 {
+			source := fields[1]
+			mountpoint := fields[0]
+
+			// Unless ?all=true, only return real block-device-backed filesystems
+			// This filters out: overlay (Docker), tmpfs, devtmpfs, /dev/shm, etc.
+			if !showAll {
+				if !strings.HasPrefix(source, "/dev/") {
+					continue
+				}
+				// Also skip Docker overlay mounts that happen to show /dev/ source
+				if strings.Contains(mountpoint, "/docker/") {
+					continue
+				}
+			}
+
 			size, _ := strconv.ParseInt(fields[2], 10, 64)
 			used, _ := strconv.ParseInt(fields[3], 10, 64)
 			avail, _ := strconv.ParseInt(fields[4], 10, 64)
@@ -349,7 +366,7 @@ func (h *HALHandler) GetStorageUsage(w http.ResponseWriter, r *http.Request) {
 
 			filesystems = append(filesystems, FilesystemUsage{
 				Mountpoint: fields[0],
-				Filesystem: fields[1],
+				Filesystem: source,
 				Size:       size,
 				Used:       used,
 				Available:  avail,
