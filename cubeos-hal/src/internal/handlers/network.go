@@ -345,32 +345,56 @@ func (h *HALHandler) ScanWiFi(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// parseWifiScan parses iw scan output
+// parseWifiScan parses iw scan output into structured data
 func parseWifiScan(output string) []map[string]interface{} {
 	var networks []map[string]interface{}
 	var current map[string]interface{}
 
 	lines := strings.Split(output, "\n")
 	for _, line := range lines {
-		line = strings.TrimSpace(line)
+		trimmed := strings.TrimSpace(line)
 
-		if strings.HasPrefix(line, "BSS ") {
+		if strings.HasPrefix(trimmed, "BSS ") {
 			if current != nil {
 				networks = append(networks, current)
 			}
 			current = make(map[string]interface{})
-			parts := strings.Fields(line)
+			parts := strings.Fields(trimmed)
 			if len(parts) >= 2 {
 				bssid := strings.TrimSuffix(parts[1], "(on")
 				current["bssid"] = bssid
 			}
+			current["security"] = "Open"
 		} else if current != nil {
-			if strings.HasPrefix(line, "SSID:") {
-				current["ssid"] = strings.TrimPrefix(line, "SSID: ")
-			} else if strings.HasPrefix(line, "signal:") {
-				current["signal"] = strings.TrimPrefix(line, "signal: ")
-			} else if strings.HasPrefix(line, "freq:") {
-				current["frequency"] = strings.TrimPrefix(line, "freq: ")
+			if strings.HasPrefix(trimmed, "SSID:") {
+				current["ssid"] = strings.TrimSpace(strings.TrimPrefix(trimmed, "SSID:"))
+			} else if strings.HasPrefix(trimmed, "signal:") {
+				sigStr := strings.TrimPrefix(trimmed, "signal: ")
+				sigStr = strings.TrimSuffix(sigStr, " dBm")
+				sigStr = strings.TrimSpace(sigStr)
+				if v, err := strconv.ParseFloat(sigStr, 64); err == nil {
+					current["signal"] = int(v)
+				}
+			} else if strings.HasPrefix(trimmed, "freq:") {
+				freqStr := strings.TrimSpace(strings.TrimPrefix(trimmed, "freq:"))
+				if v, err := strconv.Atoi(freqStr); err == nil {
+					current["frequency"] = v
+					// Derive channel from frequency
+					current["channel"] = freqToChannel(v)
+				}
+			} else if strings.Contains(trimmed, "WPA") || strings.Contains(trimmed, "RSN") {
+				if strings.Contains(trimmed, "RSN") {
+					current["security"] = "WPA2"
+				} else if strings.Contains(trimmed, "WPA") {
+					// Don't downgrade from WPA2
+					if current["security"] != "WPA2" {
+						current["security"] = "WPA"
+					}
+				}
+			} else if strings.Contains(trimmed, "WEP") {
+				if current["security"] == "Open" {
+					current["security"] = "WEP"
+				}
 			}
 		}
 	}
@@ -380,6 +404,23 @@ func parseWifiScan(output string) []map[string]interface{} {
 	}
 
 	return networks
+}
+
+// freqToChannel converts WiFi frequency in MHz to channel number
+func freqToChannel(freq int) int {
+	switch {
+	case freq >= 2412 && freq <= 2484:
+		if freq == 2484 {
+			return 14
+		}
+		return (freq - 2407) / 5
+	case freq >= 5170 && freq <= 5825:
+		return (freq - 5000) / 5
+	case freq >= 5955 && freq <= 7115:
+		return (freq - 5950) / 5
+	default:
+		return 0
+	}
 }
 
 // ConnectWiFi connects to a WiFi network
@@ -518,81 +559,288 @@ func (h *HALHandler) DisconnectWiFi(w http.ResponseWriter, r *http.Request) {
 
 // GetAPStatus returns access point status
 // @Summary Get AP status
-// @Description Returns access point status from hostapd_cli
+// @Description Returns structured access point status from hostapd_cli with hostapd.conf fallback
 // @Tags Network
 // @Produce json
 // @Success 200 {object} map[string]interface{}
 // @Failure 500 {object} ErrorResponse
 // @Router /network/ap/status [get]
 func (h *HALHandler) GetAPStatus(w http.ResponseWriter, r *http.Request) {
-	output, err := execWithTimeout(r.Context(), "hostapd_cli", "status")
-	if err != nil {
-		log.Printf("GetAPStatus: %v", err)
-		errorResponse(w, http.StatusInternalServerError, sanitizeExecError("get AP status", err))
-		return
+	result := map[string]interface{}{
+		"active":    false,
+		"ssid":      "",
+		"channel":   0,
+		"interface": "wlan0",
+		"frequency": 0,
+		"bssid":     "",
+		"clients":   0,
 	}
 
-	status := make(map[string]string)
-	lines := strings.Split(output, "\n")
-	for _, line := range lines {
-		parts := strings.SplitN(line, "=", 2)
-		if len(parts) == 2 {
-			status[parts[0]] = parts[1]
+	// Try hostapd_cli status first
+	output, err := execWithTimeout(r.Context(), "hostapd_cli", "status")
+	if err == nil {
+		raw := parseKeyValue(output)
+		// hostapd_cli uses keys like ssid[0], bssid[0] — normalize them
+		if v, ok := raw["state"]; ok {
+			result["active"] = (v == "ENABLED" || v == "COUNTRY_UPDATE" || v == "HT_SCAN" || v == "DFS")
+			result["state"] = v
+		}
+		if v, ok := raw["ssid[0]"]; ok {
+			result["ssid"] = v
+		} else if v, ok := raw["ssid"]; ok {
+			result["ssid"] = v
+		}
+		if v, ok := raw["channel"]; ok {
+			if ch, err := strconv.Atoi(v); err == nil {
+				result["channel"] = ch
+			}
+		}
+		if v, ok := raw["freq"]; ok {
+			if freq, err := strconv.Atoi(v); err == nil {
+				result["frequency"] = freq
+			}
+		}
+		if v, ok := raw["bssid[0]"]; ok {
+			result["bssid"] = v
+		} else if v, ok := raw["bssid"]; ok {
+			result["bssid"] = v
+		}
+		if v, ok := raw["num_sta[0]"]; ok {
+			if n, err := strconv.Atoi(v); err == nil {
+				result["clients"] = n
+			}
+		}
+		// Detect interface from "Selected interface" line
+		for _, line := range strings.Split(output, "\n") {
+			if strings.HasPrefix(line, "Selected interface") {
+				// "Selected interface 'wlan0'"
+				parts := strings.SplitN(line, "'", 3)
+				if len(parts) >= 2 {
+					result["interface"] = parts[1]
+				}
+			}
+		}
+	} else {
+		log.Printf("GetAPStatus: hostapd_cli failed: %v, falling back to config file", err)
+	}
+
+	// If ssid is still empty, fall back to hostapd.conf
+	if result["ssid"] == "" {
+		result["ssid"], result["channel"], result["interface"] = parseHostapdConf()
+	}
+
+	// Check if hostapd service is active (overrides hostapd_cli state if needed)
+	if !result["active"].(bool) {
+		svcOutput, err := execWithTimeout(r.Context(), "systemctl", "is-active", "hostapd")
+		if err == nil && strings.TrimSpace(svcOutput) == "active" {
+			result["active"] = true
 		}
 	}
 
-	jsonResponse(w, http.StatusOK, map[string]interface{}{
-		"status": status,
-	})
+	jsonResponse(w, http.StatusOK, result)
+}
+
+// parseKeyValue parses key=value output (used by hostapd_cli, wpa_cli, etc.)
+func parseKeyValue(output string) map[string]string {
+	m := make(map[string]string)
+	for _, line := range strings.Split(output, "\n") {
+		line = strings.TrimSpace(line)
+		parts := strings.SplitN(line, "=", 2)
+		if len(parts) == 2 {
+			m[strings.TrimSpace(parts[0])] = strings.TrimSpace(parts[1])
+		}
+	}
+	return m
+}
+
+// parseHostapdConf reads SSID, channel, and interface from hostapd.conf as fallback
+func parseHostapdConf() (ssid string, channel int, iface string) {
+	ssid = "CubeOS"
+	iface = "wlan0"
+
+	confPaths := []string{
+		"/etc/hostapd/hostapd.conf",
+		"/etc/hostapd.conf",
+	}
+
+	for _, path := range confPaths {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			continue
+		}
+		for _, line := range strings.Split(string(data), "\n") {
+			line = strings.TrimSpace(line)
+			if strings.HasPrefix(line, "#") || !strings.Contains(line, "=") {
+				continue
+			}
+			parts := strings.SplitN(line, "=", 2)
+			if len(parts) != 2 {
+				continue
+			}
+			key := strings.TrimSpace(parts[0])
+			val := strings.TrimSpace(parts[1])
+			switch key {
+			case "ssid":
+				ssid = val
+			case "channel":
+				if ch, err := strconv.Atoi(val); err == nil {
+					channel = ch
+				}
+			case "interface":
+				iface = val
+			}
+		}
+		break // Use first found config
+	}
+	return
 }
 
 // GetAPClients returns connected AP clients
 // @Summary Get AP clients
-// @Description Returns list of clients connected to the access point using hostapd_cli
+// @Description Returns list of clients connected to the access point, enriched with DHCP lease data
 // @Tags Network
 // @Produce json
 // @Success 200 {object} map[string]interface{}
 // @Failure 500 {object} ErrorResponse
 // @Router /network/ap/clients [get]
 func (h *HALHandler) GetAPClients(w http.ResponseWriter, r *http.Request) {
+	// Load DHCP leases for IP/hostname enrichment
+	leases := loadDHCPLeases()
+
+	var clients []map[string]interface{}
+
+	// Try hostapd_cli all_sta first
 	output, err := execWithTimeout(r.Context(), "hostapd_cli", "all_sta")
-	if err != nil {
-		log.Printf("GetAPClients: %v", err)
-		errorResponse(w, http.StatusInternalServerError, sanitizeExecError("get AP clients", err))
-		return
+	if err == nil {
+		var currentMAC string
+		var current map[string]interface{}
+
+		for _, line := range strings.Split(output, "\n") {
+			line = strings.TrimSpace(line)
+			if line == "" {
+				continue
+			}
+
+			// MAC address line starts a new client (17 chars, 5 colons)
+			if len(line) == 17 && strings.Count(line, ":") == 5 {
+				if current != nil {
+					clients = append(clients, current)
+				}
+				currentMAC = strings.ToUpper(line)
+				current = map[string]interface{}{
+					"mac_address": currentMAC,
+					"ip_address":  "",
+					"hostname":    "",
+				}
+				// Enrich from DHCP leases
+				if lease, ok := leases[strings.ToLower(line)]; ok {
+					current["ip_address"] = lease.ip
+					current["hostname"] = lease.hostname
+				}
+			} else if current != nil {
+				parts := strings.SplitN(line, "=", 2)
+				if len(parts) == 2 {
+					key := strings.TrimSpace(parts[0])
+					val := strings.TrimSpace(parts[1])
+					switch key {
+					case "connected_time":
+						if v, err := strconv.ParseInt(val, 10, 64); err == nil {
+							current["connected_time"] = v
+						}
+					case "signal":
+						// hostapd reports signal in dBm, may have trailing text
+						sig := strings.Fields(val)
+						if len(sig) > 0 {
+							if v, err := strconv.Atoi(sig[0]); err == nil {
+								current["signal"] = v
+							}
+						}
+					case "rx_bytes":
+						if v, err := strconv.ParseInt(val, 10, 64); err == nil {
+							current["rx_bytes"] = v
+						}
+					case "tx_bytes":
+						if v, err := strconv.ParseInt(val, 10, 64); err == nil {
+							current["tx_bytes"] = v
+						}
+					}
+				}
+			}
+		}
+		if current != nil {
+			clients = append(clients, current)
+		}
+	} else {
+		log.Printf("GetAPClients: hostapd_cli failed: %v, falling back to DHCP leases", err)
+		// Fall back: report DHCP clients on the AP subnet as connected
+		for _, lease := range leases {
+			if strings.HasPrefix(lease.ip, "10.42.24.") && lease.ip != "10.42.24.1" {
+				clients = append(clients, map[string]interface{}{
+					"mac_address": strings.ToUpper(lease.mac),
+					"ip_address":  lease.ip,
+					"hostname":    lease.hostname,
+					"source":      "dhcp_lease",
+				})
+			}
+		}
 	}
 
-	var clients []map[string]string
-	var current map[string]string
-
-	lines := strings.Split(output, "\n")
-	for _, line := range lines {
-		line = strings.TrimSpace(line)
-		if line == "" {
-			continue
-		}
-
-		// MAC address line starts a new client
-		if len(line) == 17 && strings.Count(line, ":") == 5 {
-			if current != nil {
-				clients = append(clients, current)
-			}
-			current = map[string]string{"mac": line}
-		} else if current != nil {
-			parts := strings.SplitN(line, "=", 2)
-			if len(parts) == 2 {
-				current[parts[0]] = parts[1]
-			}
-		}
-	}
-	if current != nil {
-		clients = append(clients, current)
+	if clients == nil {
+		clients = []map[string]interface{}{}
 	}
 
 	jsonResponse(w, http.StatusOK, map[string]interface{}{
 		"clients": clients,
 		"count":   len(clients),
 	})
+}
+
+// dhcpLease holds parsed DHCP lease data
+type dhcpLease struct {
+	mac      string
+	ip       string
+	hostname string
+	expiry   string
+}
+
+// loadDHCPLeases reads DHCP lease files and returns a map keyed by lowercase MAC
+func loadDHCPLeases() map[string]dhcpLease {
+	leases := make(map[string]dhcpLease)
+
+	leasePaths := []string{
+		"/var/lib/misc/dnsmasq.leases",
+		"/tmp/dnsmasq.leases",
+		"/etc/pihole/dhcp.leases",
+		"/var/lib/dhcp/dhcpd.leases",
+		// Pi-hole in Docker paths
+		"/cubeos/coreapps/pihole/appdata/etc-dnsmasq.d/dhcp.leases",
+		"/cubeos/coreapps/pihole/appdata/etc-pihole/dhcp.leases",
+	}
+
+	for _, path := range leasePaths {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			continue
+		}
+		// dnsmasq lease format: <expiry> <mac> <ip> <hostname> <client-id>
+		for _, line := range strings.Split(string(data), "\n") {
+			fields := strings.Fields(line)
+			if len(fields) >= 4 {
+				mac := strings.ToLower(fields[1])
+				leases[mac] = dhcpLease{
+					mac:      mac,
+					ip:       fields[2],
+					hostname: fields[3],
+					expiry:   fields[0],
+				}
+			}
+		}
+		if len(leases) > 0 {
+			break // Use first file that has data
+		}
+	}
+
+	return leases
 }
 
 // DisconnectAPClient disconnects a client from the AP
