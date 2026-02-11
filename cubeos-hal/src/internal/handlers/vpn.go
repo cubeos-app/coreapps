@@ -186,9 +186,11 @@ func (h *HALHandler) OpenVPNUp(w http.ResponseWriter, r *http.Request) {
 		ovpnArgs = append(ovpnArgs, "--auth-user-pass", authPath)
 	}
 
-	// Disable up/down scripts that may not exist on host (e.g. update-resolv-conf)
-	// This prevents failures when the .ovpn references scripts from a different distro
-	ovpnArgs = append(ovpnArgs, "--script-security", "0")
+	// Override up/down scripts with no-op — the .ovpn may reference scripts
+	// that don't exist on this host (e.g. /etc/openvpn/update-resolv-conf).
+	// script-security 2 is required to avoid fatal errors when scripts are configured.
+	ovpnArgs = append(ovpnArgs, "--script-security", "2",
+		"--up", "/bin/true", "--down", "/bin/true")
 
 	// Build full nsenter command
 	nsenterArgs := []string{"-t", "1", "-m", "-n", "--", "openvpn"}
