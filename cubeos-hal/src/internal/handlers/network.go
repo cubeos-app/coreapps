@@ -357,10 +357,24 @@ func (h *HALHandler) GetNetworkStatus(w http.ResponseWriter, r *http.Request) {
 		status["default_route"] = strings.TrimSpace(output)
 	}
 
-	// Check internet connectivity
+	// Check internet connectivity and measure RTT
 	checkIP := getDefaultInternetCheckIP()
-	_, err = execWithTimeout(r.Context(), "ping", "-c", "1", "-W", "2", checkIP)
+	pingOutput, err := execWithTimeout(r.Context(), "ping", "-c", "1", "-W", "2", checkIP)
 	status["internet"] = err == nil
+	status["check_target"] = checkIP
+
+	// Parse RTT from ping output: "time=1.23 ms"
+	if err == nil && len(pingOutput) > 0 {
+		if idx := strings.Index(pingOutput, "time="); idx >= 0 {
+			rttStr := pingOutput[idx+5:]
+			if spaceIdx := strings.IndexByte(rttStr, ' '); spaceIdx >= 0 {
+				rttStr = rttStr[:spaceIdx]
+			}
+			if rtt, parseErr := strconv.ParseFloat(rttStr, 64); parseErr == nil {
+				status["rtt_ms"] = rtt
+			}
+		}
+	}
 
 	// Determine mode based on interfaces
 	if _, err := os.Stat("/sys/class/net/eth0"); err == nil {

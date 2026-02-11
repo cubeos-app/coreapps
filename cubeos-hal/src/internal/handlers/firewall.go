@@ -618,21 +618,49 @@ func parseIptablesOutput(output string) []map[string]string {
 			continue
 		}
 
+		// Format with -L -n -v --line-numbers:
+		// num  pkts bytes target  prot opt in  out  source  destination  [extra...]
+		// [0]  [1]  [2]   [3]    [4] [5] [6] [7]   [8]      [9]        [10+]
 		fields := strings.Fields(line)
-		if len(fields) >= 4 {
-			rule := map[string]string{
-				"chain":  currentChain,
-				"target": fields[2],
-				"prot":   fields[3],
-			}
-			if len(fields) >= 8 {
-				rule["source"] = fields[7]
-			}
-			if len(fields) >= 9 {
-				rule["destination"] = fields[8]
-			}
-			rules = append(rules, rule)
+		if len(fields) < 10 {
+			continue
 		}
+
+		rule := map[string]string{
+			"chain":         currentChain,
+			"target":        fields[3],
+			"prot":          fields[4],
+			"source":        fields[8],
+			"destination":   fields[9],
+			"in_interface":  fields[6],
+			"out_interface": fields[7],
+			"pkts":          fields[1],
+			"bytes":         fields[2],
+		}
+
+		// Extract port info from extra fields (e.g. "tcp dpt:22", "udp spt:53 dpt:1024")
+		extra := strings.Join(fields[10:], " ")
+		if extra != "" {
+			rule["options"] = extra
+			// Extract destination port
+			if idx := strings.Index(extra, "dpt:"); idx >= 0 {
+				portStr := extra[idx+4:]
+				if spaceIdx := strings.IndexByte(portStr, ' '); spaceIdx >= 0 {
+					portStr = portStr[:spaceIdx]
+				}
+				rule["dport"] = portStr
+			}
+			// Extract source port
+			if idx := strings.Index(extra, "spt:"); idx >= 0 {
+				portStr := extra[idx+4:]
+				if spaceIdx := strings.IndexByte(portStr, ' '); spaceIdx >= 0 {
+					portStr = portStr[:spaceIdx]
+				}
+				rule["sport"] = portStr
+			}
+		}
+
+		rules = append(rules, rule)
 	}
 
 	return rules
