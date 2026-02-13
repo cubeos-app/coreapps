@@ -4,7 +4,6 @@
 # REASON: Host network mode required for DHCP broadcast
 # Port: 6001 (Admin UI), 53 (DNS), 67 (DHCP)
 # ═══════════════════════════════════════════════════════════════════════════════
-
 services:
   pihole:
     image: pihole/pihole:latest
@@ -17,15 +16,30 @@ services:
       - ../appdata/etc-dnsmasq.d:/etc/dnsmasq.d
     environment:
       - TZ=${TZ:-UTC}
+      # --- Web UI ---
       - FTLCONF_webserver_port=6001
       - FTLCONF_webserver_api_password=${PIHOLE_PASSWORD:-cubeos}
+      # --- DNS core ---
       - FTLCONF_dns_listeningMode=all
       - FTLCONF_dns_upstreams=1.1.1.1;8.8.8.8
+      - FTLCONF_dns_dnssec=false
+      # --- Local domain (never forward *.cubeos.cube) ---
+      - FTLCONF_dns_domain_name=cubeos.cube
+      - FTLCONF_dns_domain_local=true
+      - FTLCONF_dns_domainNeeded=true
+      - FTLCONF_dns_bogusPriv=true
+      - FTLCONF_dns_expandHosts=true
+      # --- DHCP ---
       - FTLCONF_dhcp_active=true
       - FTLCONF_dhcp_start=10.42.24.10
       - FTLCONF_dhcp_end=10.42.24.250
       - FTLCONF_dhcp_router=10.42.24.1
       - FTLCONF_dhcp_netmask=255.255.255.0
+      # --- Offline resilience ---
+      - FTLCONF_dns_replyWhenBusy=ALLOW
+      - FTLCONF_dns_blocking_active=false
+      # --- Wildcard: ALL *.cubeos.cube -> 10.42.24.1 ---
+      - FTLCONF_misc_dnsmasq_lines=address=/cubeos.cube/10.42.24.1
     env_file:
       - /cubeos/config/defaults.env
     cap_add:
@@ -50,4 +64,3 @@ services:
       - "cubeos.fqdn=pihole.cubeos.cube"
       - "cubeos.deployment=compose"
       - "cubeos.description=Pi-hole DNS + DHCP Server"
-# Swarm deploy zo  1 feb 2026  1:52:10 CET
