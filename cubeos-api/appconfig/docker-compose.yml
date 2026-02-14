@@ -22,13 +22,14 @@ services:
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
       - /cubeos:/cubeos
-      - /etc/hostapd:/etc/hostapd:ro
+      - /etc/hostapd:/etc/hostapd
       - /sys:/sys:ro
       - /proc:/proc:ro
       - /:/host-root
     environment:
       - TZ=${TZ:-UTC}
       - CUBEOS_PORT=6010
+      - CUBEOS_VERSION=${CUBEOS_VERSION:-0.1.0-alpha.10}
       - CUBEOS_DATA_DIR=/cubeos/data
       - CUBEOS_DB_PATH=/cubeos/data/cubeos.db
       - CUBEOS_HOST_ROOT=/host-root

@@ -149,6 +149,34 @@ func (h *HALHandler) Shutdown(w http.ResponseWriter, r *http.Request) {
 	successResponse(w, "system shutting down...")
 	go func() {
 		time.Sleep(1 * time.Second)
+
+		// Call UPS driver shutdown sequence before system halt.
+		// On X728 (Pi 4): pulses GPIO 26 HIGH for 3s — MANDATORY or UPS drains battery.
+		// On X1202 (Pi 5): no-op (MCU auto-detects halt via current draw).
+		// On PiSugar3: clears output switch to cut power.
+		// On nil (no UPS): skip.
+		var driver UPSDriver
+		if pm := h.powerMonitor; pm != nil {
+			driver = pm.Driver()
+		}
+		if driver == nil {
+			// Power monitor not started yet — run one-shot UPS detection
+			log.Printf("Shutdown: power monitor driver nil, running one-shot UPS detection")
+			driver = DetectUPS()
+			if driver != nil {
+				log.Printf("Shutdown: detected %s via one-shot probe", driver.Name())
+			}
+		}
+		if driver != nil {
+			log.Printf("Shutdown: calling UPS driver InitiateShutdown (%s)", driver.Name())
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			if err := driver.InitiateShutdown(ctx); err != nil {
+				log.Printf("Shutdown: UPS InitiateShutdown error (non-fatal): %v", err)
+			}
+			cancel()
+			log.Printf("Shutdown: UPS driver shutdown complete, proceeding with system halt")
+		}
+
 		// nsenter into host PID 1 mount namespace — Alpine container has no systemctl
 		if _, err := execWithTimeout(context.Background(), "nsenter", "-t", "1", "-m", "--", "systemctl", "poweroff"); err != nil {
 			log.Printf("shutdown via nsenter failed: %v, trying poweroff -f", err)

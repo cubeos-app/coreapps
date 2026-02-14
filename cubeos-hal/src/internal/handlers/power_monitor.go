@@ -209,6 +209,14 @@ func (pm *PowerMonitor) Status() MonitorStatus {
 	return status
 }
 
+// Driver returns the detected UPS driver (or nil if none detected).
+// Used by the system Shutdown handler to call InitiateShutdown before poweroff.
+func (pm *PowerMonitor) Driver() UPSDriver {
+	pm.mu.Lock()
+	defer pm.mu.Unlock()
+	return pm.driver
+}
+
 // Shutdown gracefully stops the monitor. Called during HAL shutdown.
 func (pm *PowerMonitor) Shutdown() {
 	pm.mu.Lock()
