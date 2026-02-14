@@ -9,9 +9,13 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync/atomic"
 
 	"github.com/go-chi/chi/v5"
 )
+
+// hostapdCLILoggedOnce suppresses repeated hostapd_cli failure logs.
+var hostapdCLILoggedOnce atomic.Bool
 
 // getDefaultInternetCheckIP returns the IP used for internet connectivity checks.
 func getDefaultInternetCheckIP() string {
@@ -737,7 +741,10 @@ func (h *HALHandler) GetAPStatus(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	} else {
-		log.Printf("GetAPStatus: hostapd_cli failed: %v, falling back to config file", err)
+		// B7 fix: Log once, then silently fall back to config file
+		if !hostapdCLILoggedOnce.Swap(true) {
+			log.Printf("GetAPStatus: hostapd_cli failed: %v, falling back to config file (suppressing future logs)", err)
+		}
 	}
 
 	// If ssid is still empty, fall back to hostapd.conf
@@ -895,7 +902,10 @@ func (h *HALHandler) GetAPClients(w http.ResponseWriter, r *http.Request) {
 			clients = append(clients, current)
 		}
 	} else {
-		log.Printf("GetAPClients: hostapd_cli failed: %v, falling back to DHCP leases", err)
+		// B7 fix: Log once, then silently fall back to DHCP leases
+		if !hostapdCLILoggedOnce.Swap(true) {
+			log.Printf("GetAPClients: hostapd_cli failed: %v, falling back to DHCP leases (suppressing future logs)", err)
+		}
 		// Fall back: report DHCP clients on the AP subnet as connected
 		for _, lease := range leases {
 			if strings.HasPrefix(lease.ip, "10.42.24.") && lease.ip != "10.42.24.1" {

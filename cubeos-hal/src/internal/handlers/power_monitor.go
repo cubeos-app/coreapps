@@ -424,10 +424,13 @@ func (pm *PowerMonitor) shutdownCountdown(ctx context.Context, driver UPSDriver)
 		// Continue with system shutdown anyway
 	}
 
-	// Execute system poweroff
-	log.Printf("PowerMonitor: executing systemctl poweroff")
-	if _, err := execWithTimeout(context.Background(), "systemctl", "poweroff"); err != nil {
-		log.Printf("PowerMonitor: systemctl poweroff failed: %v", err)
+	// Execute system poweroff via nsenter (Alpine container has no systemctl)
+	log.Printf("PowerMonitor: executing systemctl poweroff via nsenter")
+	if _, err := execWithTimeout(context.Background(), "nsenter", "-t", "1", "-m", "--", "systemctl", "poweroff"); err != nil {
+		log.Printf("PowerMonitor: nsenter poweroff failed: %v, trying poweroff -f", err)
+		if _, err2 := execWithTimeout(context.Background(), "poweroff", "-f"); err2 != nil {
+			log.Printf("PowerMonitor: poweroff -f also failed: %v", err2)
+		}
 		powerActionInProgress.Store(false)
 	}
 }

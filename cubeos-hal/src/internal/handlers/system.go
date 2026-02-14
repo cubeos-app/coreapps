@@ -120,9 +120,14 @@ func (h *HALHandler) Reboot(w http.ResponseWriter, r *http.Request) {
 	successResponse(w, "system rebooting...")
 	go func() {
 		time.Sleep(1 * time.Second)
-		if _, err := execWithTimeout(context.Background(), "systemctl", "reboot"); err != nil {
-			log.Printf("reboot command failed: %v", err)
-			powerActionInProgress.Store(false) // Reset on failure so retry is possible
+		// nsenter into host PID 1 mount namespace — Alpine container has no systemctl
+		if _, err := execWithTimeout(context.Background(), "nsenter", "-t", "1", "-m", "--", "systemctl", "reboot"); err != nil {
+			log.Printf("reboot via nsenter failed: %v, trying reboot -f", err)
+			// Fallback: BusyBox reboot -f uses reboot() syscall directly
+			if _, err2 := execWithTimeout(context.Background(), "reboot", "-f"); err2 != nil {
+				log.Printf("reboot -f also failed: %v", err2)
+			}
+			powerActionInProgress.Store(false)
 		}
 	}()
 }
@@ -144,8 +149,12 @@ func (h *HALHandler) Shutdown(w http.ResponseWriter, r *http.Request) {
 	successResponse(w, "system shutting down...")
 	go func() {
 		time.Sleep(1 * time.Second)
-		if _, err := execWithTimeout(context.Background(), "systemctl", "poweroff"); err != nil {
-			log.Printf("shutdown command failed: %v", err)
+		// nsenter into host PID 1 mount namespace — Alpine container has no systemctl
+		if _, err := execWithTimeout(context.Background(), "nsenter", "-t", "1", "-m", "--", "systemctl", "poweroff"); err != nil {
+			log.Printf("shutdown via nsenter failed: %v, trying poweroff -f", err)
+			if _, err2 := execWithTimeout(context.Background(), "poweroff", "-f"); err2 != nil {
+				log.Printf("poweroff -f also failed: %v", err2)
+			}
 			powerActionInProgress.Store(false)
 		}
 	}()
