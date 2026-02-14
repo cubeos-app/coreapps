@@ -35,6 +35,7 @@ services:
       - HAL_URL=http://10.42.24.1:6005/hal
     env_file:
       - /cubeos/config/defaults.env
+      - /cubeos/config/secrets.env
     pid: "host"
     cap_add:
       - SYS_ADMIN
