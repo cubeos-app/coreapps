@@ -150,6 +150,55 @@ type Document struct {
 }
 
 // ---------------------------------------------------------------------------
+// Built-in fallback documentation (served when /cubeos/docs is empty)
+// ---------------------------------------------------------------------------
+
+var builtinDocs = map[string]DocContent{
+	"getting-started": {
+		Title: "Getting Started with CubeOS",
+		Path:  "getting-started",
+		Content: `# Getting Started with CubeOS
+
+Welcome to CubeOS — your self-hosted server operating system for Raspberry Pi.
+
+## Quick Links
+
+- **Dashboard:** [http://cubeos.cube](http://cubeos.cube)
+- **API:** [http://api.cubeos.cube](http://api.cubeos.cube)
+- **Pi-hole DNS:** [http://pihole.cubeos.cube](http://pihole.cubeos.cube)
+- **Logs (Dozzle):** [http://dozzle.cubeos.cube](http://dozzle.cubeos.cube)
+
+## First Steps
+
+1. Connect to the CubeOS WiFi access point
+2. Open the dashboard at http://cubeos.cube
+3. Complete the Setup Wizard to configure your device
+4. Install additional services from the App Store
+
+## Network Modes
+
+- **Offline** — Access Point only, air-gapped operation
+- **Online (Ethernet)** — AP + internet via Ethernet cable
+- **Online (WiFi)** — AP + internet via USB WiFi dongle
+
+## Documentation
+
+Full documentation is available online at [docs.cubeos.app](https://docs.cubeos.app).
+
+To enable offline documentation with AI-powered search, ensure the Ollama and ChromaDB services are running on the Services page. Documentation will be automatically indexed when these services become available.
+`,
+	},
+}
+
+var builtinTree = []DocTreeItem{
+	{
+		Title: "Getting Started with CubeOS",
+		Path:  "getting-started",
+		IsDir: false,
+	},
+}
+
+// ---------------------------------------------------------------------------
 // Server
 // ---------------------------------------------------------------------------
 
@@ -182,6 +231,7 @@ func main() {
 	mux.HandleFunc("/health", srv.handleHealth)
 
 	// Docs API — served under /api/v1/docs to match dashboard expectations
+	mux.HandleFunc("/api/v1/docs/status", srv.handleDocsServiceStatus)
 	mux.HandleFunc("/api/v1/docs/tree", srv.handleDocsTree)
 	mux.HandleFunc("/api/v1/docs/search", srv.handleDocsSearch)
 	// Catch-all for /api/v1/docs/{path...}
@@ -206,12 +256,71 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 }
 
+func (s *Server) handleDocsServiceStatus(w http.ResponseWriter, r *http.Request) {
+	// Check if docs directory has content
+	docsAvailable := false
+	if files, err := findMarkdownFiles(s.config.DocsLocalPath); err == nil && len(files) > 0 {
+		docsAvailable = true
+	}
+
+	// Check Ollama reachability
+	ollamaOK := false
+	ollamaURL := fmt.Sprintf("http://%s:%s", s.config.OllamaHost, s.config.OllamaPort)
+	client := &http.Client{Timeout: 3 * time.Second}
+	if resp, err := client.Get(ollamaURL); err == nil {
+		resp.Body.Close()
+		ollamaOK = true
+	}
+
+	// Check ChromaDB reachability
+	chromaOK := false
+	chromaURL := fmt.Sprintf("http://%s:%s/api/v2", s.config.ChromaHost, s.config.ChromaPort)
+	if resp, err := client.Get(chromaURL); err == nil {
+		resp.Body.Close()
+		chromaOK = true
+	}
+
+	s.mu.RLock()
+	indexStatus := s.status
+	s.mu.RUnlock()
+
+	mode := "builtin"
+	if docsAvailable && ollamaOK && chromaOK {
+		mode = "rag"
+	} else if docsAvailable {
+		mode = "filesystem"
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"mode":           mode,
+		"docs_available": docsAvailable,
+		"ollama_ok":      ollamaOK,
+		"chromadb_ok":    chromaOK,
+		"indexing":       indexStatus.Indexing,
+		"last_indexed":   indexStatus.LastRun,
+		"doc_count":      indexStatus.DocCount,
+		"chunk_count":    indexStatus.ChunkCount,
+		"index_error":    indexStatus.Error,
+	})
+}
+
 func (s *Server) handleDocsTree(w http.ResponseWriter, r *http.Request) {
 	tree, err := buildDocsTree(s.config.DocsLocalPath)
 	if err != nil {
-		http.Error(w, `{"error":"failed to build docs tree"}`, http.StatusInternalServerError)
+		log.Printf("Failed to build docs tree: %v, serving built-in docs", err)
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(builtinTree)
 		return
 	}
+
+	// If docs directory is empty, serve built-in fallback
+	if len(tree) == 0 {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(builtinTree)
+		return
+	}
+
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(tree)
 }
@@ -221,6 +330,21 @@ func (s *Server) handleDocsGet(w http.ResponseWriter, r *http.Request) {
 	docPath := strings.TrimPrefix(r.URL.Path, "/api/v1/docs/")
 	if docPath == "" {
 		docPath = "README"
+	}
+
+	// Check built-in docs first (fallback when docs dir is empty)
+	if doc, ok := builtinDocs[docPath]; ok {
+		// Only serve built-in if no real docs exist at this path
+		cleaned := filepath.Clean(docPath)
+		fullPath := filepath.Join(s.config.DocsLocalPath, cleaned)
+		if !strings.HasSuffix(fullPath, ".md") {
+			fullPath += ".md"
+		}
+		if _, err := os.Stat(fullPath); os.IsNotExist(err) {
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(doc)
+			return
+		}
 	}
 
 	// Prevent path traversal
@@ -956,4 +1080,3 @@ func getEmbedding(ollamaURL, model, text string) ([]float32, error) {
 
 	return embResp.Embedding, nil
 }
-
