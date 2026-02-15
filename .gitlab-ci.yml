@@ -33,7 +33,6 @@ variables:
 validate-compose:
   stage: validate
   image: registry-gitlab.nuclearlighters.net/products/cubeos/coreapps/ci-utils:latest
-  tags:
     - multiarch
   script:
     - |
@@ -55,7 +54,6 @@ validate-compose:
 shellcheck:
   stage: validate
   image: registry-gitlab.nuclearlighters.net/products/cubeos/coreapps/ci-utils:latest
-  tags:
     - multiarch
   script:
     - find . -name "*.sh" -type f -exec shellcheck -x {} \;
@@ -224,9 +222,6 @@ package-docsindex:
 
 deploy:
   stage: deploy
-  tags:
-    - deploy
-    - arm64
   script:
     - |
       # Detect changed apps
@@ -364,11 +359,7 @@ deploy:
 
 restart-changed:
   stage: restart
-  tags:
-    - deploy
-    - arm64
   needs:
-    - deploy
     - job: package-hal
       optional: true
     - job: package-docsindex
