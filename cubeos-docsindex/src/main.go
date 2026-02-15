@@ -956,3 +956,4 @@ func getEmbedding(ollamaURL, model, text string) ([]float32, error) {
 
 	return embResp.Embedding, nil
 }
+

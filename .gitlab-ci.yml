@@ -27,6 +27,7 @@ variables:
   BUILDABLE_STACKS: "cubeos-docsindex"
   # HAL image
   HAL_IMAGE: "ghcr.io/cubeos-app/hal"
+  DOCSINDEX_IMAGE: "ghcr.io/cubeos-app/cubeos-docsindex"
   BUILDER_IMAGE: "ghcr.io/cubeos-app/api-builder:latest"
 
 validate-compose:
@@ -189,6 +190,38 @@ package-hal:
       changes:
         - cubeos-hal/**/*
 
+# -----------------------------------------------------------------------------
+# PACKAGE DOCSINDEX - Build multi-arch Docker image and push to ghcr.io
+# -----------------------------------------------------------------------------
+# Simpler than HAL — no OpenAPI generation, Dockerfile has multi-stage build.
+# This makes the image available in GHCR for the releases pipeline (skopeo).
+# -----------------------------------------------------------------------------
+package-docsindex:
+  stage: package
+  tags: [multiarch]
+  image: docker:24
+  before_script:
+    - echo "$GHCR_TOKEN" | docker login ghcr.io -u "$GHCR_USER" --password-stdin
+    - docker buildx create --name docsindexbuilder --driver docker-container --use
+    - docker buildx inspect --bootstrap
+  script:
+    - |
+      cd cubeos-docsindex/src
+      echo "🔨 Building multi-arch docsindex image..."
+      docker buildx build --no-cache \
+        --platform linux/amd64,linux/arm64 \
+        --push \
+        -t ${DOCSINDEX_IMAGE}:${CI_COMMIT_SHORT_SHA} \
+        -t ${DOCSINDEX_IMAGE}:latest \
+        .
+      echo "✅ Pushed multi-arch ${DOCSINDEX_IMAGE}:${CI_COMMIT_SHORT_SHA}"
+  after_script:
+    - docker buildx rm docsindexbuilder || true
+  rules:
+    - if: $CI_COMMIT_BRANCH == "main"
+      changes:
+        - cubeos-docsindex/**/*
+
 deploy:
   stage: deploy
   tags:
@@ -337,6 +370,8 @@ restart-changed:
   needs:
     - deploy
     - job: package-hal
+      optional: true
+    - job: package-docsindex
       optional: true
   before_script:
     - echo "$GHCR_TOKEN" | docker login ghcr.io -u "$GHCR_USER" --password-stdin
