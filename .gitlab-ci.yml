@@ -223,6 +223,9 @@ package-docsindex:
         - cubeos-docsindex/**/*
 
 deploy:
+  tags:
+    - deploy
+    - arm64
   stage: deploy
   script:
     - |
@@ -360,6 +363,9 @@ deploy:
     name: production
 
 restart-changed:
+  tags:
+    - deploy
+    - arm64
   stage: restart
   needs:
     - deploy
