@@ -316,8 +316,14 @@ func (h *HALHandler) GetRTCStatus(w http.ResponseWriter, r *http.Request) {
 // @Produce json
 // @Success 200 {object} SuccessResponse
 // @Failure 500 {object} ErrorResponse
+// @Failure 501 {object} ErrorResponse "RTC not available"
 // @Router /rtc/sync-to-rtc [post]
 func (h *HALHandler) SetRTCTime(w http.ResponseWriter, r *http.Request) {
+	if !h.isRTCAvailable() {
+		errorResponse(w, http.StatusNotImplemented, "RTC not available on this device")
+		return
+	}
+
 	if _, err := execWithTimeout(r.Context(), "hwclock", "-w"); err != nil {
 		errorResponse(w, http.StatusInternalServerError, sanitizeExecError("set RTC time", err))
 		return
@@ -334,8 +340,14 @@ func (h *HALHandler) SetRTCTime(w http.ResponseWriter, r *http.Request) {
 // @Produce json
 // @Success 200 {object} SuccessResponse
 // @Failure 500 {object} ErrorResponse
+// @Failure 501 {object} ErrorResponse "RTC not available"
 // @Router /rtc/sync-from-rtc [post]
 func (h *HALHandler) SyncTimeFromRTC(w http.ResponseWriter, r *http.Request) {
+	if !h.isRTCAvailable() {
+		errorResponse(w, http.StatusNotImplemented, "RTC not available on this device")
+		return
+	}
+
 	if _, err := execWithTimeout(r.Context(), "hwclock", "-s"); err != nil {
 		errorResponse(w, http.StatusInternalServerError, sanitizeExecError("sync time from RTC", err))
 		return
@@ -354,8 +366,14 @@ func (h *HALHandler) SyncTimeFromRTC(w http.ResponseWriter, r *http.Request) {
 // @Success 200 {object} SuccessResponse
 // @Failure 400 {object} ErrorResponse
 // @Failure 500 {object} ErrorResponse
+// @Failure 501 {object} ErrorResponse "RTC wake alarm not supported"
 // @Router /rtc/wakealarm [post]
 func (h *HALHandler) SetWakeAlarm(w http.ResponseWriter, r *http.Request) {
+	if !h.isRTCAvailable() {
+		errorResponse(w, http.StatusNotImplemented, "RTC wake alarm not supported on this device")
+		return
+	}
+
 	r = limitBody(r, 1<<20) // 1MB
 	var req WakeAlarmRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -370,6 +388,12 @@ func (h *HALHandler) SetWakeAlarm(w http.ResponseWriter, r *http.Request) {
 	}
 
 	alarmPath := "/sys/class/rtc/rtc0/wakealarm"
+
+	// Check if wakealarm sysfs exists
+	if _, err := os.Stat(alarmPath); err != nil {
+		errorResponse(w, http.StatusNotImplemented, "RTC wake alarm not supported on this device")
+		return
+	}
 
 	// Clear existing alarm first
 	os.WriteFile(alarmPath, []byte("0"), 0644)
@@ -391,9 +415,16 @@ func (h *HALHandler) SetWakeAlarm(w http.ResponseWriter, r *http.Request) {
 // @Produce json
 // @Success 200 {object} SuccessResponse
 // @Failure 500 {object} ErrorResponse
+// @Failure 501 {object} ErrorResponse "RTC wake alarm not supported"
 // @Router /rtc/wakealarm [delete]
 func (h *HALHandler) ClearWakeAlarm(w http.ResponseWriter, r *http.Request) {
 	alarmPath := "/sys/class/rtc/rtc0/wakealarm"
+
+	if _, err := os.Stat(alarmPath); err != nil {
+		errorResponse(w, http.StatusNotImplemented, "RTC wake alarm not supported on this device")
+		return
+	}
+
 	if err := os.WriteFile(alarmPath, []byte("0"), 0644); err != nil {
 		errorResponse(w, http.StatusInternalServerError, "failed to clear wake alarm: "+err.Error())
 		return
@@ -428,10 +459,15 @@ func (h *HALHandler) GetWatchdogStatus(w http.ResponseWriter, r *http.Request) {
 // @Produce json
 // @Success 200 {object} SuccessResponse
 // @Failure 500 {object} ErrorResponse
+// @Failure 501 {object} ErrorResponse "Watchdog device not available"
 // @Router /watchdog/pet [post]
 func (h *HALHandler) PetWatchdog(w http.ResponseWriter, r *http.Request) {
 	f, err := os.OpenFile("/dev/watchdog", os.O_WRONLY, 0)
 	if err != nil {
+		if os.IsNotExist(err) || os.IsPermission(err) {
+			errorResponse(w, http.StatusNotImplemented, "watchdog device not available on this system")
+			return
+		}
 		errorResponse(w, http.StatusInternalServerError, "failed to open watchdog: "+err.Error())
 		return
 	}
@@ -578,17 +614,23 @@ func (h *HALHandler) getRTCStatus() RTCStatus {
 	}
 
 	if _, err := os.Stat("/dev/rtc0"); err == nil {
-		status.Available = true
-
+		// /dev/rtc0 may exist from the watchdog timer on Pi4 (no real RTC).
+		// Verify by actually reading the clock — hwclock -r fails if no real RTC.
 		if output, err := execWithTimeout(context.Background(), "hwclock", "-r"); err == nil {
+			status.Available = true
 			status.Time = strings.TrimSpace(output)
+			status.Synchronized = true
+			status.BatteryOK = true
 		}
-
-		status.Synchronized = true
-		status.BatteryOK = true
 	}
 
 	return status
+}
+
+// isRTCAvailable checks whether a functional RTC is present (not just /dev/rtc0 from watchdog).
+func (h *HALHandler) isRTCAvailable() bool {
+	_, err := execWithTimeout(context.Background(), "hwclock", "-r")
+	return err == nil
 }
 
 func (h *HALHandler) getWatchdogInfo() WatchdogInfo {
