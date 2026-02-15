@@ -4,6 +4,7 @@
 # REASON: Host network mode required for DHCP broadcast
 # Port: 6001 (Admin UI), 53 (DNS), 67 (DHCP)
 # ═══════════════════════════════════════════════════════════════════════════════
+name: cubeos-pihole
 services:
   pihole:
     image: pihole/pihole:latest

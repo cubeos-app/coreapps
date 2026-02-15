@@ -5,7 +5,7 @@
 # Port: 81 (Admin UI), 80 (HTTP), 443 (HTTPS)
 # NOTE: Admin UI is on port 81, NOT 6000!
 # ═══════════════════════════════════════════════════════════════════════════════
-
+name: cubeos-npm
 services:
   npm:
     image: jc21/nginx-proxy-manager:latest

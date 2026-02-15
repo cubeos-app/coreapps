@@ -16,5 +16,8 @@ http:
   addr: :5000
   headers:
     X-Content-Type-Options: [nosniff]
-proxy:
-  remoteurl: https://registry-1.docker.io
+# NOTE: proxy block REMOVED — it turned this into a pull-through cache
+# (read-only mirror of Docker Hub) which breaks:
+#   1. Local image push (offline app installation)
+#   2. Offline operation (requires internet to proxy)
+# The registry is now a standalone local registry for CubeOS images.

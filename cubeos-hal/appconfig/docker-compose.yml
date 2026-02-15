@@ -5,7 +5,7 @@
 # - network_mode: host (direct access to host network interfaces)
 # - pid: host (for nsenter access if needed)
 # - Full privileged access for iptables, iw, wpa_supplicant, etc.
-
+name: cubeos-hal
 services:
   cubeos-hal:
     image: ghcr.io/cubeos-app/hal:latest
@@ -37,15 +37,13 @@ services:
       - HAL_HOST=0.0.0.0
       - TZ=${TZ:-UTC}
       - DBUS_SYSTEM_BUS_ADDRESS=unix:path=/run/dbus/system_bus_socket
-      # UPS/Power management
+      # UPS/Power management (model autodetected from I2C — do NOT hardcode)
       - HAL_UPS_ENABLED=true
-      - HAL_UPS_MODEL=X1202
       - HAL_UPS_LOW_BATTERY_THRESHOLD=15
       - HAL_UPS_CRITICAL_BATTERY_THRESHOLD=5
       - HAL_UPS_SHUTDOWN_DELAY=30
-      # Hardware features
+      # Hardware features (GPIO chip autodetected — Pi 4: gpiochip0, Pi 5: gpiochip4)
       - HAL_I2C_BUS=1
-      - HAL_GPIO_CHIP=gpiochip4
       # Network service ports
       - TOR_CONTROL_PORT=9051
       # Camera/media streaming
@@ -108,11 +106,13 @@ services:
       # HAL now uses sysfs for temperature/throttle which works everywhere
     
     devices:
+      # NOTE: With privileged:true + /dev:/dev:rw, all devices are accessible.
+      # These entries document what HAL uses, not restrict access.
       # I2C bus (UPS HAT, sensors)
       - /dev/i2c-1:/dev/i2c-1
-      # GPIO (Pi 5 uses gpiochip4)
+      # GPIO (Pi 4: gpiochip0, Pi 5: gpiochip4 — HAL autodetects)
       - /dev/gpiochip0:/dev/gpiochip0
-      - /dev/gpiochip4:/dev/gpiochip4
+      # - /dev/gpiochip4:/dev/gpiochip4  # Pi 5 only — fails on Pi 4
       - /dev/gpiomem:/dev/gpiomem
       # Hardware watchdog
       - /dev/watchdog:/dev/watchdog
