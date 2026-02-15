@@ -736,3 +736,298 @@ func (h *HALHandler) StopService(w http.ResponseWriter, r *http.Request) {
 
 	successResponse(w, fmt.Sprintf("service %s stopped", name))
 }
+
+// ============================================================================
+// Extended System Information Handlers (Fix #13)
+// ============================================================================
+
+// SystemInfoResponse represents combined system information.
+// @Description Combined system hardware and software information
+type SystemInfoResponse struct {
+	Model        string `json:"model" example:"Raspberry Pi 5 Model B Rev 1.0"`
+	Serial       string `json:"serial,omitempty" example:"10000000abcd1234"`
+	Revision     string `json:"revision,omitempty" example:"d04170"`
+	Kernel       string `json:"kernel" example:"6.6.31+rpt-rpi-2712"`
+	Architecture string `json:"architecture" example:"aarch64"`
+	MemoryTotal  int64  `json:"memory_total" example:"8589934592"`
+	MemoryHuman  string `json:"memory_human" example:"8.0 GB"`
+	PiVersion    int    `json:"pi_version" example:"5"`
+}
+
+// GetSystemInfo returns combined system information.
+// @Summary Get system info
+// @Description Returns hardware model, serial, kernel, architecture, and memory total
+// @Tags System
+// @Produce json
+// @Success 200 {object} SystemInfoResponse
+// @Failure 500 {object} ErrorResponse
+// @Router /system/info [get]
+func (h *HALHandler) GetSystemInfo(w http.ResponseWriter, r *http.Request) {
+	info := SystemInfoResponse{
+		PiVersion: detectPiVersion(),
+	}
+
+	// Model from device tree
+	if data, err := os.ReadFile("/sys/firmware/devicetree/base/model"); err == nil {
+		info.Model = strings.TrimRight(string(data), "\x00\n")
+	}
+
+	// Serial from device tree
+	if data, err := os.ReadFile("/sys/firmware/devicetree/base/serial-number"); err == nil {
+		info.Serial = strings.TrimRight(string(data), "\x00\n")
+	}
+
+	// Revision from /proc/cpuinfo
+	if data, err := os.ReadFile("/proc/cpuinfo"); err == nil {
+		for _, line := range strings.Split(string(data), "\n") {
+			if strings.HasPrefix(line, "Revision") {
+				parts := strings.SplitN(line, ":", 2)
+				if len(parts) == 2 {
+					info.Revision = strings.TrimSpace(parts[1])
+				}
+			}
+		}
+	}
+
+	// Kernel version
+	if data, err := os.ReadFile("/proc/version"); err == nil {
+		parts := strings.Fields(string(data))
+		if len(parts) >= 3 {
+			info.Kernel = parts[2]
+		}
+	}
+
+	// Architecture
+	if output, err := execWithTimeout(r.Context(), "uname", "-m"); err == nil {
+		info.Architecture = strings.TrimSpace(output)
+	}
+
+	// Total memory from /proc/meminfo
+	if data, err := os.ReadFile("/proc/meminfo"); err == nil {
+		for _, line := range strings.Split(string(data), "\n") {
+			if strings.HasPrefix(line, "MemTotal:") {
+				fields := strings.Fields(line)
+				if len(fields) >= 2 {
+					if kb, err := strconv.ParseInt(fields[1], 10, 64); err == nil {
+						info.MemoryTotal = kb * 1024
+						info.MemoryHuman = formatBytes(info.MemoryTotal)
+					}
+				}
+				break
+			}
+		}
+	}
+
+	jsonResponse(w, http.StatusOK, info)
+}
+
+// CPUInfoResponse represents CPU information.
+// @Description CPU information including cores, frequency, and usage
+type CPUInfoResponse struct {
+	Model      string  `json:"model" example:"Cortex-A76"`
+	Cores      int     `json:"cores" example:"4"`
+	CurFreqMHz float64 `json:"cur_freq_mhz" example:"2400.0"`
+	MaxFreqMHz float64 `json:"max_freq_mhz" example:"2400.0"`
+	MinFreqMHz float64 `json:"min_freq_mhz" example:"1500.0"`
+	Governor   string  `json:"governor,omitempty" example:"ondemand"`
+}
+
+// GetCPUInfo returns CPU information.
+// @Summary Get CPU info
+// @Description Returns CPU model, core count, and frequency information
+// @Tags System
+// @Produce json
+// @Success 200 {object} CPUInfoResponse
+// @Failure 500 {object} ErrorResponse
+// @Router /system/cpu [get]
+func (h *HALHandler) GetCPUInfo(w http.ResponseWriter, r *http.Request) {
+	info := CPUInfoResponse{}
+
+	// Count online CPUs
+	if data, err := os.ReadFile("/sys/devices/system/cpu/online"); err == nil {
+		rangeStr := strings.TrimSpace(string(data))
+		// Parse "0-3" format
+		if parts := strings.SplitN(rangeStr, "-", 2); len(parts) == 2 {
+			if end, err := strconv.Atoi(parts[1]); err == nil {
+				info.Cores = end + 1
+			}
+		} else {
+			// Single CPU or comma-separated
+			info.Cores = len(strings.Split(rangeStr, ","))
+		}
+	}
+
+	// CPU model from /proc/cpuinfo (ARM uses "model name" or "CPU part")
+	if data, err := os.ReadFile("/proc/cpuinfo"); err == nil {
+		for _, line := range strings.Split(string(data), "\n") {
+			if strings.HasPrefix(line, "model name") || strings.HasPrefix(line, "Model") {
+				parts := strings.SplitN(line, ":", 2)
+				if len(parts) == 2 {
+					info.Model = strings.TrimSpace(parts[1])
+					break
+				}
+			}
+		}
+	}
+
+	// Current frequency (kHz -> MHz)
+	if data, err := os.ReadFile("/sys/devices/system/cpu/cpu0/cpufreq/scaling_cur_freq"); err == nil {
+		if khz, err := strconv.ParseFloat(strings.TrimSpace(string(data)), 64); err == nil {
+			info.CurFreqMHz = khz / 1000.0
+		}
+	}
+
+	// Max frequency
+	if data, err := os.ReadFile("/sys/devices/system/cpu/cpu0/cpufreq/scaling_max_freq"); err == nil {
+		if khz, err := strconv.ParseFloat(strings.TrimSpace(string(data)), 64); err == nil {
+			info.MaxFreqMHz = khz / 1000.0
+		}
+	}
+
+	// Min frequency
+	if data, err := os.ReadFile("/sys/devices/system/cpu/cpu0/cpufreq/scaling_min_freq"); err == nil {
+		if khz, err := strconv.ParseFloat(strings.TrimSpace(string(data)), 64); err == nil {
+			info.MinFreqMHz = khz / 1000.0
+		}
+	}
+
+	// Governor
+	if data, err := os.ReadFile("/sys/devices/system/cpu/cpu0/cpufreq/scaling_governor"); err == nil {
+		info.Governor = strings.TrimSpace(string(data))
+	}
+
+	jsonResponse(w, http.StatusOK, info)
+}
+
+// MemoryInfoResponse represents memory information.
+// @Description System memory information
+type MemoryInfoResponse struct {
+	Total      int64  `json:"total" example:"8589934592"`
+	Free       int64  `json:"free" example:"4294967296"`
+	Available  int64  `json:"available" example:"6442450944"`
+	Used       int64  `json:"used" example:"2147483648"`
+	SwapTotal  int64  `json:"swap_total" example:"2147483648"`
+	SwapFree   int64  `json:"swap_free" example:"2147483648"`
+	TotalHuman string `json:"total_human" example:"8.0 GB"`
+	UsedHuman  string `json:"used_human" example:"2.0 GB"`
+	AvailHuman string `json:"avail_human" example:"6.0 GB"`
+	UsePercent int    `json:"use_percent" example:"25"`
+}
+
+// GetMemoryInfo returns memory information.
+// @Summary Get memory info
+// @Description Returns RAM and swap usage from /proc/meminfo
+// @Tags System
+// @Produce json
+// @Success 200 {object} MemoryInfoResponse
+// @Failure 500 {object} ErrorResponse
+// @Router /system/memory [get]
+func (h *HALHandler) GetMemoryInfo(w http.ResponseWriter, r *http.Request) {
+	data, err := os.ReadFile("/proc/meminfo")
+	if err != nil {
+		errorResponse(w, http.StatusInternalServerError, "failed to read /proc/meminfo: "+err.Error())
+		return
+	}
+
+	info := MemoryInfoResponse{}
+	values := make(map[string]int64)
+
+	for _, line := range strings.Split(string(data), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 2 {
+			continue
+		}
+		key := strings.TrimSuffix(fields[0], ":")
+		if kb, err := strconv.ParseInt(fields[1], 10, 64); err == nil {
+			values[key] = kb * 1024 // Convert kB to bytes
+		}
+	}
+
+	info.Total = values["MemTotal"]
+	info.Free = values["MemFree"]
+	info.Available = values["MemAvailable"]
+	info.Used = info.Total - info.Available
+	info.SwapTotal = values["SwapTotal"]
+	info.SwapFree = values["SwapFree"]
+	info.TotalHuman = formatBytes(info.Total)
+	info.UsedHuman = formatBytes(info.Used)
+	info.AvailHuman = formatBytes(info.Available)
+	if info.Total > 0 {
+		info.UsePercent = int(float64(info.Used) / float64(info.Total) * 100)
+	}
+
+	jsonResponse(w, http.StatusOK, info)
+}
+
+// DiskInfoResponse represents disk usage (delegates to storage/usage).
+// @Description Root filesystem and storage usage
+type DiskInfoResponse struct {
+	Filesystems []FilesystemUsage `json:"filesystems"`
+	RootUsed    int64             `json:"root_used,omitempty"`
+	RootTotal   int64             `json:"root_total,omitempty"`
+	RootPercent int               `json:"root_percent,omitempty"`
+}
+
+// GetDiskInfo returns disk usage information.
+// @Summary Get disk info
+// @Description Returns filesystem usage with root partition highlighted
+// @Tags System
+// @Produce json
+// @Success 200 {object} DiskInfoResponse
+// @Failure 500 {object} ErrorResponse
+// @Router /system/disk [get]
+func (h *HALHandler) GetDiskInfo(w http.ResponseWriter, r *http.Request) {
+	output, err := execWithTimeout(r.Context(), "df", "-B1", "--output=target,source,size,used,avail,pcent")
+	if err != nil {
+		errorResponse(w, http.StatusInternalServerError, sanitizeExecError("disk usage", err))
+		return
+	}
+
+	resp := DiskInfoResponse{}
+
+	for i, line := range strings.Split(output, "\n") {
+		if i == 0 { // Skip header
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) < 6 {
+			continue
+		}
+
+		mountpoint := fields[0]
+		// Skip pseudo filesystems
+		if strings.HasPrefix(mountpoint, "/sys") || strings.HasPrefix(mountpoint, "/proc") ||
+			strings.HasPrefix(mountpoint, "/dev") || strings.HasPrefix(mountpoint, "/run") ||
+			mountpoint == "/etc/resolv.conf" || mountpoint == "/etc/hostname" || mountpoint == "/etc/hosts" {
+			continue
+		}
+
+		size, _ := strconv.ParseInt(fields[2], 10, 64)
+		used, _ := strconv.ParseInt(fields[3], 10, 64)
+		avail, _ := strconv.ParseInt(fields[4], 10, 64)
+		pctStr := strings.TrimSuffix(fields[5], "%")
+		pct, _ := strconv.Atoi(pctStr)
+
+		fs := FilesystemUsage{
+			Mountpoint: mountpoint,
+			Filesystem: fields[1],
+			Size:       size,
+			Used:       used,
+			Available:  avail,
+			UsePercent: pct,
+			SizeHuman:  formatBytes(size),
+			UsedHuman:  formatBytes(used),
+			AvailHuman: formatBytes(avail),
+		}
+		resp.Filesystems = append(resp.Filesystems, fs)
+
+		// Highlight root
+		if mountpoint == "/" {
+			resp.RootUsed = used
+			resp.RootTotal = size
+			resp.RootPercent = pct
+		}
+	}
+
+	jsonResponse(w, http.StatusOK, resp)
+}

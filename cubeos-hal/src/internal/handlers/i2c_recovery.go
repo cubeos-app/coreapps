@@ -12,20 +12,31 @@ import (
 // I2C Bus Recovery
 // ============================================================================
 //
-// The DesignWare I2C controller on the RP1 (Raspberry Pi 5) can enter a stuck
-// state where all transactions time out, even though SDA/SCL lines are idle.
-// Recovery is achieved by unbinding and rebinding the platform driver via sysfs:
+// I2C controllers can enter a stuck state where all transactions time out.
+// Recovery is achieved by unbinding and rebinding the platform driver via sysfs.
 //
-//   echo "<device>" > /sys/bus/platform/drivers/i2c_designware/unbind
-//   echo "<device>" > /sys/bus/platform/drivers/i2c_designware/bind
+// Pi 5 (RP1 DesignWare controller):
+//   echo "1f00074000.i2c" > /sys/bus/platform/drivers/i2c_designware/unbind
+//   echo "1f00074000.i2c" > /sys/bus/platform/drivers/i2c_designware/bind
 //
+// Pi 4 (BCM2835 controller):
+//   echo "fe804000.i2c" > /sys/bus/platform/drivers/bcm2835-i2c/unbind
+//   echo "fe804000.i2c" > /sys/bus/platform/drivers/bcm2835-i2c/bind
+//
+// Pi model is auto-detected via /sys/firmware/devicetree/base/model.
 // This module tracks consecutive I2C read errors and triggers the recovery
 // automatically when the threshold is reached, with rate limiting to prevent
 // reset storms.
 
 const (
-	defaultI2CDevicePath       = "1f00074000.i2c" // RP1 I2C1 on Pi 5
-	defaultI2CDriverPath       = "/sys/bus/platform/drivers/i2c_designware"
+	// Pi 5 (RP1 DesignWare I2C controller)
+	pi5I2CDevicePath = "1f00074000.i2c"
+	pi5I2CDriverPath = "/sys/bus/platform/drivers/i2c_designware"
+
+	// Pi 4 and earlier (Broadcom BCM2835 I2C controller)
+	pi4I2CDevicePath = "fe804000.i2c"
+	pi4I2CDriverPath = "/sys/bus/platform/drivers/bcm2835-i2c"
+
 	defaultRecoveryThreshold   = 3               // consecutive errors before recovery
 	defaultRecoveryMinInterval = 5 * time.Minute // minimum time between recovery attempts
 	defaultRecoverySettleTime  = 2 * time.Second // wait after rebind before retrying
@@ -47,13 +58,27 @@ type I2CRecovery struct {
 
 // NewI2CRecovery creates an I2CRecovery with configuration from environment variables.
 //
-// Environment variables:
-//   - HAL_I2C_DEVICE:            RP1 device path (default: "1f00074000.i2c")
-//   - HAL_I2C_DRIVER_PATH:       sysfs driver path (default: "/sys/bus/platform/drivers/i2c_designware")
+// Auto-detects Pi version for correct default paths:
+//   - Pi 5: i2c_designware at 1f00074000.i2c
+//   - Pi 4 and earlier: bcm2835-i2c at fe804000.i2c
+//
+// Environment variables (override autodetection):
+//   - HAL_I2C_DEVICE:             platform device path
+//   - HAL_I2C_DRIVER_PATH:        sysfs driver path
 //   - HAL_I2C_RECOVERY_THRESHOLD: consecutive errors before recovery (default: 3)
 func NewI2CRecovery() *I2CRecovery {
-	devicePath := getEnvOrDefault("HAL_I2C_DEVICE", defaultI2CDevicePath)
-	driverPath := getEnvOrDefault("HAL_I2C_DRIVER_PATH", defaultI2CDriverPath)
+	// Auto-detect defaults based on Pi model
+	defaultDevicePath := pi5I2CDevicePath
+	defaultDriverPath := pi5I2CDriverPath
+	piVer := detectPiVersion()
+	if piVer > 0 && piVer < 5 {
+		defaultDevicePath = pi4I2CDevicePath
+		defaultDriverPath = pi4I2CDriverPath
+	}
+	log.Printf("I2CRecovery: Pi %d detected, device=%s driver=%s", piVer, defaultDevicePath, defaultDriverPath)
+
+	devicePath := getEnvOrDefault("HAL_I2C_DEVICE", defaultDevicePath)
+	driverPath := getEnvOrDefault("HAL_I2C_DRIVER_PATH", defaultDriverPath)
 
 	threshold := defaultRecoveryThreshold
 	if v := os.Getenv("HAL_I2C_RECOVERY_THRESHOLD"); v != "" {

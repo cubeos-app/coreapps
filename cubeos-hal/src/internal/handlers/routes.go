@@ -23,6 +23,10 @@ func SetupRoutes(r chi.Router, h *HALHandler) {
 
 	// System
 	r.Route("/system", func(r chi.Router) {
+		r.Get("/info", h.GetSystemInfo)
+		r.Get("/cpu", h.GetCPUInfo)
+		r.Get("/memory", h.GetMemoryInfo)
+		r.Get("/disk", h.GetDiskInfo)
 		r.Get("/temperature", h.GetCPUTemp)
 		r.Get("/throttle", h.GetThrottleStatus)
 		r.Get("/eeprom", h.GetEEPROMInfo)
@@ -77,6 +81,7 @@ func SetupRoutes(r chi.Router, h *HALHandler) {
 		r.Post("/interface/{name}/up", h.BringInterfaceUp)
 		r.Post("/interface/{name}/down", h.BringInterfaceDown)
 		r.Get("/status", h.GetNetworkStatus)
+		r.Get("/mode", h.GetNetworkMode)
 		r.Get("/traffic", h.GetTrafficStats)
 
 		// WiFi

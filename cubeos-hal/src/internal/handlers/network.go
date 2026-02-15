@@ -402,6 +402,72 @@ func (h *HALHandler) GetNetworkStatus(w http.ResponseWriter, r *http.Request) {
 	jsonResponse(w, http.StatusOK, status)
 }
 
+// NetworkModeResponse represents the current CubeOS network mode.
+// @Description Current network operating mode
+type NetworkModeResponse struct {
+	Mode        string `json:"mode" example:"ONLINE_ETH"`
+	Description string `json:"description" example:"Access point with internet via Ethernet"`
+	APActive    bool   `json:"ap_active" example:"true"`
+	EthUp       bool   `json:"eth_up" example:"true"`
+	WifiClient  bool   `json:"wifi_client" example:"false"`
+	Internet    bool   `json:"internet" example:"true"`
+}
+
+// GetNetworkMode returns the current CubeOS network operating mode.
+// @Summary Get network mode
+// @Description Returns current mode: OFFLINE (AP only), ONLINE_ETH (AP+NAT via Ethernet), or ONLINE_WIFI (AP+NAT via USB WiFi)
+// @Tags Network
+// @Produce json
+// @Success 200 {object} NetworkModeResponse
+// @Router /network/mode [get]
+func (h *HALHandler) GetNetworkMode(w http.ResponseWriter, r *http.Request) {
+	resp := NetworkModeResponse{
+		Mode:        "OFFLINE",
+		Description: "Access point only, air-gapped",
+	}
+
+	// Check if AP is active (hostapd running)
+	if svcOutput, err := execWithTimeout(r.Context(), "nsenter", "-t", "1", "-m", "--", "systemctl", "is-active", "hostapd"); err == nil {
+		resp.APActive = strings.TrimSpace(svcOutput) == "active"
+	}
+
+	// Check Ethernet link
+	if _, err := os.Stat("/sys/class/net/eth0"); err == nil {
+		carrier, _ := os.ReadFile("/sys/class/net/eth0/carrier")
+		resp.EthUp = strings.TrimSpace(string(carrier)) == "1"
+	}
+
+	// Check WiFi client connection (wlan1 or usb0 used as uplink)
+	for _, iface := range []string{"wlan1", "usb0"} {
+		if _, err := os.Stat("/sys/class/net/" + iface); err == nil {
+			operstate, _ := os.ReadFile("/sys/class/net/" + iface + "/operstate")
+			if strings.TrimSpace(string(operstate)) == "up" {
+				resp.WifiClient = true
+				break
+			}
+		}
+	}
+
+	// Check internet connectivity
+	checkIP := getDefaultInternetCheckIP()
+	_, err := execWithTimeout(r.Context(), "ping", "-c", "1", "-W", "2", checkIP)
+	resp.Internet = err == nil
+
+	// Determine mode
+	if resp.EthUp && resp.Internet {
+		resp.Mode = "ONLINE_ETH"
+		resp.Description = "Access point with internet via Ethernet"
+	} else if resp.WifiClient && resp.Internet {
+		resp.Mode = "ONLINE_WIFI"
+		resp.Description = "Access point with internet via USB WiFi dongle"
+	} else {
+		resp.Mode = "OFFLINE"
+		resp.Description = "Access point only, air-gapped"
+	}
+
+	jsonResponse(w, http.StatusOK, resp)
+}
+
 // ScanWiFi scans for WiFi networks
 // @Summary Scan WiFi networks
 // @Description Scans for available WiFi networks on specified interface using iw
@@ -821,8 +887,10 @@ func parseHostapdConf() (ssid string, channel int, iface string) {
 // hostapdCLI runs hostapd_cli via nsenter to use the host's binary.
 // Alpine's hostapd_cli times out on the control socket (version mismatch with host hostapd),
 // so we skip it entirely and go straight to nsenter which is instant.
+// -i wlan0 ensures hostapd_cli finds the correct control socket.
 func hostapdCLI(ctx context.Context, args ...string) (string, error) {
-	nsArgs := append([]string{"-t", "1", "-m", "--", "hostapd_cli"}, args...)
+	cliArgs := append([]string{"-i", "wlan0"}, args...)
+	nsArgs := append([]string{"-t", "1", "-m", "--", "hostapd_cli"}, cliArgs...)
 	return execWithTimeout(ctx, "nsenter", nsArgs...)
 }
 
