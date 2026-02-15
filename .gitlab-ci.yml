@@ -33,6 +33,7 @@ variables:
 validate-compose:
   stage: validate
   image: registry-gitlab.nuclearlighters.net/products/cubeos/coreapps/ci-utils:latest
+  tags:
     - multiarch
   script:
     - |
@@ -54,6 +55,7 @@ validate-compose:
 shellcheck:
   stage: validate
   image: registry-gitlab.nuclearlighters.net/products/cubeos/coreapps/ci-utils:latest
+  tags:
     - multiarch
   script:
     - find . -name "*.sh" -type f -exec shellcheck -x {} \;
@@ -360,6 +362,7 @@ deploy:
 restart-changed:
   stage: restart
   needs:
+    - deploy
     - job: package-hal
       optional: true
     - job: package-docsindex
