@@ -16,7 +16,7 @@ services:
     environment:
       - TZ=${TZ:-UTC}
       - LISTEN_ADDR=:8080
-      - DOCS_REPO_URL=${DOCS_REPO_URL:-https://github.com/cubeos-app/docs.git}
+      - DOCS_REPO_URL=
       - DOCS_LOCAL_PATH=/cubeos/docs
       # Ollama/ChromaDB disabled — docsindex runs in filesystem mode
       # Set to empty to override any values from defaults.env

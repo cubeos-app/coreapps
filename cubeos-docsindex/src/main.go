@@ -835,18 +835,37 @@ func syncDocs(config *Config) error {
 			exec.Command("git", "-C", config.DocsLocalPath, "reset", "--hard", "origin/main").Run()
 		}
 	} else if config.DocsRepoURL != "" {
-		// Clone fresh
-		log.Printf("  Cloning %s...", config.DocsRepoURL)
+		// Clone to temp dir first — NEVER destroy existing docs (B45)
+		// /cubeos/docs/ may contain packer-seeded content that must survive
+		// a failed clone (e.g. offline mode, repo unreachable).
+		tmpDir := config.DocsLocalPath + ".clone-tmp"
+		os.RemoveAll(tmpDir) // clean stale temp only
+		log.Printf("  Cloning %s to temp dir...", config.DocsRepoURL)
 		if err := os.MkdirAll(filepath.Dir(config.DocsLocalPath), 0755); err != nil {
 			return fmt.Errorf("failed to create parent dir: %w", err)
 		}
-		os.RemoveAll(config.DocsLocalPath)
-		cmd := exec.Command("git", "clone", "--depth=1", config.DocsRepoURL, config.DocsLocalPath)
+		cmd := exec.Command("git", "clone", "--depth=1", config.DocsRepoURL, tmpDir)
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = os.Stderr
 		if err := cmd.Run(); err != nil {
+			os.RemoveAll(tmpDir)
 			return fmt.Errorf("git clone failed: %w", err)
 		}
+		// Clone succeeded — atomically swap directories
+		backupDir := config.DocsLocalPath + ".bak"
+		os.RemoveAll(backupDir)
+		if err := os.Rename(config.DocsLocalPath, backupDir); err != nil {
+			// Target may not exist (first run), that's OK
+			log.Printf("  Note: could not backup existing docs: %v", err)
+		}
+		if err := os.Rename(tmpDir, config.DocsLocalPath); err != nil {
+			// Restore backup if swap fails
+			os.Rename(backupDir, config.DocsLocalPath)
+			os.RemoveAll(tmpDir)
+			return fmt.Errorf("failed to swap docs directory: %w", err)
+		}
+		os.RemoveAll(backupDir)
+		log.Println("  Git clone succeeded, docs swapped in")
 	}
 	return nil
 }
