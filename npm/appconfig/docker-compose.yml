@@ -16,6 +16,8 @@ services:
     volumes:
       - ../appdata/data:/data
       - ../appdata/letsencrypt:/etc/letsencrypt
+      - /var/log:/var/log/host:ro
+      - /cubeos/static:/data/custom-pages:ro
     environment:
       - TZ=${TZ:-UTC}
     env_file:
