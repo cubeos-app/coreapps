@@ -18,12 +18,14 @@ services:
       - LISTEN_ADDR=:8080
       - DOCS_REPO_URL=${DOCS_REPO_URL:-https://github.com/cubeos-app/docs.git}
       - DOCS_LOCAL_PATH=/cubeos/docs
-      - OLLAMA_HOST=${OLLAMA_HOST:-10.42.24.1}
-      - OLLAMA_PORT=${OLLAMA_PORT:-6030}
-      - EMBEDDING_MODEL=${EMBEDDING_MODEL:-nomic-embed-text}
-      - CHROMADB_HOST=${CHROMADB_HOST:-10.42.24.1}
-      - CHROMADB_PORT=${CHROMADB_PORT:-6031}
-      - COLLECTION_NAME=${COLLECTION_NAME:-cubeos_docs}
+      # Ollama/ChromaDB removed in alpha.14 — docsindex runs in filesystem mode
+      # Re-enable these when AI stack is re-added as optional service
+      # - OLLAMA_HOST=${OLLAMA_HOST:-10.42.24.1}
+      # - OLLAMA_PORT=${OLLAMA_PORT:-6030}
+      # - EMBEDDING_MODEL=${EMBEDDING_MODEL:-nomic-embed-text}
+      # - CHROMADB_HOST=${CHROMADB_HOST:-10.42.24.1}
+      # - CHROMADB_PORT=${CHROMADB_PORT:-6031}
+      # - COLLECTION_NAME=${COLLECTION_NAME:-cubeos_docs}
       - SYNC_INTERVAL_HOURS=${SYNC_INTERVAL_HOURS:-6}
       - CHUNK_SIZE=${CHUNK_SIZE:-500}
       - CHUNK_OVERLAP=${CHUNK_OVERLAP:-50}
