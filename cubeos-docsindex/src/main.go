@@ -39,11 +39,11 @@ func loadConfig() *Config {
 		ListenAddr:     getEnv("LISTEN_ADDR", ":8080"),
 		DocsRepoURL:    getEnv("DOCS_REPO_URL", "https://github.com/cubeos-app/docs.git"),
 		DocsLocalPath:  getEnv("DOCS_LOCAL_PATH", "/cubeos/docs"),
-		OllamaHost:     getEnv("OLLAMA_HOST", "10.42.24.1"),
-		OllamaPort:     getEnv("OLLAMA_PORT", "6030"),
+		OllamaHost:     getEnv("OLLAMA_HOST", ""),
+		OllamaPort:     getEnv("OLLAMA_PORT", ""),
 		EmbeddingModel: getEnv("EMBEDDING_MODEL", "nomic-embed-text"),
-		ChromaHost:     getEnv("CHROMADB_HOST", "10.42.24.1"),
-		ChromaPort:     getEnv("CHROMADB_PORT", "6031"),
+		ChromaHost:     getEnv("CHROMADB_HOST", ""),
+		ChromaPort:     getEnv("CHROMADB_PORT", ""),
 		CollectionName: getEnv("COLLECTION_NAME", "cubeos_docs"),
 		SyncInterval:   getEnvInt("SYNC_INTERVAL_HOURS", 6),
 		ChunkSize:      getEnvInt("CHUNK_SIZE", 500),
@@ -211,12 +211,23 @@ type Server struct {
 func main() {
 	config := loadConfig()
 
-	log.Printf("CubeOS Document Indexer v0.1.0-alpha.12 starting...")
+	log.Printf("CubeOS Document Indexer v0.1.0-alpha.15 starting...")
 	log.Printf("  Listen:     %s", config.ListenAddr)
 	log.Printf("  Docs repo:  %s", config.DocsRepoURL)
 	log.Printf("  Local path: %s", config.DocsLocalPath)
-	log.Printf("  Ollama:     %s:%s (model: %s)", config.OllamaHost, config.OllamaPort, config.EmbeddingModel)
-	log.Printf("  ChromaDB:   %s:%s (collection: %s)", config.ChromaHost, config.ChromaPort, config.CollectionName)
+	if config.OllamaHost != "" && config.OllamaPort != "" {
+		log.Printf("  Ollama:     %s:%s (model: %s)", config.OllamaHost, config.OllamaPort, config.EmbeddingModel)
+	} else {
+		log.Printf("  Ollama:     not configured")
+	}
+	if config.ChromaHost != "" && config.ChromaPort != "" {
+		log.Printf("  ChromaDB:   %s:%s (collection: %s)", config.ChromaHost, config.ChromaPort, config.CollectionName)
+	} else {
+		log.Printf("  ChromaDB:   not configured")
+	}
+	if config.OllamaHost == "" || config.ChromaHost == "" {
+		log.Printf("  AI search disabled (Ollama/ChromaDB not configured). Running in filesystem mode.")
+	}
 	log.Printf("  Sync every: %d hours", config.SyncInterval)
 
 	srv := &Server{config: config}
@@ -263,21 +274,26 @@ func (s *Server) handleDocsServiceStatus(w http.ResponseWriter, r *http.Request)
 		docsAvailable = true
 	}
 
-	// Check Ollama reachability
+	// Check Ollama reachability (only if configured)
 	ollamaOK := false
-	ollamaURL := fmt.Sprintf("http://%s:%s", s.config.OllamaHost, s.config.OllamaPort)
-	client := &http.Client{Timeout: 3 * time.Second}
-	if resp, err := client.Get(ollamaURL); err == nil {
-		resp.Body.Close()
-		ollamaOK = true
+	if s.config.OllamaHost != "" && s.config.OllamaPort != "" {
+		ollamaURL := fmt.Sprintf("http://%s:%s", s.config.OllamaHost, s.config.OllamaPort)
+		client := &http.Client{Timeout: 3 * time.Second}
+		if resp, err := client.Get(ollamaURL); err == nil {
+			resp.Body.Close()
+			ollamaOK = true
+		}
 	}
 
-	// Check ChromaDB reachability
+	// Check ChromaDB reachability (only if configured)
 	chromaOK := false
-	chromaURL := fmt.Sprintf("http://%s:%s/api/v2", s.config.ChromaHost, s.config.ChromaPort)
-	if resp, err := client.Get(chromaURL); err == nil {
-		resp.Body.Close()
-		chromaOK = true
+	if s.config.ChromaHost != "" && s.config.ChromaPort != "" {
+		chromaURL := fmt.Sprintf("http://%s:%s/api/v2", s.config.ChromaHost, s.config.ChromaPort)
+		client := &http.Client{Timeout: 3 * time.Second}
+		if resp, err := client.Get(chromaURL); err == nil {
+			resp.Body.Close()
+			chromaOK = true
+		}
 	}
 
 	s.mu.RLock()
