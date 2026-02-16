@@ -172,9 +172,9 @@ func (h *HALHandler) ServeSwaggerAsset(w http.ResponseWriter, r *http.Request) {
 // @Success 200 {object} map[string]interface{}
 // @Router /health [get]
 func (h *HALHandler) HealthCheck(w http.ResponseWriter, r *http.Request) {
-	version := os.Getenv("HAL_VERSION")
+	version := os.Getenv("CUBEOS_VERSION")
 	if version == "" {
-		version = "1.1.0"
+		version = "dev"
 	}
 	jsonResponse(w, http.StatusOK, map[string]interface{}{
 		"status":  "healthy",
