@@ -1,10 +1,16 @@
-# Terminal Service
-# Port: 6042
-# Web-based terminal access
+# Terminal Service (ttyd)
+# ═══════════════════════════════════════════════════════════════════════════════
+# DEPLOYMENT: Docker Compose (NOT Swarm — requires privileged + host PID + host network)
+# PURPOSE: Web-based terminal for host shell access
+# Port: 6042 (ttyd web UI)
+# Image: Pre-loaded in local registry at build time
+#
+# Deploy: DOCKER_DEFAULT_PLATFORM=linux/arm64 docker compose -f docker-compose.yml up -d --pull never
+# ═══════════════════════════════════════════════════════════════════════════════
 
 services:
   terminal:
-    image: tsl0922/ttyd:latest
+    image: localhost:5000/tsl0922/ttyd:latest
     container_name: cubeos-terminal
     restart: unless-stopped
     volumes:
@@ -23,4 +29,5 @@ services:
       - "cubeos.type=platform"
       - "cubeos.category=system"
       - "cubeos.port=6042"
+      - "cubeos.fqdn=terminal.cubeos.cube"
       - "cubeos.description=Web Terminal"
