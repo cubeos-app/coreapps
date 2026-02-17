@@ -2,8 +2,10 @@ package handlers
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
+	"net/http"
 	"os"
 	"strconv"
 	"sync"
@@ -168,6 +170,8 @@ func (pm *PowerMonitor) Stop() (string, error) {
 	}
 
 	pm.running = false
+	pm.driver = nil
+	pm.lastReading = nil
 	pm.addEventLocked("stopped", "power monitoring stopped")
 	log.Printf("PowerMonitor: stopped")
 
@@ -217,6 +221,14 @@ func (pm *PowerMonitor) Driver() UPSDriver {
 	return pm.driver
 }
 
+// LastReading returns the most recent cached battery reading, or nil.
+// Thread-safe.
+func (pm *PowerMonitor) LastReading() *BatteryReading {
+	pm.mu.Lock()
+	defer pm.mu.Unlock()
+	return pm.lastReading
+}
+
 // Shutdown gracefully stops the monitor. Called during HAL shutdown.
 func (pm *PowerMonitor) Shutdown() {
 	pm.mu.Lock()
@@ -227,6 +239,111 @@ func (pm *PowerMonitor) Shutdown() {
 	pm.mu.Unlock()
 
 	pm.Stop()
+}
+
+// ============================================================================
+// UPS Configuration Handler
+// ============================================================================
+
+// ConfigureUPSRequest is the request body for POST /power/ups/configure.
+// @Description UPS model configuration request
+type ConfigureUPSRequest struct {
+	Model string `json:"model" example:"x1202"` // "x1202", "x728", "pisugar3", "none"
+}
+
+// ConfigureUPSResponse is the response for POST /power/ups/configure.
+// @Description UPS configuration result
+type ConfigureUPSResponse struct {
+	Status string `json:"status" example:"ok"`
+	Model  string `json:"model" example:"x1202"`
+	Driver string `json:"driver" example:"Geekworm X1202"`
+}
+
+// validUPSModels is the set of accepted UPS model identifiers.
+var validUPSModels = map[string]bool{
+	"none":     true,
+	"x1202":    true,
+	"x728":     true,
+	"pisugar3": true,
+}
+
+// ConfigureUPS applies the user's confirmed UPS model selection.
+// It stops any running power monitor, sets the HAL_UPS_MODEL env var,
+// and (re)starts the power monitor with the correct driver.
+// This endpoint is called by the API after the user confirms their selection.
+//
+// @Summary Configure UPS model
+// @Description Apply user-confirmed UPS model selection. Stops existing monitor, loads correct driver, restarts monitoring.
+// @Tags Power
+// @Accept json
+// @Produce json
+// @Param request body ConfigureUPSRequest true "UPS model selection"
+// @Success 200 {object} ConfigureUPSResponse
+// @Failure 400 {object} ErrorResponse
+// @Failure 500 {object} ErrorResponse
+// @Router /power/ups/configure [post]
+func (h *HALHandler) ConfigureUPS(w http.ResponseWriter, r *http.Request) {
+	r = limitBody(r, 1<<20) // 1MB
+	var req ConfigureUPSRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		errorResponse(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+
+	model := req.Model
+	if !validUPSModels[model] {
+		errorResponse(w, http.StatusBadRequest, fmt.Sprintf("invalid UPS model %q, must be one of: none, x1202, x728, pisugar3", model))
+		return
+	}
+
+	log.Printf("ConfigureUPS: received configuration request for model=%q", model)
+
+	// Step 1: Stop power monitor if running
+	if msg, err := h.powerMonitor.Stop(); err != nil {
+		log.Printf("ConfigureUPS: error stopping monitor: %v", err)
+		errorResponse(w, http.StatusInternalServerError, "failed to stop power monitor: "+err.Error())
+		return
+	} else {
+		log.Printf("ConfigureUPS: stop result: %s", msg)
+	}
+
+	// Step 2: If model is "none", we're done — monitor stays stopped
+	if model == "none" {
+		// Clear the env var so DetectUPS won't pick up a stale value
+		os.Setenv("HAL_UPS_MODEL", "")
+		log.Printf("ConfigureUPS: UPS set to none, power monitor disabled")
+		jsonResponse(w, http.StatusOK, ConfigureUPSResponse{
+			Status: "ok",
+			Model:  "none",
+			Driver: "none",
+		})
+		return
+	}
+
+	// Step 3: Set HAL_UPS_MODEL env var so DetectUPS() picks it up
+	os.Setenv("HAL_UPS_MODEL", model)
+	log.Printf("ConfigureUPS: HAL_UPS_MODEL set to %q", model)
+
+	// Step 4: Start power monitor (will use forced model via env var)
+	msg, err := h.powerMonitor.Start()
+	if err != nil {
+		log.Printf("ConfigureUPS: error starting monitor: %v", err)
+		errorResponse(w, http.StatusInternalServerError, "failed to start power monitor: "+err.Error())
+		return
+	}
+	log.Printf("ConfigureUPS: start result: %s", msg)
+
+	// Get the loaded driver name
+	driverName := "none"
+	if driver := h.powerMonitor.Driver(); driver != nil {
+		driverName = driver.Name()
+	}
+
+	jsonResponse(w, http.StatusOK, ConfigureUPSResponse{
+		Status: "ok",
+		Model:  model,
+		Driver: driverName,
+	})
 }
 
 // ============================================================================
@@ -257,21 +374,8 @@ func (pm *PowerMonitor) poll(ctx context.Context) {
 	pm.mu.Unlock()
 
 	if driver == nil {
-		// No UPS detected — try re-detection periodically
-		newDriver := DetectUPS()
-		if newDriver != nil {
-			pm.mu.Lock()
-			pm.driver = newDriver
-			pm.addEventLocked("detected", fmt.Sprintf("UPS detected: %s", newDriver.Name()))
-			pm.mu.Unlock()
-
-			// Run OnBoot for newly detected device
-			bootCtx, bootCancel := context.WithTimeout(ctx, 10*time.Second)
-			defer bootCancel()
-			if err := newDriver.OnBoot(bootCtx); err != nil {
-				log.Printf("PowerMonitor: OnBoot error for %s: %v", newDriver.Name(), err)
-			}
-		}
+		// No driver loaded — do NOT attempt re-detection.
+		// The user must explicitly configure a model via POST /power/ups/configure.
 		return
 	}
 

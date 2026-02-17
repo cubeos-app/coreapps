@@ -37,8 +37,12 @@ services:
       - HAL_HOST=0.0.0.0
       - TZ=${TZ:-UTC}
       - DBUS_SYSTEM_BUS_ADDRESS=unix:path=/run/dbus/system_bus_socket
-      # UPS/Power management (model autodetected from I2C — do NOT hardcode)
+      # UPS/Power management
+      # Model is configured at runtime by the API via POST /power/ups/configure
+      # after the user confirms their UPS HAT selection in the dashboard.
+      # Power monitor does NOT auto-start — it waits for API configuration.
       - HAL_UPS_ENABLED=true
+      - HAL_POWER_MONITOR_AUTOSTART=false
       - HAL_UPS_LOW_BATTERY_THRESHOLD=15
       - HAL_UPS_CRITICAL_BATTERY_THRESHOLD=5
       - HAL_UPS_SHUTDOWN_DELAY=30

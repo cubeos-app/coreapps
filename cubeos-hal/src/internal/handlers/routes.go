@@ -55,6 +55,10 @@ func SetupRoutes(r chi.Router, h *HALHandler) {
 		r.Post("/monitor/start", h.StartPowerMonitor)
 		r.Post("/monitor/stop", h.StopPowerMonitor)
 		r.Get("/monitor/status", h.GetMonitorStatus)
+
+		// UPS detection and configuration (user-confirmed selection)
+		r.Get("/ups/detect", h.DetectUPSProbe)
+		r.Post("/ups/configure", h.ConfigureUPS)
 	})
 
 	// RTC

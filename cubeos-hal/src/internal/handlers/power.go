@@ -12,7 +12,7 @@ import (
 )
 
 // ============================================================================
-// Constants - Geekworm X1202 / MAX17040
+// Constants - UPS / Battery
 // ============================================================================
 
 const (
@@ -23,7 +23,7 @@ const (
 	MAX17040RegMODE    = 0x06
 	MAX17040RegVERSION = 0x08
 
-	GPIOPowerLoss  = 6  // Input: HIGH = AC present, LOW = power lost
+	GPIOPowerLoss  = 6  // Input: polarity depends on UPS model — NEVER read directly
 	GPIOChargeCtrl = 16 // Output: LOW = charging, HIGH = not charging
 
 	LowBatteryThreshold      = 15.0
@@ -35,7 +35,7 @@ const (
 // ============================================================================
 
 // BatteryStatus represents current battery state.
-// @Description Battery status information from X1202 UPS
+// @Description Battery status information from UPS HAT
 type BatteryStatus struct {
 	Available           bool    `json:"available" example:"true"`
 	Voltage             float64 `json:"voltage" example:"4.12"`
@@ -142,7 +142,7 @@ func (h *HALHandler) GetPowerStatus(w http.ResponseWriter, r *http.Request) {
 
 // GetBatteryStatus returns battery status.
 // @Summary Get battery status
-// @Description Returns battery voltage, percentage, and charging status from X1202 UPS
+// @Description Returns battery voltage, percentage, and charging status from configured UPS driver
 // @Tags Power
 // @Accept json
 // @Produce json
@@ -156,7 +156,7 @@ func (h *HALHandler) GetBatteryStatus(w http.ResponseWriter, r *http.Request) {
 
 // GetUPSInfo returns UPS hardware info.
 // @Summary Get UPS info
-// @Description Returns UPS hardware detection information (X1202 with MAX17040)
+// @Description Returns UPS hardware detection information from configured driver
 // @Tags Power
 // @Accept json
 // @Produce json
@@ -169,8 +169,11 @@ func (h *HALHandler) GetUPSInfo(w http.ResponseWriter, r *http.Request) {
 }
 
 // SetChargingEnabled controls battery charging.
+// Delegates to the active UPS driver. Returns 501 if no UPS is configured
+// or if the configured UPS does not support charge control.
+//
 // @Summary Control charging
-// @Description Enables or disables battery charging via GPIO
+// @Description Enables or disables battery charging via GPIO (requires configured UPS with charge control support)
 // @Tags Power
 // @Accept json
 // @Produce json
@@ -178,8 +181,22 @@ func (h *HALHandler) GetUPSInfo(w http.ResponseWriter, r *http.Request) {
 // @Success 200 {object} SuccessResponse
 // @Failure 400 {object} ErrorResponse
 // @Failure 500 {object} ErrorResponse
+// @Failure 501 {object} ErrorResponse "No UPS configured or charge control not supported"
 // @Router /power/charging [post]
 func (h *HALHandler) SetChargingEnabled(w http.ResponseWriter, r *http.Request) {
+	// Check if a UPS driver is loaded
+	driver := h.powerMonitor.Driver()
+	if driver == nil {
+		errorResponse(w, http.StatusNotImplemented, "no UPS configured — configure a UPS model first")
+		return
+	}
+
+	// Check if this driver supports charge control
+	if !driver.SupportsChargeControl() {
+		errorResponse(w, http.StatusNotImplemented, fmt.Sprintf("%s does not support charge control", driver.Name()))
+		return
+	}
+
 	r = limitBody(r, 1<<20) // 1MB
 	var req ChargingRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -193,7 +210,8 @@ func (h *HALHandler) SetChargingEnabled(w http.ResponseWriter, r *http.Request) 
 		value = 1
 	}
 
-	if _, err := execWithTimeout(r.Context(), "gpioset", "gpiochip4", fmt.Sprintf("%d=%d", GPIOChargeCtrl, value)); err != nil {
+	gpioChip := detectGPIOChip()
+	if _, err := execWithTimeout(r.Context(), "gpioset", gpioChip, fmt.Sprintf("%d=%d", GPIOChargeCtrl, value)); err != nil {
 		errorResponse(w, http.StatusInternalServerError, sanitizeExecError("set charging state", err))
 		return
 	}
@@ -541,67 +559,105 @@ func (h *HALHandler) getUptimeInfo() UptimeInfo {
 	return info
 }
 
+// getBatteryStatus returns battery status by delegating to the active UPS driver.
+// Priority order:
+//  1. Use cached reading from PowerMonitor (if running and has a reading)
+//  2. Do a one-shot read via the active driver (if driver loaded but no cached reading)
+//  3. Return Available:false if no driver is loaded (no UPS configured)
+//
+// SAFETY: This function NEVER reads GPIO6 directly. All GPIO reads
+// go through the driver's ReadStatus() method which applies the correct
+// polarity for the detected UPS model.
 func (h *HALHandler) getBatteryStatus() BatteryStatus {
 	status := BatteryStatus{
 		Available:   false,
 		LastUpdated: time.Now().UTC().Format(time.RFC3339),
 	}
 
-	ctx := context.Background()
-
-	// Read voltage from MAX17040
-	if output, err := execWithTimeout(ctx, "i2cget", "-y", "1", "0x36", "0x02", "w"); err == nil {
-		valStr := strings.TrimSpace(output)
-		if val, err := strconv.ParseInt(strings.TrimPrefix(valStr, "0x"), 16, 64); err == nil {
-			swapped := ((val & 0xFF) << 8) | ((val >> 8) & 0xFF)
-			status.VoltageRaw = uint16(swapped)
-			status.Voltage = float64(swapped>>4) * 1.25 / 1000.0
-			status.Available = true
-		}
+	// Try cached reading from power monitor first
+	if cached := h.powerMonitor.LastReading(); cached != nil && cached.Available {
+		status.Available = true
+		status.Voltage = cached.Voltage
+		status.Percentage = cached.Percentage
+		status.ACPresent = cached.ACPresent
+		status.IsCharging = cached.IsCharging
+		status.ChargingEnabled = cached.ChargingEnabled
+		status.IsLow = cached.Percentage < LowBatteryThreshold
+		status.IsCritical = cached.Percentage < CriticalBatteryThreshold
+		status.LastUpdated = cached.Timestamp
+		return status
 	}
 
-	// Read SOC
-	if output, err := execWithTimeout(ctx, "i2cget", "-y", "1", "0x36", "0x04", "w"); err == nil {
-		valStr := strings.TrimSpace(output)
-		if val, err := strconv.ParseInt(strings.TrimPrefix(valStr, "0x"), 16, 64); err == nil {
-			swapped := ((val & 0xFF) << 8) | ((val >> 8) & 0xFF)
-			status.PercentageRaw = uint16(swapped)
-			status.Percentage = float64(swapped>>8) + float64(swapped&0xFF)/256.0
-		}
+	// No cached reading — try one-shot read via driver
+	driver := h.powerMonitor.Driver()
+	if driver == nil {
+		// No UPS configured — return available:false (safe default)
+		return status
 	}
 
-	// Check GPIO for AC present
-	if output, err := execWithTimeout(ctx, "gpioget", "gpiochip4", "6"); err == nil {
-		status.ACPresent = strings.TrimSpace(output) == "1"
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	reading, err := driver.ReadStatus(ctx)
+	if err != nil {
+		// I2C read failed — return available:false, not a crash
+		return status
 	}
 
-	// Check GPIO for charging enabled
-	if output, err := execWithTimeout(ctx, "gpioget", "gpiochip4", "16"); err == nil {
-		status.ChargingEnabled = strings.TrimSpace(output) == "0"
+	if reading != nil && reading.Available {
+		status.Available = true
+		status.Voltage = reading.Voltage
+		status.Percentage = reading.Percentage
+		status.ACPresent = reading.ACPresent
+		status.IsCharging = reading.IsCharging
+		status.ChargingEnabled = reading.ChargingEnabled
+		status.IsLow = reading.Percentage < LowBatteryThreshold
+		status.IsCritical = reading.Percentage < CriticalBatteryThreshold
+		status.LastUpdated = reading.Timestamp
 	}
-
-	status.IsLow = status.Percentage < LowBatteryThreshold
-	status.IsCritical = status.Percentage < CriticalBatteryThreshold
 
 	return status
 }
 
+// getUPSInfo returns UPS hardware information from the active driver.
+// Returns dynamic info based on the currently loaded driver, not hardcoded values.
 func (h *HALHandler) getUPSInfo() UPSInfo {
-	info := UPSInfo{
-		Model:      "Geekworm X1202",
-		I2CAddress: "0x36",
-		I2CBus:     1,
-		FuelGauge:  "MAX17040",
-		GPIOChip:   "gpiochip4",
-		PiVersion:  5,
+	driver := h.powerMonitor.Driver()
+	if driver == nil {
+		// No UPS configured — return safe default
+		return UPSInfo{
+			Model:     "none",
+			Detected:  false,
+			GPIOChip:  detectGPIOChip(),
+			PiVersion: detectPiVersion(),
+		}
 	}
 
-	if output, err := execWithTimeout(context.Background(), "i2cget", "-y", "1", "0x36", "0x08", "w"); err == nil {
-		valStr := strings.TrimSpace(output)
-		if val, err := strconv.ParseInt(strings.TrimPrefix(valStr, "0x"), 16, 64); err == nil {
-			info.ChipVersion = uint16(val)
-			info.Detected = true
+	info := UPSInfo{
+		Model:     driver.Name(),
+		Detected:  true,
+		GPIOChip:  detectGPIOChip(),
+		PiVersion: detectPiVersion(),
+	}
+
+	// Set driver-specific fields based on model type
+	switch driver.Name() {
+	case "Geekworm X1202", "Geekworm X728":
+		info.I2CAddress = "0x36"
+		info.I2CBus = DefaultI2CBus
+		info.FuelGauge = "MAX17040"
+
+		// Try to read chip version for extra info
+		if output, err := execWithTimeout(context.Background(), "i2cget", "-y", "1", "0x36", "0x08", "w"); err == nil {
+			valStr := strings.TrimSpace(output)
+			if val, err := strconv.ParseInt(strings.TrimPrefix(valStr, "0x"), 16, 64); err == nil {
+				info.ChipVersion = uint16(val)
+			}
 		}
+	case "PiSugar 3":
+		info.I2CAddress = "0x57"
+		info.I2CBus = DefaultI2CBus
+		info.FuelGauge = "Custom MCU"
 	}
 
 	return info

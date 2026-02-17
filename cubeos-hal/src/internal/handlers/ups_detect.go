@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"net/http"
 	"os"
 	"strings"
 	"time"
@@ -47,6 +48,121 @@ type BatteryReading struct {
 	Temperature     float64 `json:"temperature,omitempty"` // °C, PiSugar only
 	DeviceName      string  `json:"device_name"`
 	Timestamp       string  `json:"timestamp"`
+}
+
+// ============================================================================
+// UPS Detection Result (Suggestion Only)
+// ============================================================================
+
+// UPSDetectionResult is the response for GET /power/ups/detect.
+// This is a read-only probe result — it does NOT activate any driver
+// or start the power monitor. The user must explicitly confirm via
+// POST /power/ups/configure before any driver is loaded.
+// @Description UPS auto-detection probe result (suggestion only, no activation)
+type UPSDetectionResult struct {
+	SuggestedModel string   `json:"suggested_model" example:"x1202"`                    // "x1202", "x728", "pisugar3", "none"
+	SuggestedName  string   `json:"suggested_name" example:"Geekworm X1202"`            // Human-readable name
+	PiModel        int      `json:"pi_model" example:"5"`                               // 4, 5, etc.
+	GPIOChip       string   `json:"gpio_chip" example:"gpiochip4"`                      // "gpiochip0", "gpiochip4"
+	I2CDevices     []string `json:"i2c_devices_found"`                                  // ["0x36", "0x68"]
+	Confidence     string   `json:"confidence" example:"high"`                          // "high", "medium", "low"
+	Warning        string   `json:"warning,omitempty"`                                  // e.g. "X1202 on Pi 4 is unusual"
+	Details        string   `json:"details" example:"MAX17040 at 0x36, no RTC at 0x68"` // Human-readable explanation
+}
+
+// ============================================================================
+// UPS Detection Probe Handler
+// ============================================================================
+
+// DetectUPSProbe probes the I2C bus to suggest which UPS HAT is installed.
+// This is read-only — it does NOT activate any driver or start the power monitor.
+// The user must explicitly confirm their selection via POST /power/ups/configure.
+//
+// @Summary Detect UPS HAT
+// @Description Probes I2C bus to suggest which UPS HAT is installed (does not activate driver)
+// @Tags Power
+// @Produce json
+// @Success 200 {object} UPSDetectionResult
+// @Failure 500 {object} ErrorResponse
+// @Router /power/ups/detect [get]
+func (h *HALHandler) DetectUPSProbe(w http.ResponseWriter, r *http.Request) {
+	piModel := detectPiVersion()
+	gpioChip := detectGPIOChip()
+	i2cBus := getEnvOrDefault("HAL_I2C_BUS", "1")
+
+	result := UPSDetectionResult{
+		SuggestedModel: "none",
+		SuggestedName:  "None detected",
+		PiModel:        piModel,
+		GPIOChip:       gpioChip,
+		I2CDevices:     []string{},
+		Confidence:     "high",
+		Details:        "No UPS HAT detected on I2C bus",
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+	defer cancel()
+
+	// Step 1: Probe PiSugar 3 at 0x57
+	if probeI2CDevice(ctx, i2cBus, "0x57") {
+		result.I2CDevices = append(result.I2CDevices, "0x57")
+
+		// Verify by reading SOC register 0x2A — should return 0-100
+		if output, err := execWithTimeout(ctx, "i2cget", "-y", i2cBus, "0x57", "0x2a"); err == nil {
+			valStr := strings.TrimSpace(output)
+			if val, parseErr := parseHexInt(valStr); parseErr == nil && val >= 0 && val <= 100 {
+				result.SuggestedModel = "pisugar3"
+				result.SuggestedName = "PiSugar 3"
+				result.Details = fmt.Sprintf("PiSugar 3 at 0x57 (SOC=%d%%)", val)
+				// PiSugar works on any Pi, so confidence stays high
+				jsonResponse(w, http.StatusOK, result)
+				return
+			}
+		}
+		log.Printf("UPS detect probe: device at 0x57 did not pass PiSugar 3 validation")
+	}
+
+	// Step 2: Probe MAX17040 at 0x36
+	if probeI2CDevice(ctx, i2cBus, "0x36") {
+		result.I2CDevices = append(result.I2CDevices, "0x36")
+
+		// Step 3: Disambiguate X1202 vs X728 by probing RTC at 0x68
+		hasRTC := probeI2CDevice(ctx, i2cBus, "0x68")
+		if hasRTC {
+			result.I2CDevices = append(result.I2CDevices, "0x68")
+		}
+
+		if hasRTC {
+			// RTC present → X728
+			result.SuggestedModel = "x728"
+			result.SuggestedName = "Geekworm X728"
+			result.Details = "MAX17040 fuel gauge at 0x36 + DS1307 RTC at 0x68"
+
+			// X728 is designed for Pi 2/3/4 — warn if on Pi 5
+			if piModel >= 5 {
+				result.Confidence = "low"
+				result.Warning = fmt.Sprintf("X728 is designed for Pi 2/3/4, but this is a Pi %d. Please verify your hardware.", piModel)
+			}
+		} else {
+			// No RTC → X1202
+			result.SuggestedModel = "x1202"
+			result.SuggestedName = "Geekworm X1202"
+			result.Details = "MAX17040 fuel gauge at 0x36, no RTC at 0x68"
+
+			// X1202 is designed for Pi 5 — warn if on Pi 4 or lower
+			if piModel > 0 && piModel < 5 {
+				result.Confidence = "low"
+				result.Warning = fmt.Sprintf("X1202 is designed for Pi 5, but this is a Pi %d. Please verify your hardware.", piModel)
+			}
+		}
+
+		jsonResponse(w, http.StatusOK, result)
+		return
+	}
+
+	// Nothing detected
+	result.Details = fmt.Sprintf("No UPS HAT detected on I2C bus %s", i2cBus)
+	jsonResponse(w, http.StatusOK, result)
 }
 
 // ============================================================================
