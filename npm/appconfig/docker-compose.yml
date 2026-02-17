@@ -18,9 +18,11 @@ services:
       - ../appdata/letsencrypt:/etc/letsencrypt
       - /var/log:/var/log/host:ro
       - /cubeos/static:/data/custom-pages:ro
-      # B35: Override NPM "Congratulations" default page with CubeOS boot page.
-      # Eliminates race condition where user reaches cubeos.cube before seed_npm runs.
-      - /cubeos/static/cubeos-boot.html:/data/nginx/default_www/index.html
+      # B35: Replace NPM "Congratulations" page at its ACTUAL source path.
+      # NPM's default "congratulations" mode serves from /var/www/html/ (baked into image),
+      # NOT /data/nginx/default_www/ (which is only used in "Custom Page" mode).
+      # This mount takes effect the instant nginx starts — no API/DB dependency.
+      - /cubeos/static/cubeos-boot.html:/var/www/html/index.html:ro
     environment:
       - TZ=${TZ:-UTC}
     env_file:
