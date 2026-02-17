@@ -21,8 +21,8 @@ variables:
   CUBEOS_GATEWAY: "10.42.24.1"
   CUBEOS_DOMAIN: "cubeos.cube"
   # Service classification
-  COMPOSE_SERVICES: "pihole npm cubeos-hal"
-  STACK_SERVICES: "registry cubeos-api cubeos-dashboard cubeos-docsindex cubeos-filebrowser dozzle ollama chromadb"
+  COMPOSE_SERVICES: "pihole npm cubeos-hal terminal"
+  STACK_SERVICES: "registry cubeos-api cubeos-dashboard cubeos-docsindex cubeos-filebrowser dozzle kiwix"
   # Buildable stacks: these have src/ directories and need local image build before deploy
   BUILDABLE_STACKS: "cubeos-docsindex"
   # HAL image
@@ -441,10 +441,10 @@ restart-changed:
           pihole)
             HAS_PIHOLE=true
             ;;
-          npm|cubeos-hal)
+          npm|cubeos-hal|terminal)
             COMPOSE_APPS="$COMPOSE_APPS $app"
             ;;
-          registry|cubeos-api|cubeos-dashboard|cubeos-docsindex|cubeos-filebrowser|dozzle|ollama|chromadb)
+          registry|cubeos-api|cubeos-dashboard|cubeos-docsindex|cubeos-filebrowser|dozzle|kiwix)
             STACK_APPS="$STACK_APPS $app"
             ;;
           *)
