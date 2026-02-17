@@ -5,12 +5,12 @@
 
 services:
   cubeos-docsindex:
-    build:
-      context: ../src
-      dockerfile: Dockerfile
     image: ghcr.io/cubeos-app/cubeos-docsindex:latest
     ports:
-      - "6032:8080"
+      - target: 8080
+        published: 6032
+        protocol: tcp
+        mode: host
     volumes:
       - /cubeos/docs:/cubeos/docs
     environment:

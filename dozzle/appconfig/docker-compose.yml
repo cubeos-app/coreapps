@@ -49,7 +49,7 @@ services:
         - "cubeos.type=platform"
         - "cubeos.category=monitoring"
         - "cubeos.port=6012"
-        - "cubeos.fqdn=logs.cubeos.cube"
+        - "cubeos.fqdn=dozzle.cubeos.cube"
         - "cubeos.deployment=swarm"
         - "cubeos.description=Dozzle - Container log viewer"
 
