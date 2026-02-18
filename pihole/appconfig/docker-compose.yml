@@ -14,7 +14,8 @@ services:
     network_mode: host
     volumes:
       - ../appdata/etc-pihole:/etc/pihole
-      - ../appdata/etc-dnsmasq.d:/etc/dnsmasq.d
+      # NOTE: /etc/dnsmasq.d/ volume removed — Pi-hole v6 disables dnsmasq.d
+      # drop-ins by default. All dnsmasq config via pihole.toml / REST API.
     environment:
       - TZ=${TZ:-UTC}
       # --- Web UI ---
@@ -29,9 +30,13 @@ services:
       - FTLCONF_dns_domain_local=true
       - FTLCONF_dns_domainNeeded=true
       - FTLCONF_dns_bogusPriv=true
-      - FTLCONF_dns_expandHosts=true
-      # --- DHCP ---
-      - FTLCONF_dhcp_active=true
+      - FTLCONF_dns_expandHosts=false
+      # --- DHCP range (static infrastructure — set once, never changes at runtime) ---
+      # NOTE: dhcp.active is NOT set here. It's managed dynamically:
+      #   - At boot: configure_pihole_dhcp() in cubeos-boot-lib.sh sets it via pihole-FTL --config
+      #   - At runtime: CubeOS API sets it via Pi-hole v6 REST API (PATCH /api/config/dhcp/active)
+      # Setting FTLCONF_dhcp_active here would make it read-only in Pi-hole v6,
+      # blocking the API from enabling/disabling DHCP per network mode.
       - FTLCONF_dhcp_start=10.42.24.10
       - FTLCONF_dhcp_end=10.42.24.250
       - FTLCONF_dhcp_router=10.42.24.1
@@ -39,8 +44,15 @@ services:
       # --- Offline resilience ---
       - FTLCONF_dns_replyWhenBusy=ALLOW
       - FTLCONF_dns_blocking_active=false
-      # --- Wildcard: ALL *.cubeos.cube -> 10.42.24.1 ---
-      - FTLCONF_misc_dnsmasq_lines=address=/cubeos.cube/10.42.24.1
+      # --- Wildcard DNS: *.cubeos.cube -> 10.42.24.1 ---
+      # NOTE: misc.dnsmasq_lines is NOT set here. It's managed dynamically:
+      #   - At boot: configure_pihole_dhcp() sets it via pihole-FTL --config
+      #     (includes both address=/cubeos.cube/10.42.24.1 AND per-mode
+      #      no-dhcp-interface directives)
+      #   - At runtime: CubeOS API sets it via Pi-hole v6 REST API
+      # Setting FTLCONF_misc_dnsmasq_lines here would make it read-only,
+      # blocking the API from adding no-dhcp-interface=eth0 per mode.
+      # The wildcard DNS is also backed by custom.list individual entries.
     env_file:
       - /cubeos/config/defaults.env
     cap_add:
