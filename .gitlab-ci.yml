@@ -577,15 +577,25 @@ restart-changed:
         echo "── pihole (compose - DNS will briefly drop) ──"
         cd "/cubeos/coreapps/pihole/appconfig"
         
+        # Pull BEFORE stopping — Pi-hole IS our DNS server, so we need it
+        # running to resolve registry-1.docker.io for the pull.
+        echo "  📥 Pulling (while Pi-hole still running)..."
+        timeout 120 docker compose pull 2>&1 || echo "  ⚠️  Pull failed, using cached image"
+        
+        # Set temporary fallback DNS so the runner doesn't lose resolution
+        # while Pi-hole is down (needed for any post-start checks).
+        RESOLV_BAK=""
+        if [ -f /etc/resolv.conf ]; then
+          RESOLV_BAK=$(cat /etc/resolv.conf)
+        fi
+        echo "nameserver 1.1.1.1" > /etc/resolv.conf 2>/dev/null || true
+        
         echo "  🛑 Stopping existing..."
         docker rm -f cubeos-pihole 2>/dev/null || true
         docker compose down --remove-orphans 2>/dev/null || true
         
-        echo "  📥 Pulling..."
-        docker compose pull 2>&1 || true
-        
-        echo "  🚀 Starting..."
-        docker compose up -d --pull always
+        echo "  🚀 Starting (from pre-pulled image)..."
+        docker compose up -d --pull never
         
         echo "  Waiting for Pi-hole DNS..."
         for i in $(seq 1 30); do
@@ -596,6 +606,11 @@ restart-changed:
           [ "$i" -eq 30 ] && echo "  ⚠️  Pi-hole may still be starting..."
           sleep 2
         done
+        
+        # Restore original resolv.conf (Pi-hole should be handling DNS again)
+        if [ -n "$RESOLV_BAK" ]; then
+          echo "$RESOLV_BAK" > /etc/resolv.conf 2>/dev/null || true
+        fi
       fi
       
       # ──────────────────────────────────────────────────────────
