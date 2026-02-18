@@ -110,6 +110,9 @@ func SetupRoutes(r chi.Router, h *HALHandler) {
 		r.Post("/dhcp/request", h.RequestDHCP)
 		r.Post("/ip/static", h.SetStaticIP)
 
+		// Netplan management (T10)
+		r.Post("/netplan", h.WriteNetplan)
+
 		// Port scanning (host-level listening ports)
 		r.Get("/ports/listening", h.ListeningPortsHandler)
 	})

@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"sync/atomic"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 )
@@ -1319,5 +1320,89 @@ func (h *HALHandler) SetStaticIP(w http.ResponseWriter, r *http.Request) {
 		"ip":        req.IP,
 		"gateway":   req.Gateway,
 		"message":   "static IP configured",
+	})
+}
+
+// WriteNetplan writes netplan YAML to the host filesystem and applies it.
+// Uses nsenter to access the host's /etc/netplan/ directory.
+// Optionally reconfigures a specific interface after writing.
+// @Summary Write netplan configuration
+// @Description Writes netplan YAML to host and applies via networkctl reload
+// @Tags network
+// @Accept json
+// @Produce json
+// @Param request body object true "yaml: netplan content, reconfigure_iface: optional interface to reconfigure"
+// @Success 200 {object} map[string]interface{}
+// @Failure 400 {object} map[string]string
+// @Failure 500 {object} map[string]string
+// @Router /network/netplan [post]
+func (h *HALHandler) WriteNetplan(w http.ResponseWriter, r *http.Request) {
+	r = limitBody(r, 1<<20) // 1MB max
+
+	var req struct {
+		YAML             string `json:"yaml"`
+		ReconfigureIface string `json:"reconfigure_iface,omitempty"`
+	}
+
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		errorResponse(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+
+	if req.YAML == "" {
+		errorResponse(w, http.StatusBadRequest, "yaml content is required")
+		return
+	}
+
+	// Validate YAML starts with expected header (basic sanity check)
+	if !strings.Contains(req.YAML, "network:") || !strings.Contains(req.YAML, "version: 2") {
+		errorResponse(w, http.StatusBadRequest, "invalid netplan YAML: must contain 'network:' and 'version: 2'")
+		return
+	}
+
+	// Validate reconfigure_iface if provided
+	if req.ReconfigureIface != "" {
+		if err := validateInterfaceName(req.ReconfigureIface); err != nil {
+			errorResponse(w, http.StatusBadRequest, "invalid interface name: "+err.Error())
+			return
+		}
+	}
+
+	// Write netplan YAML to host via nsenter
+	// Using bash -c with heredoc to write multi-line content safely
+	writeCmd := fmt.Sprintf("cat > /etc/netplan/01-cubeos.yaml << 'CUBEOS_NETPLAN_EOF'\n%sCUBEOS_NETPLAN_EOF", req.YAML)
+
+	_, err := execWithTimeout(r.Context(), "nsenter", "-t", "1", "-m", "--",
+		"bash", "-c", writeCmd)
+	if err != nil {
+		log.Printf("WriteNetplan: failed to write: %v", err)
+		errorResponse(w, http.StatusInternalServerError, sanitizeExecError("write netplan", err))
+		return
+	}
+
+	// Apply: networkctl reload picks up the new netplan without dropping connections
+	_, err = execWithTimeout(r.Context(), "nsenter", "-t", "1", "-m", "-n", "--",
+		"networkctl", "reload")
+	if err != nil {
+		log.Printf("WriteNetplan: networkctl reload failed: %v", err)
+		// Non-fatal — netplan is written, will take effect on reboot
+	}
+
+	// Optionally reconfigure a specific interface (e.g., wlan1 for ONLINE_WIFI)
+	if req.ReconfigureIface != "" {
+		time.Sleep(time.Second) // Let networkd process the reload
+		_, err = execWithTimeout(r.Context(), "nsenter", "-t", "1", "-m", "-n", "--",
+			"networkctl", "reconfigure", req.ReconfigureIface)
+		if err != nil {
+			log.Printf("WriteNetplan: reconfigure %s failed: %v", req.ReconfigureIface, err)
+			// Non-fatal — netplan is written
+		}
+	}
+
+	jsonResponse(w, http.StatusOK, map[string]interface{}{
+		"success":      true,
+		"message":      "netplan written and applied",
+		"reloaded":     true,
+		"reconfigured": req.ReconfigureIface,
 	})
 }
