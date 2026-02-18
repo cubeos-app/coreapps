@@ -77,3 +77,4 @@ services:
       - "cubeos.fqdn=pihole.cubeos.cube"
       - "cubeos.deployment=compose"
       - "cubeos.description=Pi-hole DNS + DHCP Server"
+
