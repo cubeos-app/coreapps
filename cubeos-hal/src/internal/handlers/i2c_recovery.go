@@ -27,6 +27,11 @@ import (
 // This module tracks consecutive I2C read errors and triggers the recovery
 // automatically when the threshold is reached, with rate limiting to prevent
 // reset storms.
+//
+// B81 FIX: In containerized environments, the sysfs driver paths may not exist.
+// On first use, we check if the unbind/bind paths are accessible. If not, we
+// log a single warning and permanently disable recovery for this session to
+// avoid spamming logs every 5 minutes.
 
 const (
 	// Pi 5 (RP1 DesignWare I2C controller)
@@ -54,6 +59,8 @@ type I2CRecovery struct {
 	lastAttemptAt     time.Time     // when we last attempted recovery
 	totalRecoveries   int           // lifetime recovery count
 	lastRecoveryOK    bool          // whether last recovery succeeded
+	recoveryAvailable bool          // false if sysfs paths don't exist (B81 fix)
+	unavailableLogged bool          // true after we've logged the "not available" warning once
 }
 
 // NewI2CRecovery creates an I2CRecovery with configuration from environment variables.
@@ -87,22 +94,58 @@ func NewI2CRecovery() *I2CRecovery {
 		}
 	}
 
+	// B81 fix: Check if the sysfs driver path actually exists in this environment.
+	// In containers without host sysfs mounted, these paths won't be available.
+	available := checkRecoveryPathsExist(driverPath)
+	if available {
+		log.Printf("I2CRecovery: sysfs recovery paths verified (available)")
+	} else {
+		log.Printf("I2CRecovery: sysfs recovery paths not accessible in this environment — I2C bus recovery disabled for this session")
+	}
+
 	return &I2CRecovery{
-		devicePath:  devicePath,
-		driverPath:  driverPath,
-		threshold:   threshold,
-		minInterval: defaultRecoveryMinInterval,
-		settleTime:  defaultRecoverySettleTime,
+		devicePath:        devicePath,
+		driverPath:        driverPath,
+		threshold:         threshold,
+		minInterval:       defaultRecoveryMinInterval,
+		settleTime:        defaultRecoverySettleTime,
+		recoveryAvailable: available,
 	}
 }
 
+// checkRecoveryPathsExist verifies that the sysfs unbind/bind paths exist.
+// Returns false if the paths are not accessible (e.g., in a container).
+func checkRecoveryPathsExist(driverPath string) bool {
+	unbindPath := driverPath + "/unbind"
+	bindPath := driverPath + "/bind"
+
+	if _, err := os.Stat(unbindPath); err != nil {
+		return false
+	}
+	if _, err := os.Stat(bindPath); err != nil {
+		return false
+	}
+	return true
+}
+
 // RecordError increments the consecutive error counter.
-// Returns true if recovery should be attempted (threshold reached and rate limit allows).
+// Returns true if recovery should be attempted (threshold reached, rate limit allows,
+// and recovery paths are available).
 func (r *I2CRecovery) RecordError() bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
 	r.consecutiveErrors++
+
+	// B81 fix: If recovery isn't available, never trigger it.
+	// Log a single warning the first time we would have tried recovery.
+	if !r.recoveryAvailable {
+		if r.consecutiveErrors >= r.threshold && !r.unavailableLogged {
+			r.unavailableLogged = true
+			log.Printf("I2CRecovery: recovery would be triggered (%d consecutive errors) but sysfs paths are not available in this environment — suppressing further attempts", r.consecutiveErrors)
+		}
+		return false
+	}
 
 	if r.consecutiveErrors < r.threshold {
 		return false
@@ -125,8 +168,16 @@ func (r *I2CRecovery) RecordSuccess() {
 
 // AttemptRecovery performs the I2C controller unbind/bind sequence.
 // Returns nil on success. Thread-safe and rate-limited.
+// Returns an error immediately if recovery paths are not available (B81 fix).
 func (r *I2CRecovery) AttemptRecovery() error {
 	r.mu.Lock()
+
+	// B81 fix: bail out immediately if sysfs paths don't exist
+	if !r.recoveryAvailable {
+		r.mu.Unlock()
+		return fmt.Errorf("I2C recovery not available (sysfs paths not accessible)")
+	}
+
 	// Double-check rate limit under lock
 	if !r.lastAttemptAt.IsZero() && time.Since(r.lastAttemptAt) < r.minInterval {
 		r.mu.Unlock()
@@ -187,6 +238,7 @@ func (r *I2CRecovery) Stats() I2CRecoveryStats {
 		ConsecutiveErrors: r.consecutiveErrors,
 		TotalRecoveries:   r.totalRecoveries,
 		DevicePath:        r.devicePath,
+		RecoveryAvailable: r.recoveryAvailable,
 	}
 
 	if !r.lastAttemptAt.IsZero() {
@@ -205,6 +257,7 @@ type I2CRecoveryStats struct {
 	DevicePath        string  `json:"device_path"`
 	LastAttemptAt     *string `json:"last_attempt_at"`
 	LastRecoveryOK    bool    `json:"last_recovery_ok"`
+	RecoveryAvailable bool    `json:"recovery_available"` // B81: false if sysfs paths not in container
 }
 
 // parseIntOrDefault parses a string as int, returning defaultVal on failure.

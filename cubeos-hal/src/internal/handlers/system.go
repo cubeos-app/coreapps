@@ -3,6 +3,7 @@ package handlers
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -151,7 +152,7 @@ func (h *HALHandler) Shutdown(w http.ResponseWriter, r *http.Request) {
 		time.Sleep(1 * time.Second)
 
 		// Call UPS driver shutdown sequence before system halt.
-		// On X728 (Pi 4): pulses GPIO 26 HIGH for 3s — MANDATORY or UPS drains battery.
+		// On X728 (Pi 4): pulses GPIO 26 HIGH for 4s — MANDATORY or UPS drains battery.
 		// On X1202 (Pi 5): no-op (MCU auto-detects halt via current draw).
 		// On PiSugar3: clears output switch to cut power.
 		// On nil (no UPS): skip.
@@ -525,6 +526,16 @@ func (h *HALHandler) GetOSInfo(w http.ResponseWriter, r *http.Request) {
 // Service Management Handlers
 // ============================================================================
 
+// serviceValidationError handles the validateServiceName error, returning 501
+// for allowlist misses (B70) and 400 for invalid names.
+func serviceValidationError(w http.ResponseWriter, name string, err error) {
+	if errors.Is(err, ErrServiceNotInAllowlist) {
+		errorResponse(w, http.StatusNotImplemented, "service not in allowlist: "+name)
+	} else {
+		errorResponse(w, http.StatusBadRequest, err.Error())
+	}
+}
+
 // ServiceStatus returns the status of a systemd service.
 // @Summary Get service status
 // @Description Returns the status of a systemd service
@@ -533,13 +544,14 @@ func (h *HALHandler) GetOSInfo(w http.ResponseWriter, r *http.Request) {
 // @Produce json
 // @Param name path string true "Service name" example(cubeos-hal)
 // @Success 200 {object} ServiceStatus
-// @Failure 400 {object} ErrorResponse
+// @Failure 400 {object} ErrorResponse "Invalid service name"
+// @Failure 501 {object} ErrorResponse "Service not in allowlist"
 // @Failure 500 {object} ErrorResponse
 // @Router /system/service/{name}/status [get]
 func (h *HALHandler) ServiceStatus(w http.ResponseWriter, r *http.Request) {
 	name := chi.URLParam(r, "name")
 	if err := validateServiceName(name); err != nil {
-		errorResponse(w, http.StatusBadRequest, err.Error())
+		serviceValidationError(w, name, err)
 		return
 	}
 
@@ -601,13 +613,14 @@ func (h *HALHandler) ServiceStatus(w http.ResponseWriter, r *http.Request) {
 // @Produce json
 // @Param name path string true "Service name" example(cubeos-hal)
 // @Success 200 {object} SuccessResponse
-// @Failure 400 {object} ErrorResponse
+// @Failure 400 {object} ErrorResponse "Invalid service name"
+// @Failure 501 {object} ErrorResponse "Service not in allowlist"
 // @Failure 500 {object} ErrorResponse
 // @Router /system/service/{name}/restart [post]
 func (h *HALHandler) RestartService(w http.ResponseWriter, r *http.Request) {
 	name := chi.URLParam(r, "name")
 	if err := validateServiceName(name); err != nil {
-		errorResponse(w, http.StatusBadRequest, err.Error())
+		serviceValidationError(w, name, err)
 		return
 	}
 
@@ -649,13 +662,14 @@ func (h *HALHandler) RestartService(w http.ResponseWriter, r *http.Request) {
 // @Produce json
 // @Param name path string true "Service name" example(cubeos-hal)
 // @Success 200 {object} SuccessResponse
-// @Failure 400 {object} ErrorResponse
+// @Failure 400 {object} ErrorResponse "Invalid service name"
+// @Failure 501 {object} ErrorResponse "Service not in allowlist"
 // @Failure 500 {object} ErrorResponse
 // @Router /system/service/{name}/start [post]
 func (h *HALHandler) StartService(w http.ResponseWriter, r *http.Request) {
 	name := chi.URLParam(r, "name")
 	if err := validateServiceName(name); err != nil {
-		errorResponse(w, http.StatusBadRequest, err.Error())
+		serviceValidationError(w, name, err)
 		return
 	}
 
@@ -697,13 +711,14 @@ func (h *HALHandler) StartService(w http.ResponseWriter, r *http.Request) {
 // @Produce json
 // @Param name path string true "Service name" example(cubeos-hal)
 // @Success 200 {object} SuccessResponse
-// @Failure 400 {object} ErrorResponse
+// @Failure 400 {object} ErrorResponse "Invalid service name"
+// @Failure 501 {object} ErrorResponse "Service not in allowlist"
 // @Failure 500 {object} ErrorResponse
 // @Router /system/service/{name}/stop [post]
 func (h *HALHandler) StopService(w http.ResponseWriter, r *http.Request) {
 	name := chi.URLParam(r, "name")
 	if err := validateServiceName(name); err != nil {
-		errorResponse(w, http.StatusBadRequest, err.Error())
+		serviceValidationError(w, name, err)
 		return
 	}
 

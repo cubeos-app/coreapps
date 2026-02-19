@@ -189,7 +189,7 @@ func DetectUPS() UPSDriver {
 		return &X1202Driver{i2cBus: i2cBus, gpioChip: gpioChip}
 	case "x728":
 		log.Printf("PowerMonitor: UPS model forced to X728 via HAL_UPS_MODEL")
-		return &X728Driver{i2cBus: i2cBus, gpioChip: gpioChip}
+		return &X728Driver{i2cBus: i2cBus, gpioChip: gpioChip, gpioBase: detectGPIOBase()}
 	case "pisugar3":
 		log.Printf("PowerMonitor: UPS model forced to PiSugar 3 via HAL_UPS_MODEL")
 		return &PiSugar3Driver{i2cBus: i2cBus}
@@ -220,7 +220,7 @@ func DetectUPS() UPSDriver {
 		// Step 3: Disambiguate X1202 vs X728 by probing RTC at 0x68
 		if probeI2CDevice(ctx, i2cBus, "0x68") {
 			log.Printf("PowerMonitor: detected Geekworm X728 (MAX17040 at 0x36 + RTC at 0x68)")
-			return &X728Driver{i2cBus: i2cBus, gpioChip: gpioChip}
+			return &X728Driver{i2cBus: i2cBus, gpioChip: gpioChip, gpioBase: detectGPIOBase()}
 		}
 		log.Printf("PowerMonitor: detected Geekworm X1202 (MAX17040 at 0x36, no RTC)")
 		return &X1202Driver{i2cBus: i2cBus, gpioChip: gpioChip}

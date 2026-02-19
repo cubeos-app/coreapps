@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"os/exec"
@@ -36,6 +37,12 @@ var (
 )
 
 // --- Service allowlist ---
+
+// ErrServiceNotInAllowlist is returned when a service name is valid but not
+// in the allowed list. HAL service handlers return HTTP 501 for this error
+// (to distinguish from 400 for invalid names), which the API proxies through
+// to the dashboard as "not available on this hardware". (B70 fix)
+var ErrServiceNotInAllowlist = errors.New("service not in allowlist")
 
 // serviceAllowlist contains the systemd services that can be managed via HAL.
 // Add services here as needed — anything not on the list is rejected.
@@ -76,7 +83,7 @@ func validateServiceName(name string) error {
 		return fmt.Errorf("invalid service name")
 	}
 	if !serviceAllowlist[name] {
-		return fmt.Errorf("service not in allowlist")
+		return ErrServiceNotInAllowlist
 	}
 	return nil
 }
