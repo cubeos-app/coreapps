@@ -16,5 +16,5 @@ Thumbs.db
 *HANDOVER*.md
 
 # Runtime data (created by containers, not source-controlled)
-*/appdata/*
+*/appdata/
 !*/appdata/.gitkeep-readme
