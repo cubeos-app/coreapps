@@ -288,11 +288,18 @@ func (d *IridiumDriver) flushLocked() {
 // ============================================================================
 
 // autoDetect scans /dev/ttyUSB* for an Iridium modem by sending AT and checking for OK.
+// B68: Excludes GPS devices and gpsd-claimed ports.
 func (d *IridiumDriver) autoDetect(ctx context.Context) (string, error) {
 	// Find candidate ports
 	matches, _ := filepath.Glob("/dev/ttyUSB*")
 
 	for _, port := range matches {
+		// B68: Skip GPS devices — uses shared filter from meshtastic_serial.go
+		if isExcludedFromRadioScan(port) {
+			log.Printf("iridium: auto-detect skipping %s (GPS/excluded device)", port)
+			continue
+		}
+
 		// Configure port
 		if _, err := execWithTimeout(ctx, "stty", "-F", port,
 			strconv.Itoa(d.baudRate), "raw", "-echo", "-crtscts"); err != nil {
@@ -1047,6 +1054,7 @@ func (d *IridiumDriver) emitEvent(event IridiumEvent) {
 // ============================================================================
 
 // ScanDevices scans /dev/ttyUSB* for Iridium modems without maintaining a persistent connection.
+// B68: Excludes GPS devices and gpsd-claimed ports.
 func (d *IridiumDriver) ScanDevices(ctx context.Context) []IridiumDeviceInfo {
 	var devices []IridiumDeviceInfo
 
@@ -1054,6 +1062,12 @@ func (d *IridiumDriver) ScanDevices(ctx context.Context) []IridiumDeviceInfo {
 
 	for _, port := range matches {
 		if _, err := os.Stat(port); err != nil {
+			continue
+		}
+
+		// B68: Skip GPS devices — uses shared filter from meshtastic_serial.go
+		if isExcludedFromRadioScan(port) {
+			log.Printf("iridium: scan skipping %s (GPS/excluded device)", port)
 			continue
 		}
 

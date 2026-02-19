@@ -274,6 +274,73 @@ func (t *SerialTransport) DeviceAddress() string {
 // Auto-Detection
 // ============================================================================
 
+// GPS VID:PID pairs that should be excluded from Meshtastic/Iridium scans.
+// These devices respond on /dev/ttyACM* and /dev/ttyUSB* but are GPS receivers
+// managed by gpsd, not radio modems. (B68 fix)
+var gpsVIDPIDs = map[string]bool{
+	"1546:01a7": true, // u-blox 7 (ACM)
+	"1546:01a8": true, // u-blox 8 (ACM)
+	"1546:01a9": true, // u-blox 9 (ACM)
+	"1546:0502": true, // u-blox M8 (generic)
+	"067b:23a3": true, // Prolific PL2303 (common GPS USB-serial)
+	"067b:2303": true, // Prolific PL2303 legacy (GPS adapters)
+}
+
+// isGPSDevice checks if a serial port belongs to a GPS receiver by VID:PID.
+// Exported at package level so iridium_driver.go can also use it. (B68)
+func isGPSDevice(port string) bool {
+	devName := filepath.Base(port)
+	sysPath := fmt.Sprintf("/sys/class/tty/%s/device", devName)
+
+	vidData, err := os.ReadFile(filepath.Join(sysPath, "../idVendor"))
+	if err != nil {
+		return false
+	}
+	pidData, err := os.ReadFile(filepath.Join(sysPath, "../idProduct"))
+	if err != nil {
+		return false
+	}
+
+	vid := strings.TrimSpace(string(vidData))
+	pid := strings.TrimSpace(string(pidData))
+	vidpid := fmt.Sprintf("%s:%s", vid, pid)
+
+	return gpsVIDPIDs[vidpid]
+}
+
+// isGPSClaimedPort checks if gpsd is configured to use a specific port.
+// Reads /etc/default/gpsd DEVICES= line. (B68)
+func isGPSClaimedPort(port string) bool {
+	data, err := os.ReadFile("/etc/default/gpsd")
+	if err != nil {
+		return false
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "DEVICES=") {
+			devices := strings.Trim(strings.TrimPrefix(line, "DEVICES="), "\"")
+			for _, dev := range strings.Fields(devices) {
+				if dev == port {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+// isExcludedFromRadioScan returns true if a port should be excluded from
+// Meshtastic/Iridium device scanning. Checks GPS VID:PID and gpsd claim. (B68)
+func isExcludedFromRadioScan(port string) bool {
+	if isGPSDevice(port) {
+		return true
+	}
+	if isGPSClaimedPort(port) {
+		return true
+	}
+	return false
+}
+
 // autoDetect scans /dev/ttyUSB* and /dev/ttyACM* for Meshtastic devices.
 // It sends a wake sequence and attempts a protobuf handshake.
 func (t *SerialTransport) autoDetect(ctx context.Context) (string, error) {
@@ -282,8 +349,14 @@ func (t *SerialTransport) autoDetect(ctx context.Context) (string, error) {
 		return "", fmt.Errorf("no serial devices found")
 	}
 
+	// First pass: match by VID:PID (most reliable)
 	for _, port := range candidates {
 		if err := validateSerialPort(port); err != nil {
+			continue
+		}
+		// B68: Skip GPS devices
+		if isExcludedFromRadioScan(port) {
+			log.Printf("meshtastic: skipping %s (GPS/excluded device)", port)
 			continue
 		}
 
@@ -294,21 +367,20 @@ func (t *SerialTransport) autoDetect(ctx context.Context) (string, error) {
 		}
 	}
 
-	// Fallback: try ACM devices first (ESP32-S3 native USB), then USB devices
+	// Second pass: try ACM devices that aren't GPS (ESP32-S3 native USB)
 	for _, port := range candidates {
+		if isExcludedFromRadioScan(port) {
+			continue
+		}
 		if strings.Contains(port, "ttyACM") {
-			log.Printf("meshtastic: auto-detect trying %s (ACM device)", port)
+			log.Printf("meshtastic: auto-detect trying %s (ACM device, not GPS)", port)
 			return port, nil
 		}
 	}
 
-	// Last resort: first available
-	if len(candidates) > 0 {
-		log.Printf("meshtastic: auto-detect using first available: %s", candidates[0])
-		return candidates[0], nil
-	}
-
-	return "", fmt.Errorf("no Meshtastic device found")
+	// B68: Do NOT fall back to "first available" — that's how GPS gets grabbed.
+	// If no VID:PID match and no ACM device, there's no Meshtastic device.
+	return "", fmt.Errorf("no Meshtastic device found (checked %d ports, all excluded or unrecognized)", len(candidates))
 }
 
 // findSerialCandidates returns all candidate serial ports.
@@ -363,13 +435,19 @@ func isMeshtasticVIDPID(port string) bool {
 }
 
 // scanMeshtasticPorts performs a non-destructive scan for Meshtastic devices.
-// This is independent of any active connection.
+// This is independent of any active connection. B68: excludes GPS devices.
 func scanMeshtasticPorts(ctx context.Context) []MeshtasticDeviceInfo {
 	var devices []MeshtasticDeviceInfo
 
 	candidates := findSerialCandidates()
 	for _, port := range candidates {
 		if err := validateSerialPort(port); err != nil {
+			continue
+		}
+
+		// B68: Skip GPS devices — they show up as ttyACM/ttyUSB but are not radios
+		if isExcludedFromRadioScan(port) {
+			log.Printf("meshtastic: scan skipping %s (GPS/excluded device)", port)
 			continue
 		}
 
