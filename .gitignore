@@ -14,3 +14,7 @@ Thumbs.db
 
 # Session artifacts
 *HANDOVER*.md
+
+# Runtime data (created by containers, not source-controlled)
+*/appdata/*
+!*/appdata/.gitkeep-readme
