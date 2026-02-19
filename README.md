@@ -1,118 +1,60 @@
 # CubeOS Core Apps
 
-System services for CubeOS - an open-source ARM64 server OS for Raspberry Pi.
+Docker service configurations for CubeOS — an open-source ARM64 server OS for Raspberry Pi.
 
-## Network Configuration
+## What This Repo Contains
+
+This repo holds **configuration only** — Docker Compose files and deployment scripts.
+Source code for CubeOS services lives in their own repositories:
+
+| Service | Source Repo | Image |
+|---------|------------|-------|
+| HAL | [cubeos/hal](../hal) | `ghcr.io/cubeos-app/hal` |
+| API | [cubeos/api](../api) | `ghcr.io/cubeos-app/api` |
+| Dashboard | [cubeos/dashboard](../dashboard) | `ghcr.io/cubeos-app/dashboard` |
+| Docsindex | [cubeos/docsindex](../docsindex) | `ghcr.io/cubeos-app/cubeos-docsindex` |
+
+## Network
 
 | Setting | Value |
 |---------|-------|
 | Subnet | 10.42.24.0/24 |
 | Gateway | 10.42.24.1 |
-| DHCP Range | 10.42.24.10 - 10.42.24.250 |
 | Domain | cubeos.cube |
+| DNS/DHCP | Pi-hole (port 6001) |
+| Reverse Proxy | NPM (ports 80/443) |
 
-## Port Allocation (Strict Scheme)
+## Services
 
-### Infrastructure (6000-6009)
-| Port | Service | Description |
-|------|---------|-------------|
-| 5000 | registry | Local Docker Registry |
-| 6000 | npm | Nginx Proxy Manager Admin |
-| 6001 | pihole | Pi-hole Admin |
+Each service has a directory with `appconfig/docker-compose.yml`.
 
-### Platform (6010-6019)
-| Port | Service | Description |
-|------|---------|-------------|
-| 6010 | cubeos-api | Backend API |
-| 6011 | cubeos-dashboard | Web Frontend |
-| 6012 | dozzle | Container Logs |
+### Compose Services (host networking)
+- **pihole** — DNS/DHCP server (port 6001)
+- **npm** — Nginx Proxy Manager (ports 80/443, admin 6000)
+- **cubeos-hal** — Hardware Abstraction Layer (port 6005, privileged)
+- **terminal** — Web terminal
 
-### Network (6020-6029)
-| Port | Service | Description |
-|------|---------|-------------|
-| 6020 | wireguard | WireGuard VPN |
-| 6021 | openvpn | OpenVPN Client |
-| 6022 | tor | Tor SOCKS Proxy |
-| 6023 | tor | Tor Control Port |
+### Swarm Stacks (overlay networking)
+- **cubeos-api** — Backend API (port 6010)
+- **cubeos-dashboard** — Web dashboard (port 6011)
+- **cubeos-docsindex** — Documentation indexer (port 6032)
+- **chromadb** — Vector database (port 6031)
+- **ollama** — LLM inference (port 6030)
+- **registry** — Local Docker registry (port 5000)
+- **filebrowser** — Web file manager (port 6013)
+- **dozzle** — Container log viewer (port 6012)
+- **kiwix** — Offline wiki (port 6043)
 
-### AI/ML (6030-6039)
-| Port | Service | Description |
-|------|---------|-------------|
-| 6030 | ollama | LLM Server |
-| 6031 | chromadb | Vector Database |
-| 6032 | docs-indexer | RAG Indexer |
+### VPN (OS-level, managed by HAL)
+WireGuard, OpenVPN, and Tor run at the OS level and are managed by the HAL
+service via `/hal/vpn/*` endpoints. They are NOT Docker services.
 
-### User Apps
-| Range | Description |
-|-------|-------------|
-| 6100-6999 | Dynamically allocated for user-installed apps |
-
-## Directory Structure
+## Port Allocation
 
 ```
-/cubeos/
-├── config/
-│   ├── defaults.env      # Shared configuration
-│   ├── secrets.env       # Generated secrets (not in git)
-│   └── vpn/
-│       ├── wireguard/
-│       └── openvpn/
-├── coreapps/             # System services
-│   ├── pihole/
-│   ├── npm/
-│   ├── registry/
-│   ├── cubeos-api/
-│   ├── cubeos-dashboard/
-│   └── ...
-├── apps/                 # User-installed apps
-├── data/
-│   ├── cubeos.db         # SQLite database
-│   └── registry/         # Registry storage
-└── mounts/               # SMB/NFS mount points
+6000-6009  Infrastructure (NPM: 6000, Pi-hole: 6001, HAL: 6005)
+6010-6019  Platform (API: 6010, Dashboard: 6011, Dozzle: 6012, FileBrowser: 6013)
+6020-6029  Network/VPN (WireGuard: 6020, OpenVPN: 6021, Tor: 6022) — OS-level
+6030-6039  AI/ML (Ollama: 6030, ChromaDB: 6031, Docsindex: 6032)
+6100-6999  User applications
 ```
-
-## Core Services
-
-### Infrastructure Layer
-- **pihole** - DNS + DHCP server (host network mode)
-- **npm** - Nginx Proxy Manager (host network mode)
-- **registry** - Local Docker registry for offline-first
-
-### Platform Layer
-- **cubeos-api** - Go backend API
-- **cubeos-dashboard** - Vue.js 3 frontend
-- **dozzle** - Container log viewer
-- **watchdog** - Health monitoring
-
-### Network Layer
-- **wireguard** - WireGuard VPN client
-- **openvpn** - OpenVPN client
-- **tor** - Tor privacy proxy
-
-### AI/ML Layer
-- **ollama** - Local LLM server
-- **chromadb** - Vector database for RAG
-- **docs-indexer** - Documentation indexer
-
-## Deployment
-
-```bash
-# Deploy all core apps
-sudo ./deploy-coreapps.sh
-
-# Verify
-docker ps --format 'table {{.Names}}\t{{.Ports}}' | grep cubeos
-```
-
-## CI/CD
-
-This repository uses GitLab CI/CD. On push to main:
-1. Validates all compose files
-2. Syncs configs to `/cubeos/coreapps/`
-3. Restarts changed services
-4. Verifies DNS (Pi-hole) health
-
-## License
-
-Apache 2.0
-# Trigger Swarm deployment zo  1 feb 2026  1:50:38 CET

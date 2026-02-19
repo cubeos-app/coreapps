@@ -22,7 +22,7 @@ services:
         target: /srv
       # Database and config
       - type: bind
-        source: /cubeos/coreapps/cubeos-filebrowser/appdata
+        source: /cubeos/coreapps/filebrowser/appdata
         target: /database
     environment:
       - FB_DATABASE=/database/filebrowser.db
