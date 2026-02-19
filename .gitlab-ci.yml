@@ -8,8 +8,9 @@
 #
 # What this pipeline does:
 #   1. Validates all docker-compose.yml files
-#   2. Syncs appconfig/ directories to Pi
-#   3. Restarts changed services (pulling latest images from GHCR)
+#   2. Detects changed apps via git diff (on GPU VM)
+#   3. Rsyncs configs to Pi over SSH
+#   4. Restarts changed services on Pi over SSH
 #
 stages:
   - validate
@@ -57,14 +58,22 @@ shellcheck:
     - if: $CI_COMMIT_BRANCH
   allow_failure: true
 
+# -----------------------------------------------------------------------------
+# DEPLOY — Detect changes, rsync to Pi, run post-sync logic (via SSH)
+# -----------------------------------------------------------------------------
 deploy:
-  tags:
-    - deploy
-    - arm64
   stage: deploy
+  tags: [multiarch]
+  image: alpine:latest
+  before_script:
+    - apk add --no-cache openssh-client rsync git
+    - eval $(ssh-agent -s)
+    - echo "$CI_DEPLOY_SSH_KEY" | tr -d '\r' | ssh-add -
+    - mkdir -p ~/.ssh && chmod 700 ~/.ssh
+    - ssh-keyscan -H ${PI_DEPLOY_ADDR} >> ~/.ssh/known_hosts 2>/dev/null
   script:
+    # --- Detect changed apps (locally on GPU VM, git checkout is here) ---
     - |
-      # Detect changed apps
       CHANGED_APPS=""
       if [ "$CI_COMMIT_BEFORE_SHA" != "0000000000000000000000000000000000000000" ]; then
         CHANGED_APPS=$(git diff --name-only "$CI_COMMIT_BEFORE_SHA" "$CI_COMMIT_SHA" 2>/dev/null \
@@ -75,13 +84,16 @@ deploy:
           | sed 's/ $//' || true)
       fi
 
-      # Fallback: if no changes detected, check for new apps
+      # Fallback: check for new apps by querying Pi
       if [ -z "$CHANGED_APPS" ]; then
         echo "No changes detected via git diff, checking for new apps..."
         for dir in */; do
           app="${dir%/}"
-          if [ -d "${dir}appconfig" ] && [ ! -d "/cubeos/coreapps/${app}" ]; then
-            CHANGED_APPS="$CHANGED_APPS $app"
+          if [ -d "${dir}appconfig" ]; then
+            EXISTS=$(ssh ${PI_DEPLOY_HOST} "test -d /cubeos/coreapps/${app} && echo yes || echo no")
+            if [ "$EXISTS" = "no" ]; then
+              CHANGED_APPS="$CHANGED_APPS $app"
+            fi
           fi
         done
         CHANGED_APPS=$(echo "$CHANGED_APPS" | xargs)
@@ -89,66 +101,30 @@ deploy:
 
       echo "Changed apps: ${CHANGED_APPS:-none}"
 
-      # Clean up apps deleted from git but still on Pi
-      for pidir in /cubeos/coreapps/*/; do
-        [ ! -d "$pidir" ] && continue
-        app=$(basename "$pidir")
-        case "$app" in scripts|watchdog) continue;; esac
-        if [ ! -d "${app}" ] && [ -d "${pidir}appconfig" ]; then
-          echo "Removing deleted app: $app"
-          (cd "${pidir}appconfig" 2>/dev/null && docker compose down --remove-orphans 2>/dev/null) || true
-          docker stack rm "$app" 2>/dev/null || true
-          sleep 3
-          rm -rf "$pidir"
-          echo "  Cleaned up $app"
-        fi
-      done
+    # --- Rsync entire repo to Pi staging area ---
+    - |
+      echo "Syncing configs to Pi..."
+      rsync -az --delete \
+        -e "ssh -o ServerAliveInterval=15" \
+        --exclude='.git' \
+        --exclude='.gitlab-ci.yml' \
+        --exclude='scripts/ci-deploy.sh' \
+        --exclude='scripts/ci-restart.sh' \
+        ./ ${PI_DEPLOY_HOST}:/tmp/coreapps-sync/
+      echo "  Rsync complete"
 
-      # Sync ALL configs (idempotent)
-      for dir in */; do
-        if [ -d "${dir}appconfig" ]; then
-          mkdir -p "/cubeos/coreapps/${dir}appconfig"
-          mkdir -p "/cubeos/coreapps/${dir}appdata"
-          rsync -a --delete "${dir}appconfig/" "/cubeos/coreapps/${dir}appconfig/"
-          if [ -d "${dir}appdata" ]; then
-            rsync -a "${dir}appdata/" "/cubeos/coreapps/${dir}appdata/"
-          fi
-        fi
-      done
+    # --- Run post-sync logic on Pi ---
+    - scp scripts/ci-deploy.sh ${PI_DEPLOY_HOST}:/tmp/ci-deploy-coreapps.sh
+    - |
+      ssh -o ServerAliveInterval=15 ${PI_DEPLOY_HOST} \
+        "bash /tmp/ci-deploy-coreapps.sh"
+    - ssh ${PI_DEPLOY_HOST} "rm -f /tmp/ci-deploy-coreapps.sh"
 
-      # Sync defaults.env
-      [ -f defaults.env ] && cp defaults.env /cubeos/coreapps/
-
-      # Ensure config directory structure
-      mkdir -p /cubeos/config/vpn/{wireguard,openvpn}
-      mkdir -p /cubeos/data/registry
-
-      # Copy defaults.env to config if not exists
-      if [ ! -f /cubeos/config/defaults.env ]; then
-        cp defaults.env /cubeos/config/defaults.env
-      fi
-
-      # Create empty secrets.env if not exists
-      if [ ! -f /cubeos/config/secrets.env ]; then
-        touch /cubeos/config/secrets.env
-        chmod 600 /cubeos/config/secrets.env
-      fi
-
-      # Sync scripts directory
-      if [ -d "scripts" ]; then
-        mkdir -p /cubeos/coreapps/scripts
-        rsync -a --delete scripts/ /cubeos/coreapps/scripts/
-        chmod +x /cubeos/coreapps/scripts/*.sh 2>/dev/null || true
-
-        if [ -f "/cubeos/coreapps/scripts/install-watchdog.sh" ]; then
-          echo "Installing watchdog systemd files..."
-          /cubeos/coreapps/scripts/install-watchdog.sh
-        fi
-      fi
-
-      # Write changed apps
-      echo "$CHANGED_APPS" > changed_apps.txt
-      echo "Synced to /cubeos/coreapps/"
+    # --- Write changed apps for restart stage ---
+    - echo "$CHANGED_APPS" > changed_apps.txt
+    - echo "Deploy stage complete"
+  after_script:
+    - kill $SSH_AGENT_PID 2>/dev/null || true
   artifacts:
     paths:
       - changed_apps.txt
@@ -158,19 +134,23 @@ deploy:
   environment:
     name: production
 
+# -----------------------------------------------------------------------------
+# RESTART — Restart changed services on Pi (via SSH)
+# -----------------------------------------------------------------------------
 restart-changed:
-  tags:
-    - deploy
-    - arm64
   stage: restart
+  tags: [multiarch]
+  image: alpine:latest
   needs:
     - deploy
   before_script:
-    - echo "$GHCR_TOKEN" | docker login ghcr.io -u "$GHCR_USER" --password-stdin
+    - apk add --no-cache openssh-client
+    - eval $(ssh-agent -s)
+    - echo "$CI_DEPLOY_SSH_KEY" | tr -d '\r' | ssh-add -
+    - mkdir -p ~/.ssh && chmod 700 ~/.ssh
+    - ssh-keyscan -H ${PI_DEPLOY_ADDR} >> ~/.ssh/known_hosts 2>/dev/null
   script:
     - |
-      set -e
-
       CHANGED_APPS=$(cat changed_apps.txt 2>/dev/null | xargs || true)
 
       if [ -z "$CHANGED_APPS" ]; then
@@ -179,194 +159,16 @@ restart-changed:
       fi
 
       echo "Apps to restart: $CHANGED_APPS"
-
-      # DNS Health Check
-      echo "Checking DNS resolution..."
-      DNS_OK=false
-      for attempt in 1 2 3; do
-        if getent hosts registry-1.docker.io >/dev/null 2>&1; then
-          DNS_OK=true
-          break
-        fi
-        echo "  DNS attempt $attempt failed, waiting..."
-        sleep 5
-      done
-
-      if [ "$DNS_OK" = "false" ]; then
-        echo "DNS resolution failed - is Pi-hole running?"
-        exit 1
-      fi
-      echo "  DNS OK"
-
-      # Ensure Swarm is initialized
-      if ! docker info 2>/dev/null | grep -q "Swarm: active"; then
-        echo "Initializing Docker Swarm..."
-        docker swarm init --advertise-addr 10.42.24.1 --task-history-limit 1 2>/dev/null || true
-      fi
-
-      # Ensure overlay network exists with SWARM scope
-      NETWORK_SCOPE=$(docker network inspect cubeos-network --format '{{.Scope}}' 2>/dev/null || echo "none")
-      if [ "$NETWORK_SCOPE" = "local" ]; then
-        echo "Removing local cubeos-network (wrong scope)..."
-        docker network rm cubeos-network 2>/dev/null || true
-        NETWORK_SCOPE="none"
-      fi
-      if [ "$NETWORK_SCOPE" = "none" ]; then
-        echo "Creating cubeos-network overlay (swarm scope)..."
-        docker network create --driver overlay --attachable --subnet 10.42.25.0/24 cubeos-network
-      fi
-
-      # Classify apps by deployment type
-      COMPOSE_APPS=""
-      STACK_APPS=""
-      HAS_PIHOLE=false
-
-      for app in $CHANGED_APPS; do
-        case "$app" in
-          pihole)
-            HAS_PIHOLE=true
-            ;;
-          npm|cubeos-hal|terminal)
-            COMPOSE_APPS="$COMPOSE_APPS $app"
-            ;;
-          registry|chromadb|cubeos-api|cubeos-dashboard|cubeos-docsindex|filebrowser|dozzle|kiwix|ollama)
-            STACK_APPS="$STACK_APPS $app"
-            ;;
-          *)
-            COMPOSE_APPS="$COMPOSE_APPS $app"
-            ;;
-        esac
-      done
-      COMPOSE_APPS=$(echo "$COMPOSE_APPS" | xargs)
-      STACK_APPS=$(echo "$STACK_APPS" | xargs)
-
-      echo "Compose apps: ${COMPOSE_APPS:-none}"
-      echo "Swarm stacks: ${STACK_APPS:-none}"
-      echo "Pi-hole: $HAS_PIHOLE"
-
-      # Deploy COMPOSE apps
-      for app in $COMPOSE_APPS; do
-        COMPOSE_FILE="/cubeos/coreapps/${app}/appconfig/docker-compose.yml"
-        if [ ! -f "$COMPOSE_FILE" ]; then
-          echo "Skipping $app (no docker-compose.yml)"
-          continue
-        fi
-
-        echo "-- $app (compose) --"
-        cd "/cubeos/coreapps/${app}/appconfig"
-
-        echo "  Stopping existing..."
-        docker rm -f "cubeos-${app}" 2>/dev/null || true
-        docker compose down 2>/dev/null || true
-
-        echo "  Pulling..."
-        timeout 120 docker compose pull 2>&1 || echo "  Pull failed, using cached..."
-
-        echo "  Starting..."
-        docker compose up -d --pull always
-
-        sleep 3
-        CONTAINER=$(docker compose ps -q 2>/dev/null | head -1)
-        if [ -n "$CONTAINER" ]; then
-          for i in $(seq 1 10); do
-            STATUS=$(docker inspect --format='{{.State.Status}}' "$CONTAINER" 2>/dev/null || echo "unknown")
-            if [ "$STATUS" = "running" ]; then
-              echo "  $app running"
-              break
-            fi
-            [ "$i" -eq 10 ] && echo "  $app status: $STATUS"
-            sleep 3
-          done
-        else
-          echo "  $app started"
-        fi
-      done
-
-      # Deploy SWARM stacks (images come from GHCR, built by their own repo CIs)
-      for app in $STACK_APPS; do
-        COMPOSE_FILE="/cubeos/coreapps/${app}/appconfig/docker-compose.yml"
-        if [ ! -f "$COMPOSE_FILE" ]; then
-          echo "Skipping $app (no docker-compose.yml)"
-          continue
-        fi
-
-        echo "-- $app (swarm) --"
-
-        echo "  Removing existing stack..."
-        docker stack rm "$app" 2>/dev/null || true
-        docker network rm "${app}_default" 2>/dev/null || true
-        sleep 3
-
-        echo "  Deploying stack..."
-        docker stack deploy \
-          -c "$COMPOSE_FILE" \
-          --resolve-image=never \
-          "$app"
-
-        sleep 5
-        for i in $(seq 1 12); do
-          REPLICAS=$(docker stack services "$app" --format "{{.Replicas}}" 2>/dev/null | head -1 || echo "0/0")
-          RUNNING=$(echo "$REPLICAS" | cut -d'/' -f1)
-          DESIRED=$(echo "$REPLICAS" | cut -d'/' -f2)
-          if [ "$RUNNING" = "$DESIRED" ] && [ "$RUNNING" != "0" ]; then
-            echo "  $app running ($REPLICAS)"
-            break
-          fi
-          [ "$i" -eq 12 ] && echo "  $app may still be starting ($REPLICAS)"
-          sleep 5
-        done
-      done
-
-      # Restart pihole LAST (if changed)
-      if [ "$HAS_PIHOLE" = "true" ]; then
-        echo ""
-        echo "-- pihole (compose - DNS will briefly drop) --"
-        cd "/cubeos/coreapps/pihole/appconfig"
-
-        echo "  Pulling (while Pi-hole still running)..."
-        timeout 120 docker compose pull 2>&1 || echo "  Pull failed, using cached image"
-
-        RESOLV_BAK=""
-        if [ -f /etc/resolv.conf ]; then
-          RESOLV_BAK=$(cat /etc/resolv.conf)
-        fi
-        echo "nameserver 1.1.1.1" > /etc/resolv.conf 2>/dev/null || true
-
-        echo "  Stopping existing..."
-        docker rm -f cubeos-pihole 2>/dev/null || true
-        docker compose down --remove-orphans 2>/dev/null || true
-
-        echo "  Starting (from pre-pulled image)..."
-        docker compose up -d --pull never
-
-        echo "  Waiting for Pi-hole DNS..."
-        for i in $(seq 1 30); do
-          if getent hosts google.com >/dev/null 2>&1; then
-            echo "  Pi-hole DNS responding"
-            break
-          fi
-          [ "$i" -eq 30 ] && echo "  Pi-hole may still be starting..."
-          sleep 2
-        done
-
-        if [ -n "$RESOLV_BAK" ]; then
-          echo "$RESOLV_BAK" > /etc/resolv.conf 2>/dev/null || true
-        fi
-      fi
-
-      # Final status
-      echo ""
-      echo "======================================="
-      echo "Final Status"
-      echo "======================================="
-      echo ""
-      echo "COMPOSE CONTAINERS:"
-      docker ps --format "table {{.Names}}\t{{.Status}}" 2>/dev/null | grep -E "cubeos-|NAME" || echo "  None"
-      echo ""
-      echo "SWARM STACKS:"
-      docker stack ls 2>/dev/null || echo "  None"
-      echo ""
-      echo "Restart complete"
+    - scp scripts/ci-restart.sh ${PI_DEPLOY_HOST}:/tmp/ci-restart-coreapps.sh
+    - |
+      ssh -o ServerAliveInterval=15 ${PI_DEPLOY_HOST} \
+        "GHCR_TOKEN='${GHCR_TOKEN}' \
+         GHCR_USER='${GHCR_USER}' \
+         CHANGED_APPS='$(cat changed_apps.txt | xargs)' \
+         bash /tmp/ci-restart-coreapps.sh"
+    - ssh ${PI_DEPLOY_HOST} "rm -f /tmp/ci-restart-coreapps.sh"
+  after_script:
+    - kill $SSH_AGENT_PID 2>/dev/null || true
   rules:
     - if: $CI_COMMIT_BRANCH == "main"
   environment:
