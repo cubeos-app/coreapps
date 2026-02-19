@@ -1,18 +1,18 @@
 # =============================================================================
-# CubeOS Coreapps Pipeline - Validate, Build, Deploy
+# CubeOS Coreapps Pipeline — Validate, Deploy, Restart
 # =============================================================================
-# 
-# Features:
-# - Automatic OpenAPI spec generation from swaggo annotations
-# - Multi-arch builds (ARM64 + AMD64)
-# - Swagger UI auto-updates on each deploy
-# - Buildable coreapps (cubeos-docsindex) built on Pi during deploy
-# - Deleted apps automatically cleaned up from Pi
+#
+# This pipeline manages Docker Compose and Swarm service CONFIGS only.
+# Source code for HAL and docsindex lives in their own repos with their
+# own CI pipelines that build and push images to GHCR.
+#
+# What this pipeline does:
+#   1. Validates all docker-compose.yml files
+#   2. Syncs appconfig/ directories to Pi
+#   3. Restarts changed services (pulling latest images from GHCR)
 #
 stages:
   - validate
-  - build
-  - package
   - deploy
   - restart
 
@@ -23,12 +23,6 @@ variables:
   # Service classification
   COMPOSE_SERVICES: "pihole npm cubeos-hal terminal"
   STACK_SERVICES: "registry cubeos-api cubeos-dashboard cubeos-docsindex cubeos-filebrowser dozzle kiwix"
-  # Buildable stacks: these have src/ directories and need local image build before deploy
-  BUILDABLE_STACKS: "cubeos-docsindex"
-  # HAL image
-  HAL_IMAGE: "ghcr.io/cubeos-app/hal"
-  DOCSINDEX_IMAGE: "ghcr.io/cubeos-app/cubeos-docsindex"
-  BUILDER_IMAGE: "ghcr.io/cubeos-app/api-builder:latest"
 
 validate-compose:
   stage: validate
@@ -41,14 +35,14 @@ validate-compose:
       mkdir -p /cubeos/config
       touch /cubeos/config/defaults.env
       touch /cubeos/config/secrets.env
-      
+
       for dir in */; do
         if [ -f "${dir}appconfig/docker-compose.yml" ]; then
           echo "Checking ${dir}..."
           docker compose -f "${dir}appconfig/docker-compose.yml" config -q || exit 1
         fi
       done
-      echo "✅ All compose files valid"
+      echo "All compose files valid"
   rules:
     - if: $CI_COMMIT_BRANCH
 
@@ -63,165 +57,6 @@ shellcheck:
     - if: $CI_COMMIT_BRANCH
   allow_failure: true
 
-# -----------------------------------------------------------------------------
-# BUILD HAL - Generate OpenAPI docs + Compile Go binary for both architectures
-# -----------------------------------------------------------------------------
-build-hal:
-  stage: build
-  tags: [multiarch]
-  image: ${BUILDER_IMAGE}
-  script:
-    - cp -r cubeos-hal/src/. /app/
-    - cd /app
-    - go mod download
-    
-    # ──────────────────────────────────────────────────────────
-    # Generate OpenAPI docs from swaggo annotations
-    # ──────────────────────────────────────────────────────────
-    - echo "📚 Installing swag CLI..."
-    - go install github.com/swaggo/swag/cmd/swag@latest
-    - export PATH=$PATH:$(go env GOPATH)/bin
-    
-    - echo "📚 Generating OpenAPI spec from annotations..."
-    - |
-      swag init \
-        -g cmd/cubeos-hal/main.go \
-        --output ./docs \
-        --parseDependency \
-        --parseInternal \
-        --parseDepth 2 \
-        || echo "⚠️ Swag init had warnings (may be OK)"
-    
-    # Copy generated spec to handlers directory (embedded in binary)
-    - |
-      if [ -f docs/swagger.yaml ]; then
-        cp docs/swagger.yaml internal/handlers/openapi.yaml
-        echo "✅ OpenAPI spec generated ($(wc -l < docs/swagger.yaml) lines)"
-      elif [ -f docs/swagger.json ]; then
-        echo "Converting swagger.json to yaml..."
-        python3 -c "import json,yaml; yaml.dump(json.load(open('docs/swagger.json')), open('internal/handlers/openapi.yaml','w'), default_flow_style=False)" 2>/dev/null \
-          || cp docs/swagger.json internal/handlers/openapi.yaml
-        echo "✅ OpenAPI spec generated from JSON"
-      else
-        echo "⚠️ No swagger spec generated, using existing openapi.yaml"
-      fi
-    
-    # ──────────────────────────────────────────────────────────
-    # Build binaries for both architectures
-    # ──────────────────────────────────────────────────────────
-    - echo "🔨 Building ARM64 binary..."
-    - GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -ldflags="-s -w" -o cubeos-hal-arm64 ./cmd/cubeos-hal/
-    
-    - echo "🔨 Building AMD64 binary..."
-    - GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -ldflags="-s -w" -o cubeos-hal-amd64 ./cmd/cubeos-hal/
-    
-    # ──────────────────────────────────────────────────────────
-    # Copy artifacts to project dir
-    # ──────────────────────────────────────────────────────────
-    - cp cubeos-hal-arm64 cubeos-hal-amd64 ${CI_PROJECT_DIR}/
-    - cp internal/handlers/openapi.yaml ${CI_PROJECT_DIR}/openapi.yaml
-    
-    # IMPORTANT: Also update the source tree so package-hal gets the new spec
-    - cp internal/handlers/openapi.yaml ${CI_PROJECT_DIR}/cubeos-hal/src/internal/handlers/openapi.yaml
-    
-    - ls -lh ${CI_PROJECT_DIR}/cubeos-hal-* ${CI_PROJECT_DIR}/openapi.yaml
-    - echo "✅ Build complete"
-  artifacts:
-    paths:
-      - cubeos-hal-arm64
-      - cubeos-hal-amd64
-      - openapi.yaml
-      - cubeos-hal/src/internal/handlers/openapi.yaml
-    expire_in: 1 week
-  rules:
-    - if: $CI_COMMIT_BRANCH == "main"
-      changes:
-        - cubeos-hal/**/*
-
-# -----------------------------------------------------------------------------
-# PACKAGE HAL - Build multi-arch Docker image and push to ghcr.io
-# -----------------------------------------------------------------------------
-package-hal:
-  stage: package
-  tags: [multiarch]
-  image: docker:24
-  needs:
-    - job: build-hal
-      artifacts: true
-  before_script:
-    - echo "$GHCR_TOKEN" | docker login ghcr.io -u "$GHCR_USER" --password-stdin
-    - docker buildx create --name halbuilder --driver docker-container --use
-    - docker buildx inspect --bootstrap
-  script:
-    - |
-      # ──────────────────────────────────────────────────────────
-      # Verify generated OpenAPI spec is present
-      # ──────────────────────────────────────────────────────────
-      if [ -f "openapi.yaml" ]; then
-        echo "📄 Found generated OpenAPI spec ($(wc -l < openapi.yaml) lines)"
-        # Copy to Docker build context
-        cp openapi.yaml cubeos-hal/src/internal/handlers/openapi.yaml
-        echo "✅ Copied OpenAPI spec to Docker build context"
-      else
-        echo "⚠️ No generated openapi.yaml found, using existing"
-      fi
-      
-      # Show what we're building with
-      echo "📄 OpenAPI spec in build context:"
-      head -20 cubeos-hal/src/internal/handlers/openapi.yaml
-      echo "..."
-      wc -l cubeos-hal/src/internal/handlers/openapi.yaml
-      
-      # ──────────────────────────────────────────────────────────
-      # Build and push multi-arch image
-      # ──────────────────────────────────────────────────────────
-      cd cubeos-hal/src
-      docker buildx build --no-cache \
-        --platform linux/amd64,linux/arm64 \
-        --push \
-        -t ${HAL_IMAGE}:${CI_COMMIT_SHORT_SHA} \
-        -t ${HAL_IMAGE}:latest \
-        .
-    - echo "✅ Pushed multi-arch ${HAL_IMAGE}:${CI_COMMIT_SHORT_SHA}"
-  after_script:
-    - docker buildx rm halbuilder || true
-  rules:
-    - if: $CI_COMMIT_BRANCH == "main"
-      changes:
-        - cubeos-hal/**/*
-
-# -----------------------------------------------------------------------------
-# PACKAGE DOCSINDEX - Build multi-arch Docker image and push to ghcr.io
-# -----------------------------------------------------------------------------
-# Simpler than HAL — no OpenAPI generation, Dockerfile has multi-stage build.
-# This makes the image available in GHCR for the releases pipeline (skopeo).
-# -----------------------------------------------------------------------------
-package-docsindex:
-  stage: package
-  tags: [multiarch]
-  image: docker:24
-  before_script:
-    - echo "$GHCR_TOKEN" | docker login ghcr.io -u "$GHCR_USER" --password-stdin
-    - docker buildx create --name docsindexbuilder --driver docker-container --use
-    - docker buildx inspect --bootstrap
-  script:
-    - |
-      cd cubeos-docsindex/src
-      echo "🔨 Building multi-arch docsindex image..."
-      docker buildx build --no-cache \
-        --platform linux/amd64,linux/arm64 \
-        --push \
-        -t ${DOCSINDEX_IMAGE}:${CI_COMMIT_SHORT_SHA} \
-        -t ${DOCSINDEX_IMAGE}:latest \
-        .
-      echo "✅ Pushed multi-arch ${DOCSINDEX_IMAGE}:${CI_COMMIT_SHORT_SHA}"
-  after_script:
-    - docker buildx rm docsindexbuilder || true
-  rules:
-    - if: $CI_COMMIT_BRANCH == "main"
-      changes:
-        - cubeos-docsindex/**/*
-
 deploy:
   tags:
     - deploy
@@ -233,16 +68,16 @@ deploy:
       CHANGED_APPS=""
       if [ "$CI_COMMIT_BEFORE_SHA" != "0000000000000000000000000000000000000000" ]; then
         CHANGED_APPS=$(git diff --name-only "$CI_COMMIT_BEFORE_SHA" "$CI_COMMIT_SHA" 2>/dev/null \
-          | grep -E '^[^/]+/(appconfig|src)/' \
+          | grep -E '^[^/]+/(appconfig|appdata)/' \
           | cut -d'/' -f1 \
           | sort -u \
           | tr '\n' ' ' \
           | sed 's/ $//' || true)
       fi
-      
-      # Fallback: if no changes detected but this is a new commit, check all dirs
+
+      # Fallback: if no changes detected, check for new apps
       if [ -z "$CHANGED_APPS" ]; then
-        echo "⚠️  No changes detected via git diff, checking for new apps..."
+        echo "No changes detected via git diff, checking for new apps..."
         for dir in */; do
           app="${dir%/}"
           if [ -d "${dir}appconfig" ] && [ ! -d "/cubeos/coreapps/${app}" ]; then
@@ -251,108 +86,69 @@ deploy:
         done
         CHANGED_APPS=$(echo "$CHANGED_APPS" | xargs)
       fi
-      
-      echo "📦 Changed apps: ${CHANGED_APPS:-none}"
-      
-      # ──────────────────────────────────────────────────────────
+
+      echo "Changed apps: ${CHANGED_APPS:-none}"
+
       # Clean up apps deleted from git but still on Pi
-      # ──────────────────────────────────────────────────────────
-      DELETED_APPS=""
       for pidir in /cubeos/coreapps/*/; do
         [ ! -d "$pidir" ] && continue
         app=$(basename "$pidir")
-        # Skip non-app directories
         case "$app" in scripts|watchdog) continue;; esac
-        # If dir exists on Pi but not in git, it was deleted
         if [ ! -d "${app}" ] && [ -d "${pidir}appconfig" ]; then
-          DELETED_APPS="$DELETED_APPS $app"
-          echo "🗑️  Removing deleted app: $app"
-          # Stop compose container if running
+          echo "Removing deleted app: $app"
           (cd "${pidir}appconfig" 2>/dev/null && docker compose down --remove-orphans 2>/dev/null) || true
-          # Remove swarm stack if exists
           docker stack rm "$app" 2>/dev/null || true
-          # Wait for stack removal
           sleep 3
-          # Remove directory
           rm -rf "$pidir"
-          echo "  ✅ Cleaned up $app"
+          echo "  Cleaned up $app"
         fi
       done
-      [ -n "$DELETED_APPS" ] && echo "🗑️  Deleted apps:$DELETED_APPS" || echo "🗑️  No deleted apps"
-      
-      # Filter deleted apps out of CHANGED_APPS (they no longer exist)
-      if [ -n "$DELETED_APPS" ]; then
-        FILTERED=""
-        for app in $CHANGED_APPS; do
-          STILL_EXISTS=true
-          for del in $DELETED_APPS; do
-            [ "$app" = "$del" ] && STILL_EXISTS=false && break
-          done
-          [ "$STILL_EXISTS" = "true" ] && FILTERED="$FILTERED $app"
-        done
-        CHANGED_APPS=$(echo "$FILTERED" | xargs)
-        echo "📦 Changed apps (after cleanup): ${CHANGED_APPS:-none}"
-      fi
-      
-      # Sync ALL configs and source (idempotent)
+
+      # Sync ALL configs (idempotent)
       for dir in */; do
         if [ -d "${dir}appconfig" ]; then
           mkdir -p "/cubeos/coreapps/${dir}appconfig"
           mkdir -p "/cubeos/coreapps/${dir}appdata"
           rsync -a --delete "${dir}appconfig/" "/cubeos/coreapps/${dir}appconfig/"
-          
-          # Also sync src/ if it exists (for buildable apps)
-          if [ -d "${dir}src" ]; then
-            mkdir -p "/cubeos/coreapps/${dir}src"
-            rsync -a --delete "${dir}src/" "/cubeos/coreapps/${dir}src/"
-          fi
-          
-          # Sync appdata if it exists (for DNS configs, etc)
           if [ -d "${dir}appdata" ]; then
             rsync -a "${dir}appdata/" "/cubeos/coreapps/${dir}appdata/"
           fi
         fi
       done
-      
+
       # Sync defaults.env
       [ -f defaults.env ] && cp defaults.env /cubeos/coreapps/
-      
+
       # Ensure config directory structure
       mkdir -p /cubeos/config/vpn/{wireguard,openvpn}
       mkdir -p /cubeos/data/registry
-      
+
       # Copy defaults.env to config if not exists
       if [ ! -f /cubeos/config/defaults.env ]; then
         cp defaults.env /cubeos/config/defaults.env
       fi
-      
+
       # Create empty secrets.env if not exists
       if [ ! -f /cubeos/config/secrets.env ]; then
         touch /cubeos/config/secrets.env
         chmod 600 /cubeos/config/secrets.env
       fi
-      
+
       # Sync scripts directory
       if [ -d "scripts" ]; then
         mkdir -p /cubeos/coreapps/scripts
         rsync -a --delete scripts/ /cubeos/coreapps/scripts/
         chmod +x /cubeos/coreapps/scripts/*.sh 2>/dev/null || true
-        
-        # Install watchdog systemd files if install script exists
+
         if [ -f "/cubeos/coreapps/scripts/install-watchdog.sh" ]; then
-          echo "📦 Installing watchdog systemd files..."
+          echo "Installing watchdog systemd files..."
           /cubeos/coreapps/scripts/install-watchdog.sh
         fi
       fi
-      
-      # Sync root-level scripts
-      for f in *.sh; do
-        [ -f "$f" ] && cp "$f" /cubeos/coreapps/ && chmod +x /cubeos/coreapps/"$f"
-      done
-      
-      # Write changed apps (space-separated)
+
+      # Write changed apps
       echo "$CHANGED_APPS" > changed_apps.txt
-      echo "✅ Synced to /cubeos/coreapps/"
+      echo "Synced to /cubeos/coreapps/"
   artifacts:
     paths:
       - changed_apps.txt
@@ -369,29 +165,23 @@ restart-changed:
   stage: restart
   needs:
     - deploy
-    - job: package-hal
-      optional: true
-    - job: package-docsindex
-      optional: true
   before_script:
     - echo "$GHCR_TOKEN" | docker login ghcr.io -u "$GHCR_USER" --password-stdin
   script:
     - |
       set -e
-      
+
       CHANGED_APPS=$(cat changed_apps.txt 2>/dev/null | xargs || true)
-      
+
       if [ -z "$CHANGED_APPS" ]; then
-        echo "✅ No app changes detected, skipping restart"
+        echo "No app changes detected, skipping restart"
         exit 0
       fi
-      
-      echo "🔄 Apps to restart: $CHANGED_APPS"
-      
-      # ──────────────────────────────────────────────────────────
-      # DNS Health Check - ensure we can resolve Docker Hub
-      # ──────────────────────────────────────────────────────────
-      echo "🌐 Checking DNS resolution..."
+
+      echo "Apps to restart: $CHANGED_APPS"
+
+      # DNS Health Check
+      echo "Checking DNS resolution..."
       DNS_OK=false
       for attempt in 1 2 3; do
         if getent hosts registry-1.docker.io >/dev/null 2>&1; then
@@ -401,41 +191,36 @@ restart-changed:
         echo "  DNS attempt $attempt failed, waiting..."
         sleep 5
       done
-      
+
       if [ "$DNS_OK" = "false" ]; then
-        echo "❌ DNS resolution failed - is Pi-hole running?"
-        echo "   Run: cd /cubeos/coreapps/pihole/appconfig && docker compose up -d"
+        echo "DNS resolution failed - is Pi-hole running?"
         exit 1
       fi
-      echo "  ✅ DNS OK"
-      
-      # ──────────────────────────────────────────────────────────
+      echo "  DNS OK"
+
       # Ensure Swarm is initialized
-      # ──────────────────────────────────────────────────────────
       if ! docker info 2>/dev/null | grep -q "Swarm: active"; then
-        echo "🐝 Initializing Docker Swarm..."
+        echo "Initializing Docker Swarm..."
         docker swarm init --advertise-addr 10.42.24.1 --task-history-limit 1 2>/dev/null || true
       fi
-      
-      # Ensure overlay network exists with SWARM scope (not local)
+
+      # Ensure overlay network exists with SWARM scope
       NETWORK_SCOPE=$(docker network inspect cubeos-network --format '{{.Scope}}' 2>/dev/null || echo "none")
       if [ "$NETWORK_SCOPE" = "local" ]; then
-        echo "🌐 Removing local cubeos-network (wrong scope)..."
+        echo "Removing local cubeos-network (wrong scope)..."
         docker network rm cubeos-network 2>/dev/null || true
         NETWORK_SCOPE="none"
       fi
       if [ "$NETWORK_SCOPE" = "none" ]; then
-        echo "🌐 Creating cubeos-network overlay (swarm scope)..."
+        echo "Creating cubeos-network overlay (swarm scope)..."
         docker network create --driver overlay --attachable --subnet 10.42.25.0/24 cubeos-network
       fi
-      
-      # ──────────────────────────────────────────────────────────
+
       # Classify apps by deployment type
-      # ──────────────────────────────────────────────────────────
       COMPOSE_APPS=""
       STACK_APPS=""
       HAS_PIHOLE=false
-      
+
       for app in $CHANGED_APPS; do
         case "$app" in
           pihole)
@@ -448,178 +233,132 @@ restart-changed:
             STACK_APPS="$STACK_APPS $app"
             ;;
           *)
-            # Unknown apps - try compose first
             COMPOSE_APPS="$COMPOSE_APPS $app"
             ;;
         esac
       done
       COMPOSE_APPS=$(echo "$COMPOSE_APPS" | xargs)
       STACK_APPS=$(echo "$STACK_APPS" | xargs)
-      
-      echo "📦 Compose apps: ${COMPOSE_APPS:-none}"
-      echo "🐝 Swarm stacks: ${STACK_APPS:-none}"
-      echo "🔌 Pi-hole: $HAS_PIHOLE"
-      
-      # ──────────────────────────────────────────────────────────
-      # Deploy COMPOSE apps (npm, cubeos-hal, and unknown apps)
-      # ──────────────────────────────────────────────────────────
+
+      echo "Compose apps: ${COMPOSE_APPS:-none}"
+      echo "Swarm stacks: ${STACK_APPS:-none}"
+      echo "Pi-hole: $HAS_PIHOLE"
+
+      # Deploy COMPOSE apps
       for app in $COMPOSE_APPS; do
         COMPOSE_FILE="/cubeos/coreapps/${app}/appconfig/docker-compose.yml"
         if [ ! -f "$COMPOSE_FILE" ]; then
-          echo "⚠️  Skipping $app (no docker-compose.yml)"
+          echo "Skipping $app (no docker-compose.yml)"
           continue
         fi
-        
-        echo "── $app (compose) ──"
+
+        echo "-- $app (compose) --"
         cd "/cubeos/coreapps/${app}/appconfig"
-        
-        echo "  🛑 Stopping existing..."
+
+        echo "  Stopping existing..."
         docker rm -f "cubeos-${app}" 2>/dev/null || true
         docker compose down 2>/dev/null || true
-        
-        # Pull latest image (HAL image was just pushed by package-hal)
-        echo "  📥 Pulling..."
-        timeout 120 docker compose pull 2>&1 || echo "  ⚠️  Pull failed, using cached..."
-        
-        echo "  🚀 Starting..."
+
+        echo "  Pulling..."
+        timeout 120 docker compose pull 2>&1 || echo "  Pull failed, using cached..."
+
+        echo "  Starting..."
         docker compose up -d --pull always
-        
-        # Health check
+
         sleep 3
         CONTAINER=$(docker compose ps -q 2>/dev/null | head -1)
         if [ -n "$CONTAINER" ]; then
           for i in $(seq 1 10); do
             STATUS=$(docker inspect --format='{{.State.Status}}' "$CONTAINER" 2>/dev/null || echo "unknown")
             if [ "$STATUS" = "running" ]; then
-              echo "  ✅ $app running"
+              echo "  $app running"
               break
             fi
-            [ "$i" -eq 10 ] && echo "  ⚠️  $app status: $STATUS"
+            [ "$i" -eq 10 ] && echo "  $app status: $STATUS"
             sleep 3
           done
         else
-          echo "  ✅ $app started"
+          echo "  $app started"
         fi
       done
-      
-      # ──────────────────────────────────────────────────────────
-      # Deploy SWARM stacks (with local build for buildable apps)
-      # ──────────────────────────────────────────────────────────
+
+      # Deploy SWARM stacks (images come from GHCR, built by their own repo CIs)
       for app in $STACK_APPS; do
         COMPOSE_FILE="/cubeos/coreapps/${app}/appconfig/docker-compose.yml"
         if [ ! -f "$COMPOSE_FILE" ]; then
-          echo "⚠️  Skipping $app (no docker-compose.yml)"
+          echo "Skipping $app (no docker-compose.yml)"
           continue
         fi
-        
-        echo "── $app (swarm) ──"
-        
-        # ── Build local image if this is a buildable app ──
-        SRC_DIR="/cubeos/coreapps/${app}/src"
-        if [ -d "$SRC_DIR" ] && [ -f "$SRC_DIR/Dockerfile" ]; then
-          echo "  🔨 Building local image..."
-          LOCAL_IMAGE="${app}:${CI_COMMIT_SHORT_SHA}"
-          LOCAL_IMAGE_LATEST="${app}:latest"
-          
-          docker build -t "$LOCAL_IMAGE" -t "$LOCAL_IMAGE_LATEST" "$SRC_DIR"
-          
-          # Also tag as the GHCR name so compose image: reference resolves locally
-          GHCR_IMAGE=$(grep -oP 'image:\s*\K\S+' "$COMPOSE_FILE" | head -1)
-          if [ -n "$GHCR_IMAGE" ]; then
-            docker tag "$LOCAL_IMAGE" "$GHCR_IMAGE"
-            echo "  ✅ Built and tagged: $LOCAL_IMAGE -> $GHCR_IMAGE"
-          else
-            echo "  ✅ Built: $LOCAL_IMAGE"
-          fi
-        fi
-        
-        # Remove existing stack and stale networks
-        echo "  🛑 Removing existing stack..."
+
+        echo "-- $app (swarm) --"
+
+        echo "  Removing existing stack..."
         docker stack rm "$app" 2>/dev/null || true
         docker network rm "${app}_default" 2>/dev/null || true
-        
-        # Wait for cleanup
         sleep 3
-        
-        # Deploy stack with ARM64 workaround
-        echo "  🚀 Deploying stack..."
+
+        echo "  Deploying stack..."
         docker stack deploy \
           -c "$COMPOSE_FILE" \
           --resolve-image=never \
           "$app"
-        
-        # Wait and check replicas
+
         sleep 5
-        REPLICAS=$(docker stack services "$app" --format "{{.Replicas}}" 2>/dev/null | head -1 || echo "0/0")
-        echo "  📊 Replicas: $REPLICAS"
-        
-        # Wait for service to be ready
         for i in $(seq 1 12); do
           REPLICAS=$(docker stack services "$app" --format "{{.Replicas}}" 2>/dev/null | head -1 || echo "0/0")
-          if echo "$REPLICAS" | grep -qE "^1/1$|^[0-9]+/[0-9]+$" && [ "$REPLICAS" != "0/1" ]; then
-            RUNNING=$(echo "$REPLICAS" | cut -d'/' -f1)
-            DESIRED=$(echo "$REPLICAS" | cut -d'/' -f2)
-            if [ "$RUNNING" = "$DESIRED" ] && [ "$RUNNING" != "0" ]; then
-              echo "  ✅ $app running ($REPLICAS)"
-              break
-            fi
+          RUNNING=$(echo "$REPLICAS" | cut -d'/' -f1)
+          DESIRED=$(echo "$REPLICAS" | cut -d'/' -f2)
+          if [ "$RUNNING" = "$DESIRED" ] && [ "$RUNNING" != "0" ]; then
+            echo "  $app running ($REPLICAS)"
+            break
           fi
-          [ "$i" -eq 12 ] && echo "  ⚠️  $app may still be starting ($REPLICAS)"
+          [ "$i" -eq 12 ] && echo "  $app may still be starting ($REPLICAS)"
           sleep 5
         done
       done
-      
-      # ──────────────────────────────────────────────────────────
-      # Restart pihole LAST (if changed) - DNS will briefly drop
-      # ──────────────────────────────────────────────────────────
+
+      # Restart pihole LAST (if changed)
       if [ "$HAS_PIHOLE" = "true" ]; then
         echo ""
-        echo "── pihole (compose - DNS will briefly drop) ──"
+        echo "-- pihole (compose - DNS will briefly drop) --"
         cd "/cubeos/coreapps/pihole/appconfig"
-        
-        # Pull BEFORE stopping — Pi-hole IS our DNS server, so we need it
-        # running to resolve registry-1.docker.io for the pull.
-        echo "  📥 Pulling (while Pi-hole still running)..."
-        timeout 120 docker compose pull 2>&1 || echo "  ⚠️  Pull failed, using cached image"
-        
-        # Set temporary fallback DNS so the runner doesn't lose resolution
-        # while Pi-hole is down (needed for any post-start checks).
+
+        echo "  Pulling (while Pi-hole still running)..."
+        timeout 120 docker compose pull 2>&1 || echo "  Pull failed, using cached image"
+
         RESOLV_BAK=""
         if [ -f /etc/resolv.conf ]; then
           RESOLV_BAK=$(cat /etc/resolv.conf)
         fi
         echo "nameserver 1.1.1.1" > /etc/resolv.conf 2>/dev/null || true
-        
-        echo "  🛑 Stopping existing..."
+
+        echo "  Stopping existing..."
         docker rm -f cubeos-pihole 2>/dev/null || true
         docker compose down --remove-orphans 2>/dev/null || true
-        
-        echo "  🚀 Starting (from pre-pulled image)..."
+
+        echo "  Starting (from pre-pulled image)..."
         docker compose up -d --pull never
-        
+
         echo "  Waiting for Pi-hole DNS..."
         for i in $(seq 1 30); do
           if getent hosts google.com >/dev/null 2>&1; then
-            echo "  ✅ Pi-hole DNS responding"
+            echo "  Pi-hole DNS responding"
             break
           fi
-          [ "$i" -eq 30 ] && echo "  ⚠️  Pi-hole may still be starting..."
+          [ "$i" -eq 30 ] && echo "  Pi-hole may still be starting..."
           sleep 2
         done
-        
-        # Restore original resolv.conf (Pi-hole should be handling DNS again)
+
         if [ -n "$RESOLV_BAK" ]; then
           echo "$RESOLV_BAK" > /etc/resolv.conf 2>/dev/null || true
         fi
       fi
-      
-      # ──────────────────────────────────────────────────────────
+
       # Final status
-      # ──────────────────────────────────────────────────────────
       echo ""
-      echo "═══════════════════════════════════════════════════════════════"
-      echo "📊 Final Status"
-      echo "═══════════════════════════════════════════════════════════════"
+      echo "======================================="
+      echo "Final Status"
+      echo "======================================="
       echo ""
       echo "COMPOSE CONTAINERS:"
       docker ps --format "table {{.Names}}\t{{.Status}}" 2>/dev/null | grep -E "cubeos-|NAME" || echo "  None"
@@ -627,9 +366,7 @@ restart-changed:
       echo "SWARM STACKS:"
       docker stack ls 2>/dev/null || echo "  None"
       echo ""
-      echo "📚 Swagger UI: http://cubeos.cube:6005/hal/docs"
-      echo "📄 OpenAPI Spec: http://cubeos.cube:6005/hal/docs/openapi.yaml"
-      echo "✅ Restart complete"
+      echo "Restart complete"
   rules:
     - if: $CI_COMMIT_BRANCH == "main"
   environment:

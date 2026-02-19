@@ -1,4 +1,16 @@
-**/appdata/
-*.log
-*.pid
+# Compiled binaries
+cubeos-hal
+cubeos-docsindex
+*.exe
+
+# OS
 .DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# Session artifacts
+*HANDOVER*.md
