@@ -17,7 +17,7 @@ services:
       - /:/host
     environment:
       - TZ=${TZ:-UTC}
-    command: ttyd -p 6042 -W -t fontSize=14 -t theme={"background":"#1a1b26"} bash
+    command: ttyd -p 6042 -W -t fontSize=14 -t theme={"background":"#1a1b26"} nsenter -t 1 -m -u -i -n -p -- bash -l
     privileged: true
     pid: host
     network_mode: host
