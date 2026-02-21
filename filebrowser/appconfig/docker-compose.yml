@@ -36,7 +36,7 @@ services:
     networks:
       - cubeos-network
     healthcheck:
-      test: ["CMD", "wget", "-q", "--spider", "http://localhost:6013/health"]
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:6013/"]
       interval: 30s
       timeout: 5s
       retries: 3
