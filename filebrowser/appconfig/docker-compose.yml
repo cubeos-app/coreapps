@@ -1,10 +1,10 @@
-# CubeOS FileBrowser - Swarm Stack
-# Web-based file manager for /cubeos/mounts
-version: "3.8"
-
+# CubeOS File Manager (Dufs) - Swarm Stack
+# Web-based file manager with HTTP Basic Auth
+# Password synced by CubeOS API via compose update + stack redeploy
 services:
   filebrowser:
-    image: filebrowser/filebrowser:s6
+    image: sigoden/dufs:latest
+    command: /data --port 6013 --auth "admin:cubeos@/:rw" --allow-all
     deploy:
       replicas: 1
       restart_policy:
@@ -16,31 +16,18 @@ services:
         - "cubeos.port=6013"
         - "cubeos.description=Web File Manager"
     volumes:
-      # All mount points (USB, NVMe, SMB, NFS)
       - type: bind
-        source: /cubeos/mounts
-        target: /srv
-      # Database and config
-      - type: bind
-        source: /cubeos/coreapps/filebrowser/appdata
-        target: /database
-    environment:
-      - FB_DATABASE=/database/filebrowser.db
-      - FB_ROOT=/srv
-      - FB_PORT=6013
-      - FB_BASEURL=/
-      - FB_LOG=stdout
-      - FB_NOAUTH=false
+        source: /
+        target: /data
     ports:
       - "6013:6013"
     networks:
       - cubeos-network
     healthcheck:
-      test: ["CMD", "wget", "-q", "--spider", "http://localhost:6013/"]
+      test: ["CMD", "sh", "-c", "wget -q --spider http://localhost:6013/ || [ $? -eq 6 ]"]
       interval: 30s
       timeout: 5s
       retries: 3
-
 networks:
   cubeos-network:
     external: true
