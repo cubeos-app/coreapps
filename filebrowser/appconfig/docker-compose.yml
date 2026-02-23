@@ -3,7 +3,7 @@
 # Password synced by CubeOS API via compose update + stack redeploy
 services:
   filebrowser:
-    image: sigoden/dufs:latest
+    image: localhost:5000/sigoden/dufs:${DUFS_TAG:-latest}
     command: /data --port 6013 --auth "admin:cubeos@/:rw" --allow-all
     deploy:
       replicas: 1

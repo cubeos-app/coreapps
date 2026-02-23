@@ -9,7 +9,7 @@
 
 services:
   chromadb:
-    image: chromadb/chroma:latest
+    image: localhost:5000/chromadb/chroma:${CHROMADB_TAG:-latest}
     hostname: cubeos-chromadb
     ports:
       - target: 8000
