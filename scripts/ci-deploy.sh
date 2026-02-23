@@ -50,8 +50,9 @@ for dir in */; do
   fi
 done
 
-# --- Sync defaults.env ---
+# --- Sync defaults.env and image-versions.env ---
 [ -f defaults.env ] && cp defaults.env /cubeos/coreapps/
+[ -f image-versions.env ] && cp image-versions.env /cubeos/coreapps/
 
 # --- Ensure config directory structure ---
 mkdir -p /cubeos/config/vpn/{wireguard,openvpn}

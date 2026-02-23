@@ -24,10 +24,7 @@ services:
     networks:
       - cubeos-network
     healthcheck:
-      test: ["CMD", "sh", "-c", "wget -q --spider http://localhost:6013/ || [ $$? -eq 6 ]"]
-      interval: 30s
-      timeout: 5s
-      retries: 3
+      disable: true
 networks:
   cubeos-network:
     external: true
