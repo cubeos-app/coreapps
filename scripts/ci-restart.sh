@@ -3,6 +3,10 @@
 # CubeOS Coreapps — Pi-side restart script (executed via SSH from GPU VM)
 # =============================================================================
 # Usage: GHCR_TOKEN=... GHCR_USER=... CHANGED_APPS="app1 app2" bash /tmp/ci-restart-coreapps.sh
+#
+# Registry-first: compose files reference localhost:5000/ images.
+# Per-repo CI (api, hal, dashboard, docsindex) handles pull+retag+push.
+# This script only restarts services from cached images — no pulling.
 # =============================================================================
 set -e
 
@@ -97,11 +101,10 @@ for app in $COMPOSE_APPS; do
   docker rm -f "cubeos-${app}" 2>/dev/null || true
   docker compose down 2>/dev/null || true
 
-  echo "  Pulling..."
-  timeout 120 docker compose pull 2>&1 || echo "  Pull failed, using cached..."
+  echo "  Using cached image (registry-first)..."
 
   echo "  Starting..."
-  docker compose up -d --pull always
+  DOCKER_DEFAULT_PLATFORM=linux/arm64 docker compose up -d --pull never
 
   sleep 3
   CONTAINER=$(docker compose ps -q 2>/dev/null | head -1)
@@ -161,8 +164,7 @@ if [ "$HAS_PIHOLE" = "true" ]; then
   echo "-- pihole (compose - DNS will briefly drop) --"
   cd "/cubeos/coreapps/pihole/appconfig"
 
-  echo "  Pulling (while Pi-hole still running)..."
-  timeout 120 docker compose pull 2>&1 || echo "  Pull failed, using cached image"
+  echo "  Using cached image (registry-first)..."
 
   RESOLV_BAK=""
   if [ -f /etc/resolv.conf ]; then
@@ -177,8 +179,8 @@ if [ "$HAS_PIHOLE" = "true" ]; then
   docker rm -f cubeos-pihole 2>/dev/null || true
   docker compose down --remove-orphans 2>/dev/null || true
 
-  echo "  Starting (from pre-pulled image)..."
-  docker compose up -d --pull never
+  echo "  Starting (from cached image)..."
+  DOCKER_DEFAULT_PLATFORM=linux/arm64 docker compose up -d --pull never
 
   echo "  Waiting for Pi-hole DNS..."
   for i in $(seq 1 30); do
