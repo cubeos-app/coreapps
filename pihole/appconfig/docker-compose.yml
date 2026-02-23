@@ -7,7 +7,7 @@
 name: cubeos-pihole
 services:
   pihole:
-    image: pihole/pihole:latest
+    image: localhost:5000/pihole/pihole:${PIHOLE_TAG:-latest}
     container_name: cubeos-pihole
     hostname: cubeos-pihole
     restart: unless-stopped

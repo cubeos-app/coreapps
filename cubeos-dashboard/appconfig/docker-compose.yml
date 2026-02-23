@@ -9,7 +9,7 @@
 
 services:
   cubeos-dashboard:
-    image: ghcr.io/cubeos-app/dashboard:latest
+    image: localhost:5000/cubeos-app/dashboard:${DASHBOARD_TAG:-latest}
     hostname: cubeos-dashboard
     ports:
       - target: 8087

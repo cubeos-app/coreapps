@@ -9,7 +9,7 @@
 
 services:
   dozzle:
-    image: amir20/dozzle:latest
+    image: localhost:5000/amir20/dozzle:${DOZZLE_TAG:-latest}
     hostname: cubeos-dozzle
     ports:
       - target: 8080

@@ -5,7 +5,7 @@
 
 services:
   cubeos-docsindex:
-    image: ghcr.io/cubeos-app/cubeos-docsindex:latest
+    image: localhost:5000/cubeos-app/cubeos-docsindex:${DOCSINDEX_TAG:-latest}
     ports:
       - target: 8080
         published: 6032

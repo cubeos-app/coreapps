@@ -12,7 +12,7 @@
 
 services:
   cubeos-api:
-    image: ghcr.io/cubeos-app/api:latest
+    image: localhost:5000/cubeos-app/api:${API_TAG:-latest}
     hostname: cubeos-api
     ports:
       - target: 6010

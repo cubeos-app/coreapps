@@ -10,7 +10,7 @@
 
 services:
   kiwix:
-    image: localhost:5000/kiwix/kiwix-serve:3.8.1
+    image: localhost:5000/kiwix/kiwix-serve:${KIWIX_TAG:-3.8.1}
     hostname: cubeos-kiwix
     ports:
       - target: 8080

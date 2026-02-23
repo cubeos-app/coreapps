@@ -8,7 +8,7 @@
 name: cubeos-npm
 services:
   npm:
-    image: jc21/nginx-proxy-manager:latest
+    image: localhost:5000/jc21/nginx-proxy-manager:${NPM_TAG:-latest}
     container_name: cubeos-npm
     hostname: cubeos-npm
     restart: unless-stopped

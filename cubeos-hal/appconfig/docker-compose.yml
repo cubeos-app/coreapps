@@ -8,7 +8,7 @@
 name: cubeos-hal
 services:
   cubeos-hal:
-    image: ghcr.io/cubeos-app/hal:latest
+    image: localhost:5000/cubeos-app/hal:${HAL_TAG:-latest}
     container_name: cubeos-hal
     restart: unless-stopped
     stop_grace_period: 15s

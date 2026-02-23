@@ -10,7 +10,7 @@
 
 services:
   terminal:
-    image: localhost:5000/tsl0922/ttyd:latest
+    image: localhost:5000/tsl0922/ttyd:${TTYD_TAG:-latest}
     container_name: cubeos-terminal
     restart: unless-stopped
     volumes:
