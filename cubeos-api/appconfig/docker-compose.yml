@@ -33,6 +33,8 @@ services:
       - CUBEOS_DB_PATH=/cubeos/data/cubeos.db
       - CUBEOS_HOST_ROOT=/host-root
       - HAL_URL=http://10.42.24.1:6005/hal
+      # HAL API key for authenticated access (from secrets.env, generated on first boot)
+      - HAL_API_KEY=${HAL_CORE_KEY}
     env_file:
       - /cubeos/config/defaults.env
       - /cubeos/config/secrets.env
