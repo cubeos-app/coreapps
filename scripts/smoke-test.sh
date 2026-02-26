@@ -75,6 +75,13 @@ else
     check_fail "1.3 cubeos-network overlay" "missing"
 fi
 
+HAL_NET=$(docker network ls --format '{{.Name}}' 2>/dev/null | grep -c "^hal-internal$" || true)
+if [ "$HAL_NET" -ge 1 ]; then
+    check_pass "1.4 hal-internal overlay exists"
+else
+    check_fail "1.4 hal-internal overlay" "missing"
+fi
+
 # ─── 2. Core Services (HTTP health) ────────────────────────────────────
 section "2. Core Services"
 

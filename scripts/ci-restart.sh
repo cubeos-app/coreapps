@@ -58,6 +58,18 @@ if [ "$NETWORK_SCOPE" = "none" ]; then
   docker network create --driver overlay --attachable --subnet 10.42.25.0/24 cubeos-network
 fi
 
+# --- Ensure hal-internal overlay network ---
+HAL_NET_SCOPE=$(docker network inspect hal-internal --format '{{.Scope}}' 2>/dev/null || echo "none")
+if [ "$HAL_NET_SCOPE" = "local" ]; then
+  echo "Removing local hal-internal (wrong scope)..."
+  docker network rm hal-internal 2>/dev/null || true
+  HAL_NET_SCOPE="none"
+fi
+if [ "$HAL_NET_SCOPE" = "none" ]; then
+  echo "Creating hal-internal overlay (swarm scope)..."
+  docker network create --driver overlay --attachable --subnet 10.42.26.0/24 hal-internal
+fi
+
 # --- Classify apps by deployment type ---
 COMPOSE_APPS=""
 STACK_APPS=""
