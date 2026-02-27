@@ -18,7 +18,8 @@ services:
         mode: host
     environment:
       - TZ=${TZ:-UTC}
-      - API_URL=http://10.42.24.1:6010
+      - API_URL=http://${GATEWAY_IP:-10.42.24.1}:6010
+      - DOCS_URL=http://${GATEWAY_IP:-10.42.24.1}:6032
     env_file:
       - /cubeos/config/defaults.env
     deploy:
