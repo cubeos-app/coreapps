@@ -33,7 +33,7 @@ services:
       - FTLCONF_dns_expandHosts=false
       # --- DHCP range (static infrastructure — set once, never changes at runtime) ---
       # NOTE: dhcp.active is NOT set here. It's managed dynamically:
-      #   - At boot: configure_pihole_dhcp() in cubeos-boot-lib.sh sets it via pihole-FTL --config
+      #   - At boot: configure_pihole_dhcp() in cubeos-boot-lib.sh sets it via Pi-hole v6 REST API
       #   - At runtime: CubeOS API sets it via Pi-hole v6 REST API (PATCH /api/config/dhcp/active)
       # Setting FTLCONF_dhcp_active here would make it read-only in Pi-hole v6,
       # blocking the API from enabling/disabling DHCP per network mode.
@@ -46,7 +46,7 @@ services:
       - FTLCONF_dns_blocking_active=false
       # --- Wildcard DNS: *.cubeos.cube -> 10.42.24.1 ---
       # NOTE: misc.dnsmasq_lines is NOT set here. It's managed dynamically:
-      #   - At boot: configure_pihole_dhcp() sets it via pihole-FTL --config
+      #   - At boot: configure_pihole_dhcp() sets it via Pi-hole v6 REST API
       #     (includes both address=/cubeos.cube/10.42.24.1 AND per-mode
       #      no-dhcp-interface directives)
       #   - At runtime: CubeOS API sets it via Pi-hole v6 REST API
@@ -65,7 +65,7 @@ services:
         reservations:
           memory: 128M
     healthcheck:
-      test: ["CMD", "curl", "-sf", "http://127.0.0.1:6001/admin/"]
+      test: ["CMD", "curl", "-sf", "http://127.0.0.1:6001/api/info/login"]
       interval: 30s
       timeout: 10s
       retries: 3
