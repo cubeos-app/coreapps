@@ -42,7 +42,7 @@ cd "$SYNC_DIR"
 for dir in */; do
   if [ -d "${dir}appconfig" ]; then
     mkdir -p "/cubeos/coreapps/${dir}appconfig"
-    mkdir -p "/cubeos/coreapps/${dir}appdata"
+    mkdir -p "/cubeos/coreapps/${dir}appdata" 2>/dev/null || true
     rsync -a --delete "${dir}appconfig/" "/cubeos/coreapps/${dir}appconfig/"
     if [ -d "${dir}appdata" ]; then
       rsync -a "${dir}appdata/" "/cubeos/coreapps/${dir}appdata/"
