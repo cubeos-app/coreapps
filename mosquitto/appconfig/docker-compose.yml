@@ -5,7 +5,7 @@
 
 services:
   mosquitto:
-    image: localhost:5000/cubeos-app/mosquitto:${MOSQUITTO_TAG:-latest}
+    image: localhost:5000/library/eclipse-mosquitto:${MOSQUITTO_TAG:-latest}
     hostname: cubeos-mosquitto
     ports:
       - target: 1883

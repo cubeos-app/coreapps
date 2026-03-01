@@ -192,6 +192,8 @@ check_stack "cubeos-dashboard" "curl -sf --max-time 5 http://127.0.0.1:6011/"
 check_stack "cubeos-docsindex" "curl -sf --max-time 5 http://127.0.0.1:6032/health"
 check_stack "dozzle"
 check_stack "kiwix"
+check_stack "mosquitto"
+check_stack "meshsat"           "curl -sf --max-time 5 http://127.0.0.1:6050/health"
 
 # ── hostapd ───────────────────────────────────────────────────────────
 if ! systemctl is-active --quiet hostapd 2>/dev/null; then

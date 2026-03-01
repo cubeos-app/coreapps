@@ -18,3 +18,5 @@ Thumbs.db
 # Runtime data (created by containers, not source-controlled)
 */appdata/
 !*/appdata/.gitkeep-readme
+!mosquitto/appdata/config/
+!mosquitto/appdata/config/mosquitto.conf
