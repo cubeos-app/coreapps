@@ -1,0 +1,67 @@
+# Mosquitto MQTT Broker — Message broker for MeshSat gateway bridge
+# DEPLOYMENT: Docker Swarm stack
+# Ports: 6040 (MQTT), 6041 (WebSocket)
+# Deploy: docker stack deploy -c docker-compose.yml --resolve-image=never mosquitto
+
+services:
+  mosquitto:
+    image: localhost:5000/cubeos-app/mosquitto:${MOSQUITTO_TAG:-latest}
+    hostname: cubeos-mosquitto
+    ports:
+      - target: 1883
+        published: 6040
+        protocol: tcp
+        mode: host
+      - target: 9001
+        published: 6041
+        protocol: tcp
+        mode: host
+    volumes:
+      - /cubeos/coreapps/mosquitto/appdata/config:/mosquitto/config:ro
+      - mosquitto-data:/mosquitto/data
+      - mosquitto-log:/mosquitto/log
+    environment:
+      - TZ=${TZ:-UTC}
+    networks:
+      - default
+    deploy:
+      mode: replicated
+      replicas: 1
+      placement:
+        constraints:
+          - node.role == manager
+      resources:
+        limits:
+          memory: 64M
+        reservations:
+          memory: 16M
+      restart_policy:
+        condition: any
+        delay: 5s
+        max_attempts: 3
+        window: 60s
+      update_config:
+        parallelism: 1
+        delay: 10s
+        failure_action: rollback
+      labels:
+        - "cubeos.type=platform"
+        - "cubeos.category=communication"
+        - "cubeos.port=6040"
+        - "cubeos.deployment=swarm"
+        - "cubeos.description=Mosquitto MQTT Broker"
+    healthcheck:
+      test: ["CMD", "mosquitto_sub", "-t", "$$SYS/#", "-C", "1", "-i", "healthcheck", "-W", "3"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+volumes:
+  mosquitto-data:
+  mosquitto-log:
+
+networks:
+  default:
+    external: true
+    name: cubeos-network
