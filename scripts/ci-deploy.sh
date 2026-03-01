@@ -38,17 +38,28 @@ for pidir in /cubeos/coreapps/*/; do
 done
 
 # --- Sync ALL configs (idempotent) ---
+# Per-app sync is best-effort: root-owned directories (created by Docker)
+# may not be writable by the cubeos user. Warn and continue.
 cd "$SYNC_DIR"
+sync_failures=0
 for dir in */; do
   if [ -d "${dir}appconfig" ]; then
-    mkdir -p "/cubeos/coreapps/${dir}appconfig"
+    app="${dir%/}"
+    mkdir -p "/cubeos/coreapps/${dir}appconfig" 2>/dev/null || true
     mkdir -p "/cubeos/coreapps/${dir}appdata" 2>/dev/null || true
-    rsync -a --delete "${dir}appconfig/" "/cubeos/coreapps/${dir}appconfig/"
+    if ! rsync -a --delete "${dir}appconfig/" "/cubeos/coreapps/${dir}appconfig/" 2>/dev/null; then
+      echo "  WARN: could not sync ${app}/appconfig (permission denied, skipping)"
+      sync_failures=$((sync_failures + 1))
+    fi
     if [ -d "${dir}appdata" ]; then
-      rsync -a "${dir}appdata/" "/cubeos/coreapps/${dir}appdata/"
+      rsync -a "${dir}appdata/" "/cubeos/coreapps/${dir}appdata/" 2>/dev/null || \
+        echo "  WARN: could not sync ${app}/appdata (permission denied, skipping)"
     fi
   fi
 done
+if [ "$sync_failures" -gt 0 ]; then
+  echo "  $sync_failures app(s) skipped due to permissions (root-owned directories)"
+fi
 
 # --- Sync defaults.env and image-versions.env ---
 [ -f defaults.env ] && cp defaults.env /cubeos/coreapps/
