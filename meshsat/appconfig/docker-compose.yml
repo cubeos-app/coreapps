@@ -1,0 +1,68 @@
+# MeshSat — Meshtastic + Satellite Gateway
+# DEPLOYMENT: Docker Swarm stack
+# Port: 6050 (REST API + Web UI)
+# Deploy: docker stack deploy -c docker-compose.yml --resolve-image=never meshsat
+
+services:
+  meshsat:
+    image: localhost:5000/cubeos-app/meshsat:${MESHSAT_TAG:-latest}
+    hostname: cubeos-meshsat
+    ports:
+      - target: 6050
+        published: 6050
+        protocol: tcp
+        mode: host
+    volumes:
+      - /cubeos/data:/cubeos/data
+    environment:
+      - TZ=${TZ:-UTC}
+      - MESHSAT_PORT=6050
+      - MESHSAT_DB_PATH=/cubeos/data/meshsat.db
+      - HAL_URL=http://cubeos-hal:6005
+    env_file:
+      - /cubeos/config/defaults.env
+      - /cubeos/config/secrets.env
+    networks:
+      - default
+      - hal-internal
+    deploy:
+      mode: replicated
+      replicas: 1
+      placement:
+        constraints:
+          - node.role == manager
+      resources:
+        limits:
+          memory: 128M
+        reservations:
+          memory: 32M
+      restart_policy:
+        condition: any
+        delay: 5s
+        max_attempts: 3
+        window: 120s
+      update_config:
+        parallelism: 1
+        delay: 10s
+        failure_action: rollback
+      labels:
+        - "cubeos.type=platform"
+        - "cubeos.category=communication"
+        - "cubeos.port=6050"
+        - "cubeos.fqdn=meshsat.cubeos.cube"
+        - "cubeos.deployment=swarm"
+        - "cubeos.description=MeshSat - Meshtastic & Satellite Gateway"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:6050/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
+networks:
+  default:
+    external: true
+    name: cubeos-network
+  hal-internal:
+    external: true
+    name: hal-internal
