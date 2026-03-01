@@ -18,8 +18,10 @@ services:
         mode: host
     environment:
       - TZ=${TZ:-UTC}
-      - API_URL=http://${GATEWAY_IP:-10.42.24.1}:6010
-      - DOCS_URL=http://${GATEWAY_IP:-10.42.24.1}:6032
+      # Use docker_gwbridge gateway — always reachable from Swarm containers
+      # regardless of network mode (AP up/down, wifi_client, eth_client, etc.)
+      - API_URL=http://${DOCKER_HOST_GW:-172.16.1.1}:${API_PORT:-6010}
+      - DOCS_URL=http://${DOCKER_HOST_GW:-172.16.1.1}:${DOCS_INDEXER_PORT:-6032}
     env_file:
       - /cubeos/config/defaults.env
     deploy:
