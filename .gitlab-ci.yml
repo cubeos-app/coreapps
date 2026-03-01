@@ -23,7 +23,7 @@ variables:
   CUBEOS_DOMAIN: "cubeos.cube"
   # Service classification
   COMPOSE_SERVICES: "pihole npm cubeos-hal terminal"
-  STACK_SERVICES: "registry chromadb cubeos-api cubeos-dashboard cubeos-docsindex filebrowser dozzle kiwix ollama"
+  STACK_SERVICES: "registry chromadb cubeos-api cubeos-dashboard cubeos-docsindex filebrowser dozzle kiwix ollama mosquitto meshsat"
 
 validate-compose:
   stage: validate

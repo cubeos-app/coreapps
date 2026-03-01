@@ -83,7 +83,7 @@ for app in $CHANGED_APPS; do
     npm|cubeos-hal|terminal)
       COMPOSE_APPS="$COMPOSE_APPS $app"
       ;;
-    registry|chromadb|cubeos-api|cubeos-dashboard|cubeos-docsindex|filebrowser|dozzle|kiwix|ollama)
+    registry|chromadb|cubeos-api|cubeos-dashboard|cubeos-docsindex|filebrowser|dozzle|kiwix|ollama|mosquitto|meshsat)
       STACK_APPS="$STACK_APPS $app"
       ;;
     *)
