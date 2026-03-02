@@ -98,13 +98,20 @@ echo "Compose apps: ${COMPOSE_APPS:-none}"
 echo "Swarm stacks: ${STACK_APPS:-none}"
 echo "Pi-hole: $HAS_PIHOLE"
 
-# --- Source defaults.env for variable substitution in compose files ---
+# --- Source env files for variable substitution in compose files ---
 if [ -f /cubeos/config/defaults.env ]; then
   set -a
   # shellcheck disable=SC1091
   source /cubeos/config/defaults.env
   set +a
   echo "Sourced defaults.env (GATEWAY_IP=${GATEWAY_IP:-not set})"
+fi
+if [ -f /cubeos/config/secrets.env ]; then
+  set -a
+  # shellcheck disable=SC1091
+  source /cubeos/config/secrets.env
+  set +a
+  echo "Sourced secrets.env"
 fi
 
 # --- Detect docker_gwbridge gateway (runtime override) ---
