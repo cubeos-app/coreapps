@@ -19,7 +19,7 @@ services:
       - MESHSAT_PORT=6050
       - MESHSAT_DB_PATH=/cubeos/data/meshsat.db
       # Use docker_gwbridge gateway — always reachable regardless of network mode
-      - HAL_URL=http://${DOCKER_HOST_GW:-172.16.1.1}:6005
+      - HAL_URL=http://${DOCKER_HOST_GW:-172.16.1.1}:6005/hal
       # HAL API key for authenticated access (from secrets.env, generated on first boot)
       - HAL_API_KEY=${HAL_CORE_KEY}
     env_file:
