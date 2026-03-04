@@ -19,8 +19,7 @@ services:
     container_name: cubeos-meshsat-direct
     restart: unless-stopped
     privileged: true
-    ports:
-      - "6050:6050"
+    network_mode: host
     environment:
       - TZ=${TZ:-UTC}
       - MESHSAT_MODE=direct
