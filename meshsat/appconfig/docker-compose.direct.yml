@@ -1,0 +1,48 @@
+# MeshSat — Direct serial mode (no HAL required for Meshtastic/Iridium)
+# DEPLOYMENT: Docker Compose (NOT Swarm — needs privileged + /dev access)
+#
+# Usage on CubeOS Pi (coexistence with HAL):
+#   1. Uncomment HAL_DISABLE_MESHTASTIC and HAL_DISABLE_IRIDIUM in cubeos-hal compose
+#   2. Recreate HAL:  cd /cubeos/coreapps/cubeos-hal/appconfig && docker compose up -d --force-recreate
+#   3. Stop Swarm MeshSat:  docker service scale meshsat_meshsat=0
+#   4. Start direct:  cd /cubeos/coreapps/meshsat/appconfig && docker compose -f docker-compose.direct.yml up -d
+#
+# To revert back to HAL transport:
+#   1. Stop direct:  docker compose -f docker-compose.direct.yml down
+#   2. Re-comment HAL disable flags, recreate HAL
+#   3. Restart Swarm MeshSat:  docker service scale meshsat_meshsat=1
+
+name: meshsat-direct
+services:
+  meshsat:
+    image: localhost:5000/cubeos-app/meshsat:${MESHSAT_TAG:-latest}
+    container_name: cubeos-meshsat-direct
+    restart: unless-stopped
+    privileged: true
+    ports:
+      - "6050:6050"
+    environment:
+      - TZ=${TZ:-UTC}
+      - MESHSAT_MODE=direct
+      - MESHSAT_PORT=6050
+      - MESHSAT_DB_PATH=/cubeos/data/meshsat.db
+      # Auto-detect USB devices by default; override to pin specific ports:
+      # - MESHSAT_MESHTASTIC_PORT=/dev/ttyACM0
+      # - MESHSAT_IRIDIUM_PORT=/dev/ttyUSB0
+    env_file:
+      - /cubeos/config/defaults.env
+    volumes:
+      - /cubeos/data:/cubeos/data
+      - /dev:/dev
+      - /sys:/sys:ro
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:6050/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    labels:
+      - "cubeos.type=platform"
+      - "cubeos.category=communication"
+      - "cubeos.port=6050"
+      - "cubeos.description=MeshSat - Direct Serial Mode"
