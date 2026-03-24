@@ -74,7 +74,9 @@ services:
       # System access
       - /sys:/sys:rw
       - /proc:/proc:rw
-      - /dev:/dev:rw
+      # NOTE: /dev:/dev:rw removed — use explicit devices: section instead.
+      # Broad /dev mount caused HAL to claim serial ports (ttyUSB0) even when
+      # HAL_DISABLE_IRIDIUM=true, blocking MeshSat standalone serial access.
       
       # Network configuration
       # SECURITY NOTE: These contain credentials (AP passphrase, WiFi passwords).
@@ -121,20 +123,19 @@ services:
       # HAL now uses sysfs for temperature/throttle which works everywhere
     
     devices:
-      # NOTE: With privileged:true + /dev:/dev:rw, all devices are accessible.
-      # These entries document what HAL uses, not restrict access.
+      # Explicit device list — HAL accesses only these devices.
+      # With /dev:/dev:rw removed, this is the actual access boundary.
       # I2C bus (UPS HAT, sensors)
       - /dev/i2c-1:/dev/i2c-1
       # GPIO (Pi 4: gpiochip0, Pi 5: gpiochip4 — HAL autodetects)
       - /dev/gpiochip0:/dev/gpiochip0
       # - /dev/gpiochip4:/dev/gpiochip4  # Pi 5 only — fails on Pi 4
-      - /dev/gpiomem:/dev/gpiomem
+      # - /dev/gpiomem:/dev/gpiomem  # Pi 4 only — does not exist on Pi 5
       # Hardware watchdog
       - /dev/watchdog:/dev/watchdog
       # RTC
       - /dev/rtc0:/dev/rtc0
-      # VideoCore (for future use if needed)
-      - /dev/vchiq:/dev/vchiq
+      # - /dev/vchiq:/dev/vchiq  # Pi 4 only — does not exist on Pi 5
     
     healthcheck:
       test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:6005/health"]
