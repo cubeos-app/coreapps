@@ -25,6 +25,11 @@ services:
       - MESHSAT_MODE=direct
       - MESHSAT_PORT=6050
       - MESHSAT_DB_PATH=/cubeos/data/meshsat.db
+      # Reticulum TCP interface — set in defaults.env per device:
+      #   MESHSAT_TCP_LISTEN=0.0.0.0:4242   (accept inbound peers)
+      #   MESHSAT_TCP_CONNECT=<peer>:4242    (connect to remote bridge)
+      - MESHSAT_TCP_LISTEN=${MESHSAT_TCP_LISTEN:-}
+      - MESHSAT_TCP_CONNECT=${MESHSAT_TCP_CONNECT:-}
       # Auto-detect USB devices by default; override to pin specific ports:
       # - MESHSAT_MESHTASTIC_PORT=/dev/ttyACM0
       # - MESHSAT_IRIDIUM_PORT=/dev/ttyUSB0
