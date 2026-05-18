@@ -1,0 +1,98 @@
+{
+  "feature_id": "001-compose-stack-orchestration",
+  "_cgc_verified_at": "2026-05-18",
+  "parent_epic": "MESHSAT-XXX",
+  "spec_revision": "1 (2026-05-18 — initial retrospective CGC-grounded spec)",
+  "tasks": [
+    {
+      "id": "T-001",
+      "status": "completed",
+      "title": "Compose-file convention + 13 coreapp shipments",
+      "prompt": "(RETROSPECTIVE — shipped.) 13 coreapp dirs each carrying appconfig/docker-compose.yml referencing localhost:5000/cubeos-app/<name>:${<NAME>_TAG:-latest}. defaults.env + image-versions.env at repo root.",
+      "files_owned": [
+        "defaults.env",
+        "image-versions.env"
+      ],
+      "_files_owned_note": "13 per-coreapp compose files NOT listed individually here — covered by smoke-test verifying all of them",
+      "acceptance_test": "bash scripts/smoke-test.sh --check-only",
+      "dependencies": [],
+      "parallelizable": true,
+      "bounded_context": "scripts",
+      "requirement_ids": ["REQ-001", "REQ-002", "REQ-003", "REQ-019", "REQ-020", "REQ-022"],
+      "complexity": 3,
+      "risk_score": 0.2,
+      "max_wall_clock_minutes": 60,
+      "max_loc_delta": 300,
+      "completed_at": "2026-03",
+      "observability": {
+        "no_observability_required": "config + compose files — runtime metrics come from each coreapp's own exporter"
+      }
+    },
+    {
+      "id": "T-002",
+      "status": "completed",
+      "title": "Smoke test as DoD gate (CI + local)",
+      "prompt": "(RETROSPECTIVE — shipped.) scripts/smoke-test.sh + scripts/ci-deploy.sh + scripts/ci-restart.sh. Smoke validates yaml, localhost prefix, healthchecks, volume paths, defaults/secrets overlap.",
+      "files_owned": [
+        "scripts/smoke-test.sh",
+        "scripts/ci-deploy.sh",
+        "scripts/ci-restart.sh"
+      ],
+      "acceptance_test": "shellcheck scripts/smoke-test.sh scripts/ci-deploy.sh scripts/ci-restart.sh",
+      "dependencies": ["T-001"],
+      "parallelizable": false,
+      "bounded_context": "scripts",
+      "requirement_ids": ["REQ-004", "REQ-005", "REQ-006", "REQ-007", "REQ-008", "REQ-009", "REQ-010", "REQ-011", "REQ-012", "REQ-021"],
+      "complexity": 4,
+      "risk_score": 0.3,
+      "max_wall_clock_minutes": 120,
+      "max_loc_delta": 500,
+      "completed_at": "2026-03",
+      "observability": {
+        "prometheus_metrics": [
+          "cubeos_coreapps_smoke_test_runs_total",
+          "cubeos_coreapps_smoke_test_failures_total"
+        ],
+        "slo_targets": {
+          "p95_latency_ms": 10000,
+          "_notes": "smoke-test runs on PR + on Pi pre-deploy"
+        },
+        "_notes": "Retrospective — metrics emitted from CI logs today, not yet from a Prom exporter"
+      }
+    },
+    {
+      "id": "T-003",
+      "status": "completed",
+      "title": "Self-healing watchdog (systemd timer + cooldown)",
+      "prompt": "(RETROSPECTIVE — shipped.) cubeos-watchdog.{service,timer} + watchdog-health.sh + install-watchdog.sh. 5-min cadence, 2-consecutive-failure trigger, 15-min cooldown after force-restart.",
+      "files_owned": [
+        "scripts/cubeos-watchdog.service",
+        "scripts/cubeos-watchdog.timer",
+        "scripts/watchdog-health.sh",
+        "scripts/install-watchdog.sh"
+      ],
+      "acceptance_test": "shellcheck scripts/watchdog-health.sh scripts/install-watchdog.sh",
+      "dependencies": ["T-002"],
+      "parallelizable": false,
+      "bounded_context": "scripts",
+      "requirement_ids": ["REQ-013", "REQ-014", "REQ-015", "REQ-016", "REQ-017", "REQ-018"],
+      "complexity": 4,
+      "risk_score": 0.3,
+      "max_wall_clock_minutes": 120,
+      "max_loc_delta": 500,
+      "completed_at": "2026-03",
+      "observability": {
+        "prometheus_metrics": [
+          "cubeos_coreapps_watchdog_runs_total",
+          "cubeos_coreapps_watchdog_force_restarts_total",
+          "cubeos_coreapps_service_replicas_healthy"
+        ],
+        "slo_targets": {
+          "p95_latency_ms": 8000,
+          "_notes": "watchdog scan time across all 13 coreapps"
+        },
+        "_notes": "Watchdog emits metrics today via node_exporter textfile; concrete names pending"
+      }
+    }
+  ]
+}

@@ -1,0 +1,37 @@
+{
+  "slug": "cubeos-coreapps",
+  "title": "CubeOS Coreapps — Docker Swarm stack orchestrator",
+  "youtrack_prefix": "MESHSAT",
+  "youtrack_disambiguator": "tag:coreapps OR summary contains 'coreapp' / 'swarm' / 'watchdog'",
+  "matrix_room": "!iXTnQsFJahUquYPDdG:matrix.nuclearlighters.net",
+  "primary_language": "shell",
+  "test_command": "shellcheck scripts/*.sh && bash scripts/smoke-test.sh --check-only",
+  "lint_command": "shellcheck scripts/*.sh",
+  "build_command": "echo 'no build — compose files are the artefact'",
+  "ci_pipeline": ".gitlab-ci.yml",
+  "parent_project": {
+    "slug": "cubeos",
+    "project_id": 16,
+    "spec_home": "/home/claude-runner/gitlab/products/cubeos/docs",
+    "note": "Track A of CubeOS — the bundled docker-compose / Swarm stacks. Pulled from registry, deployed by releases firstboot, consumed by hal + api."
+  },
+  "bounded_contexts": [
+    "cubeos-api", "cubeos-dashboard", "cubeos-docsindex", "cubeos-hal",
+    "chromadb", "dozzle", "filebrowser", "kiwix", "meshsat", "mosquitto",
+    "npm", "ollama", "pihole", "registry", "terminal", "scripts"
+  ],
+  "_bounded_contexts_note": "Each entry maps 1:1 to a top-level subdir under coreapps/ (each containing appconfig/docker-compose.yml).",
+  "max_parallel_workers": 2,
+  "owners": [
+    {"name": "Kyriakos Papadopoulos", "email": "ncpjfuzl@mxmx.email", "role": "lead"}
+  ],
+  "risk_profile": "platform-orchestration",
+  "security_posture": "LAN-only inside CubeOS box; compose files reference localhost:5000 ONLY (parent Article XIV); watchdog enforces health + restart per Article C-IV below; no direct internet exposure (each coreapp exposes via its own port + npm reverse proxy)",
+  "surfaces": {
+    "http_api": false,
+    "events": false,
+    "persistent_data": false
+  },
+  "_surfaces_note": "Coreapps is a config + orchestration repo — no HTTP API of its own (each coreapp's compose file exposes its service's port). No event bus. Persistent volumes mounted into coreapps live OUTSIDE this repo at /cubeos/data/.",
+  "_sdd_tier_adoption": "Tier 0-6 (2026-05-18 onboarding wave)"
+}
